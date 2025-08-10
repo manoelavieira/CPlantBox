@@ -31,11 +31,54 @@ def plot_leaf(leaf):
     actor.GetProperty().SetColor(colors.GetColor3d("Green"))
     render_window([actor], "plot_plant", [], [-10, 10, -10, 10, -10, 10]).Start()
 
+def save_png(render_window, path, magnification=1, with_alpha=False):
+    w2i = vtk.vtkWindowToImageFilter()
+    w2i.SetInput(render_window)
+    w2i.SetScale(int(magnification))
 
-def plot_plant(plant, p_name, render = True, interactiveImage = True):
+    if with_alpha:
+        w2i.SetInputBufferTypeToRGBA()
+    else:
+        w2i.SetInputBufferTypeToRGB()
+
+    w2i.ReadFrontBufferOff()
+    w2i.Update()
+
+    writer = vtk.vtkPNGWriter()
+    writer.SetFileName(str(path))
+    writer.SetInputConnection(w2i.GetOutputPort())
+    writer.Write()
+
+def plot_plant(plant, p_name, render=True, interactiveImage=True, save_path=None):
     """
-        @param interactiveImage         make image interactive or static (should be static for google Colab)
-        plots a whole plant as a tube plot, and additionally plot leaf surface areas as polygons
+    Generates a 3D visualization of a plant using VTK, including roots/stems (as tubes)
+    and leaves (as polygons), with options for interactive rendering, offscreen rendering,
+    and saving the result to a file.
+
+    Parameters:
+        plant (pb.Organism | pb.MappedSegments | pb.SegmentAnalyser):
+            Object containing the plant geometry and parameters to be plotted.
+        p_name (str):
+            Name of the scalar parameter used to color the geometry (e.g., "organType", "radius").
+        render (bool, default=True):
+            If True, render the scene; if False, only build and return the actors and color bar.
+        interactiveImage (bool, default=True):
+            If True, opens an interactive rendering window.
+            If False, performs offscreen rendering without opening a window.
+            Ignored when render=False.
+        save_path (str | None, default=None):
+            Path to save the rendered image as PNG.
+            Used only if render=True and interactiveImage=False.
+
+    Behavior:
+        - render=False -> does not render.
+        - render=True and interactiveImage=True -and save_path=None/"..." > opens interactive window (rotation/zoom/keyboard shortcuts).
+        - render=True and interactiveImage=False and save_path=None -> renders offscreen without saving.
+        - render=True and interactiveImage=False and save_path="..." -> renders offscreen and saves PNG.
+
+    Returns:
+        tuple: ([vtkActor, vtkActor], vtkScalarBarActor)
+            List of actors (tube plot of plant, leaves) and the associated scalar color bar.
     """
     # plant as tube plot
     if isinstance(plant, pb.MappedSegments):
@@ -89,10 +132,19 @@ def plot_plant(plant, p_name, render = True, interactiveImage = True):
     colors = vtk.vtkNamedColors()
     actor.GetProperty().SetColor(colors.GetColor3d("Green"))
 
-    if render:
-        ren = render_window([tube_plot_actor, actor], "plot_plant", color_bar, tube_plot_actor.GetBounds(), interactiveImage)
-        if interactiveImage:
-            ren.Start()
+    if not render:
+        return [tube_plot_actor, actor], color_bar
+    else:
+        ren_or_win = render_window([tube_plot_actor, actor], "plot_plant",
+                                   color_bar, tube_plot_actor.GetBounds(),
+                                   interactiveImage)
+
+    if interactiveImage:
+        ren_or_win.Start()
+    else:
+        # ren_or_win é o vtkRenderWindow já renderizado offscreen
+        if save_path is not None:
+            save_png(ren_or_win, save_path, magnification=2)
 
     return [tube_plot_actor, actor], color_bar
 
@@ -316,23 +368,10 @@ def render_window(actor, title, scalarBar, bounds, interactiveImage = True):
             a.Modified()  #
         renWin.Render()
         return iren
-    else:  # necessary?
-        renWin.SetOffScreenRendering(1)
-        renWin.SetDeviceIndex(0)
-        renWin.SetShowWindow(True)
-        windowToImageFilter = vtk.vtkWindowToImageFilter()
-        windowToImageFilter.SetInput(renWin)
-        windowToImageFilter.Update()
-
-        writer = vtk.vtkJPEGWriter()
-        writer.SetQuality(80)
-        writer.SetWriteToMemory(1)
-        writer.SetInputConnection(windowToImageFilter.GetOutputPort())
-        writer.Write()
-
-        # move this somewhere else?
-        im = Image(writer.GetResult(), format = "jpeg")
-        display(im)
+    else:
+        renWin.SetOffScreenRendering(True)
+        renWin.Render()
+        return renWin
 
 
 def keypress_callback_(obj, ev, bounds):

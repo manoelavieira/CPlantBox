@@ -89,7 +89,6 @@ def plot_plant(plant, p_name, render=True, interactiveImage=True, save_path=None
         setLeafColor = True
     else:
         ana = plant
-    print('plot_plant: ana', ana, type(ana))
     pd = segs_to_polydata(ana, 1., ["radius", "organType", "creationTime", p_name])  # poly data
     tube_plot_actor, color_bar, lut = plot_roots(pd, p_name, "", render = False, returnLut = True)
 

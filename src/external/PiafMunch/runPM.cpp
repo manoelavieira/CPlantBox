@@ -312,7 +312,7 @@ void OutputSettings()  {
 		OutputTimes[i+1] = OutputTimes[i] + pas ;
 	}
 	OutputTimes[nbv + 1] = tf;
-	if(Breakpoint_index[Breakpoint_index.size()]  != OutputTimes.size())  Breakpoint_index.append(Index_vector(1, OutputTimes.size())) ;
+	if(Breakpoint_index(Breakpoint_index.size())  != OutputTimes.size())  Breakpoint_index.append(Index_vector(1, OutputTimes.size())) ;
 	//cout << "Output times :" << endl ; for(i=0 ; i < OutputTimes.size() ; i ++) cout << " " <<  OutputTimes[i+1] ; // if newly inserted extra output time (just after breakpoint) is too close, it may print as the same but actually is not
 	nbv = OutputTimes.size() - 1 ; // at this point,  output times vector truc = OutputTimes ; and Breakpoint_index = {1, [...,] nbv+1}  with  [...,] = extra breakpoints indices (empty if none)
 	

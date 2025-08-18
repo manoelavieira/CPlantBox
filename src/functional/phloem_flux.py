@@ -1,6 +1,5 @@
 import timeit
 
-
 import numpy as np
 import json
 
@@ -9,78 +8,94 @@ from plantbox import PhloemFlux
 from functional.Photosynthesis import PhotosynthesisPython 
 
 
-
 class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
-    """  wrapper for photosynthesis
-       
-    """
+    """ Wrapper that couples photosynthesis and phloem carbon fluxes. """
 
     def __init__(self, plant_, params, psiXylInit, ciInit):
-        """ @param mp is a pb.MappedPlant
-            @param params are the hydraulic parameters
-            @param psiXylInit [cm] is the initial guess of plant water potential [cm] for the fixed point iteration
-            @param ciInit [mol mol-1] is the initial guess of leaf air CO2 partial pressure [-] for the fixed point iteration            
         """
-        PhloemFlux.__init__( self,plant_,params, psiXylInit, ciInit)
-        PhotosynthesisPython.__init__( self,plant_, params, psiXylInit, ciInit)
+        Parameters
+        ----------
+        :param plant: pb.MappedPlant
+        :param params: hydraulic parameters
+        :param psiXylInit: Initial guess of plant water potential [cm] for fixed point iteration.
+        :param ciInit: Initial guess of leaf internal CO2 partial pressure [-].
+        """
+        
+        PhloemFlux.__init__(self, plant_, params, psiXylInit, ciInit)
+        PhotosynthesisPython.__init__(self, plant_, params, psiXylInit, ciInit)
         self.reset()
         # self.update_outputs()
         
-    def reset(self): # TODO: check
-        self.Q_Rm      = np.array([])
-        self.Q_Gr      = np.array([])
-        self.Q_Exud    = np.array([])
-        self.Q_ST      = np.array([])
-        self.C_ST_np   = np.array([])    
-        self.Q_meso    = np.array([])   
-        self.C_meso    = np.array([])  
-        self.Q_out = self.Q_out * 0
-        self.Nt   = len(self.plant.nodes)
-        self.Q_Rmbu      = np.array([])
-        self.Q_Grbu      = np.array([])
-        self.Q_Exudbu    = np.array([])
-        self.Q_STbu    = np.array([])
-        self.Q_mesobu    = np.array([])
+    def reset(self):
+        """ Initialize state and 'previous-step' buffers """
+        self.Nt = len(self.plant.nodes)
+
+        # Current totals
+        self.Q_Rm = np.array([])
+        self.Q_Gr = np.array([])
+        self.Q_Exud = np.array([])
+        self.Q_ST = np.array([])
+        self.C_ST_np = np.array([])    
+        self.Q_meso = np.array([])   
+        self.C_meso = np.array([])
+
+        # Previous-step buffers
+        self.Q_Rmbu = np.array([])
+        self.Q_Grbu = np.array([])
+        self.Q_Exudbu = np.array([])
+        self.Q_STbu = np.array([])
+        self.Q_mesobu = np.array([])
         self.Ntbu = 0
-        self.Q_ST_i        = np.array([])
-        self.Q_Rm_i        = np.array([])
-        self.Q_Gr_i        = np.array([])
-        self.Q_Exud_i      = np.array([])
+
+        # Per-step increments
+        self.Q_ST_i = np.array([])
+        self.Q_Rm_i = np.array([])
+        self.Q_Gr_i = np.array([])
+        self.Q_Exud_i = np.array([])
                 
-    def solve_phloem_flow(self, simDuration, dt, TairC, verbose = False, outputfile = "outputs.txt" ):
-        self.startPM(simDuration, simDuration + dt, 1, ( TairC + 273.15) , verbose, outputfile )
-        self.Nt = len(self.plant.nodes)        
-        Q_out = np.array(self.Q_out) * 1e-3 * 12 # mmol Suc => mol C
-        self.Q_ST    = np.array(Q_out[0:self.Nt])          #sieve tube sucrose content
-        self.Q_meso  = np.array(Q_out[self.Nt:(self.Nt*2)])     #mesophyll sucrose content
-        self.Q_Rm    = np.array(Q_out[(self.Nt*2):(self.Nt*3)]) #sucrose used for maintenance respiration
-        self.Q_Exud  = np.array(Q_out[(self.Nt*3):(self.Nt*4)]) #sucrose used for exudation
-        self.Q_Gr    = np.array(Q_out[(self.Nt*4):(self.Nt*5)]) #sucrose used for growth and growth respiration
+        self.Q_out = self.Q_out * 0
+
+    def solve_phloem_flow(self, simDuration, dt, TairC, verbose=False, outputfile="outputs.txt" ):
+        """ Advance phloem-carbon model by one step of size `dt` (days) """
         
-        #self.Ntbu = len(self.Q_STbu)
-        self.Q_STbu       =   np.concatenate((self.Q_STbu, np.full(self.Nt - self.Ntbu, 0.)))
-        self.Q_Rmbu       =   np.concatenate((self.Q_Rmbu, np.full(self.Nt - self.Ntbu, 0.)))
-        self.Q_Grbu       =   np.concatenate((self.Q_Grbu, np.full(self.Nt - self.Ntbu, 0.))) 
-        self.Q_Exudbu     =   np.concatenate((self.Q_Exudbu, np.full(self.Nt - self.Ntbu, 0.))) 
+        self.startPM(simDuration, simDuration+dt, 1, (TairC+273.15), verbose, outputfile)
+
+        # Node count may change (growth)
+        self.Nt = len(self.plant.nodes)     
+        
+        Q_out = np.array(self.Q_out) * 1e-3 * 12 # mmol Suc -> mol C
+        self.Q_ST = np.array(Q_out[0:self.Nt]) # sieve tube sucrose content
+        self.Q_meso = np.array(Q_out[self.Nt:(self.Nt*2)]) # mesophyll sucrose content
+        self.Q_Rm = np.array(Q_out[(self.Nt*2):(self.Nt*3)]) # sucrose used for maintenance respiration
+        self.Q_Exud = np.array(Q_out[(self.Nt*3):(self.Nt*4)]) # sucrose used for exudation
+        self.Q_Gr = np.array(Q_out[(self.Nt*4):(self.Nt*5)]) # sucrose used for growth and growth respiration
+        
+        # self.Ntbu = len(self.Q_STbu)
+        self.Q_STbu = np.concatenate((self.Q_STbu, np.full(self.Nt - self.Ntbu, 0.)))
+        self.Q_Rmbu = np.concatenate((self.Q_Rmbu, np.full(self.Nt - self.Ntbu, 0.)))
+        self.Q_Grbu = np.concatenate((self.Q_Grbu, np.full(self.Nt - self.Ntbu, 0.))) 
+        self.Q_Exudbu = np.concatenate((self.Q_Exudbu, np.full(self.Nt - self.Ntbu, 0.))) 
             
-        self.Q_ST_i        = self.Q_ST      - self.Q_STbu #in the sieve tubes
-        self.Q_Rm_i        = self.Q_Rm      - self.Q_Rmbu #for maintenance
-        self.Q_Gr_i        = self.Q_Gr      - self.Q_Grbu #for growth
-        self.Q_Exud_i      = self.Q_Exud    - self.Q_Exudbu #for exudation
-        #self.Q_out_i       = self.Q_Rm_i    + self.Q_Exud_i      + self.Q_Gr_i #total usage
+        self.Q_ST_i = self.Q_ST - self.Q_STbu # in the sieve tubes
+        self.Q_Rm_i = self.Q_Rm - self.Q_Rmbu # for maintenance
+        self.Q_Gr_i = self.Q_Gr - self.Q_Grbu # for growth
+        self.Q_Exud_i = self.Q_Exud - self.Q_Exudbu # for exudation
+        # self.Q_out_i = self.Q_Rm_i + self.Q_Exud_i + self.Q_Gr_i # total usage
                     
-        volST   = np.array(self.vol_ST)         #sieve tube volume
-        volMeso   = np.array(self.vol_Meso)      #mesophyll volume  
-        self.C_ST_np    = np.array(self.C_ST)    
-        self.C_meso  = self.Q_meso/volMeso  
+        volST = np.array(self.vol_ST) # sieve tube volume
+        volMeso = np.array(self.vol_Meso) # mesophyll volume  
+        self.C_ST_np = np.array(self.C_ST)    
+        self.C_meso = self.Q_meso/volMeso  
         
         self.Ntbu = self.Nt
-        self.Q_STbu       =   self.Q_ST.copy()
-        self.Q_Rmbu       =   self.Q_Rm.copy()
-        self.Q_Grbu       =   self.Q_Gr.copy() 
-        self.Q_Exudbu     =   self.Q_Exud.copy()
+        self.Q_STbu = self.Q_ST.copy()
+        self.Q_Rmbu = self.Q_Rm.copy()
+        self.Q_Grbu = self.Q_Gr.copy() 
+        self.Q_Exudbu = self.Q_Exud.copy()
     
-    def update_outputs(self):    
+    def update_outputs(self):
+        """ (Re)build output dictionaries from current state """    
+        
         self.outputs_options = {
                 "sieve tube concentration":self.C_ST_np, 
                 "sieve tube content":self.Q_ST, 
@@ -98,10 +113,13 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
                 "exudation":self.Q_Exud_i, 
                 "growth":self.Q_Gr_i}
         
-    def get_phloem_data_list(self): # TODO: complete
-        return self.outputs_options.keys()
+    def get_phloem_data_list(self):
+        """ Return a sorted list of valid keys for `get_phloem_data()` """
+        self.update_outputs()
+        return sorted(self.outputs_options.keys())
         
-    def get_phloem_data(self, data, last = False, doSum = False):
+    def get_phloem_data(self, data, last=False, doSum=False):
+        """ Return array (per-node) or scalar (if doSum=True) for the selected output """
         self.update_outputs()
         if last:
             outputs = self.outputs_options_last[data]
@@ -110,22 +128,24 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
         if doSum:
             outputs = sum(outputs)
         return outputs
-        
     
-    def getPsiAir(self,RH, TairC):#constants are within photosynthesys.h
-        return np.log(RH) * self.rho_h2o * self.R_ph * (TairC + 237.3)/self.Mh2o * (1/0.9806806)  ; #in cm
+    def getPsiAir(self, RH, TairC): # constants are within photosynthesys.h
+        """ Air water potential [cm]. Constants defined in Photosynthesis """
+        return np.log(RH) * self.rho_h2o * self.R_ph * (TairC+237.3)/self.Mh2o * (1/0.9806806); # in cm
      
     def get_nodes(self):
-        """ converts the list of Vector3d to a 2D numpy array """
+        """ Convert the list of Vector3d to a 2D (N,3) numpy array """
         return np.array(list(map(lambda x: np.array(x), self.rs.nodes)))
 
     def get_segments(self):
-        """ converts the list of Vector2i to a 2D numpy array """
+        """ converts the list of Vector2i to a 2D (M, 2) numpy array """
         return np.array(list(map(lambda x: np.array(x), self.rs.segments)), dtype = np.int64)
 
     def get_ages(self, final_age = 0.):
-        """ converts the list of nodeCT to a numpy array of segment ages
-        @param final_age [day]         current root system age, (default = 0 means detect from nodeCT)
+        """ 
+        Convert the list of nodeCT to a numpy array of segment ages
+
+        :param day final_age: current root system age (default = 0 means detect from nodeCT)
         """
         cts = np.array(self.rs.nodeCTs)
         if final_age == 0.:
@@ -134,7 +154,7 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
         return ages[1:]  # segment index is node index-1
 
     def get_nodes_index(self, ot):
-        """ return node indices of segments with organ type @param ot """
+        """ Return unique node indices for segments with organ type `ot` """
         segments = self.get_segments()
         nodes = self.get_nodes()
         organTypes = self.get_organ_types()
@@ -145,27 +165,27 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
         return nodesidx
 
     def get_nodes_organ_type(self, ot):
-        """ return node coordinates of segments with organ type @param ot """
+        """ Return node coordinates of segments with organ type `ot` """
         nodes = self.get_nodes()
         return nodes[self.get_nodes_index(ot)]
 
     def get_segments_index(self, ot):
-        """ return node indices of organ type @param ot """
+        """ Return segment indices with organ type `ot` """
         organTypes = self.get_organ_types()
         segIdx = np.array(list(range(0, len(organTypes))))
         otsegs = segIdx[organTypes == ot]
         return otsegs
 
     def get_organ_types(self):
-        """ segment organ types as numpy array """
+        """ Segment organ types as numpy array """
         return np.array(self.rs.organTypes)
 
     def get_subtypes(self):
-        """ segment sub types as numpy array """
+        """ Segment sub types as numpy array """
         return np.array(self.rs.subTypes)
 
     def get_organ_nodes_tips(self):
-        """ return index of nodes at the end of each organ """
+        """ Return index of nodes at the end of each organ """
         organTypes = self.get_organ_types()
         segments = self.get_segments()
         get_y_node = lambda vec: vec[1]
@@ -181,7 +201,7 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
         return tiproots, tipstem, tipleaf
 
     def get_organ_segments_tips(self):
-        """ return index of segments at the end of each organ """
+        """ Return index of segments at the end of each organ """
         tiproots, tipstems, tipleaves = self.get_organ_nodes_tips()
         tiproots = tiproots - np.ones(tiproots.shape, dtype = np.int64)  # segIndx = seg.y -1
         tipstems = tipstems - np.ones(tipstems.shape, dtype = np.int64)  # segIndx = seg.y -1
@@ -189,8 +209,8 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
         return tiproots, tipstems, tipleaves
 
     def get_suf(self, sim_time):
-        """ calculates the surface uptake fraction [1] of the root system at simulation time @param sim_time [day]
-            (suf is constant for age independent conductivities)  """
+        """ Calculate the surface uptake fraction [1] of the root system at simulation time `sim_time`[day]
+            (suf is constant for age independent conductivities) """
         segs = self.rs.segments
         nodes = self.rs.nodes
         p_s = np.zeros((len(segs),))
@@ -203,7 +223,7 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
         return np.array(fluxes) / -1.e5  # [1]
 
     def get_mean_suf_depth(self, sim_time):
-        """  mean depth [cm] of water uptake based suf """
+        """  Mean depth [cm] of water uptake based suf """
         suf = self.get_suf(sim_time)
         segs = self.rs.segments
         nodes = self.rs.nodes
@@ -214,7 +234,7 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
         return z_
 
     def find_base_segments(self):
-        """ return all segment indices emerging from intial nodes given in self.dirichlet_ind
+        """ Return all segment indices emerging from intial nodes given in `self.dirichlet_ind`
         (slow for large root systesms)
         """
         s_ = []
@@ -226,8 +246,10 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
         return s_
 
     def get_krs(self, sim_time, seg_ind = [0]):
-        """ calculatets root system conductivity [cm2/day] at simulation time @param sim_time [day] 
-        if there is no single collar segment at index 0, pass indices using @param seg_ind, see find_base_segments        
+        """ 
+        Calculate root system conductivity [cm2/day] at simulation time `sim_time`[day] 
+        
+        If there is no single collar segment at index 0, pass indices using `seg_ind`, see `find_base_segments`        
         """
         segs = self.rs.segments
         nodes = self.rs.nodes
@@ -242,8 +264,10 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
         return krs , jc
 
     def get_eswp(self, sim_time, p_s):
-        """ calculates the equivalent soil water potential [cm] at simulation time @param sim_time [day] for 
-        the soil matric potential @param p_s [cm] given per cell """
+        """
+        Calculate the equivalent soil water potential [cm] at simulation time `sim_tim`[day] for 
+        the soil matric potential `p_s`[cm] given per cell
+        """
         segs = self.rs.segments
         nodes = self.rs.nodes
         seg2cell = self.rs.seg2cell
@@ -254,15 +278,15 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
         return eswp
 
     def kr_f(self, age, st, ot = 2 , numleaf = 2, seg_ind = 0):
-        """ root radial conductivity [1 day-1] for backwards compatibility """
+        """ Root radial conductivity [1 day-1] for backwards compatibility """
         return self.kr_f_cpp(seg_ind, age, st, ot, numleaf)  # kr_f_cpp is XylemFlux::kr_f
 
     def kx_f(self, age, st, ot = 2, seg_ind = 0):
-        """ root axial conductivity [cm3 day-1]  for backwards compatibility """
+        """ Root axial conductivity [cm3 day-1]  for backwards compatibility """
         return self.kx_f_cpp(seg_ind, age, st, ot)  # kx_f_cpp is XylemFlux::kx_f
             
     def write_phloem_parameters(self, filename="phloem_parameters"):
-        """Write phloem flow module parameters to a JSON file."""
+        """ Write phloem flow module parameters to a JSON file """
         parameters = {
             "InitialValues": {
                 "initValST": {"value": self.initValST, "description": "Initial concentration in sieve tube"},
@@ -329,7 +353,7 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
             json.dump(parameters, f)
 
     def read_phloem_parameters(self, filename):
-        """Read phloem flow module parameters from a JSON file."""
+        """ Read phloem flow module parameters from a JSON file """
         with open(filename + ".json", "r") as f:
             parameters = json.load(f)
 

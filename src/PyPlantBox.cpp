@@ -1228,7 +1228,13 @@ PYBIND11_MODULE(plantbox, m) {
             .def_readwrite("Rmax_st",&PhloemFlux::Rmax_st)
             .def_readwrite("rhoSucrose",&PhloemFlux::rhoSucrose)
             .def_readwrite("krm1v",&PhloemFlux::krm1v)
-            .def_readwrite("krm2v",&PhloemFlux::krm2v);
+            .def_readwrite("krm2v",&PhloemFlux::krm2v)
+            // PINN dataset
+            .def_readwrite("len_leaf", &PhloemFlux::len_leafv)
+            .def_readwrite("Delta_JS_ST", &PhloemFlux::Delta_JS_STv)
+            .def_readwrite("C_amont", &PhloemFlux::C_amontv)
+            .def_readwrite("Delta2", &PhloemFlux::Delta2v)
+            .def_readwrite("Delta", &PhloemFlux::Deltav);
 
     py::class_<PlantVisualiser, std::shared_ptr<PlantVisualiser>>(m, "PlantVisualiser")
         .def(py::init<>())

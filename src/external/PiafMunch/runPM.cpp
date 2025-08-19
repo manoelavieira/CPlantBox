@@ -171,6 +171,9 @@ list<int>::iterator it, itk ; list<Fortran_vector*>::iterator itv ; list<string>
 Fortran_vector* FV ; Fortran_matrix* FM ; string QS ;
 bool AutoQuit(false); // will be TRUEd if launched with '-q' (which will also disable Plotting)
 
+extern Fortran_vector Delta_JS_ST;
+extern SpUnit_matrix Delta;
+extern SpUnit_matrix Delta2;
 
 int PhloemFlux::startPM(double StartTime, double EndTime, int OutputStep,double TairK, bool verbose, std::string filename) {
 	//std::string nametroubleshootingfile = "outputPM"+"_"+ std::to_string(simTime)+".txt"
@@ -284,14 +287,22 @@ int PhloemFlux::startPM(double StartTime, double EndTime, int OutputStep,double 
 	{
 		this->Q_out_dotv[j-1] = y_dot[j] ; 
 	}
+
+	// Convert 1-based -> 0-based
 	this->C_STv = C_ST.toCppVector();
 	this->vol_STv = vol_ST.toCppVector();
 	this->Q_Grmaxv = Q_Grmax.toCppVector();
 	this->Q_Exudmaxv = Q_Exudmax.toCppVector();
-	this->Q_Rmmaxv = Q_Rmmax.toCppVector() ;
-	this->Flv = Input.toCppVector() ;
-	this->r_STv = r_ST.toCppVector() ;
-	this->JW_STv = JW_ST.toCppVector() ;
+	this->Q_Rmmaxv = Q_Rmmax.toCppVector();
+	this->Flv = Input.toCppVector();
+	this->r_STv = r_ST.toCppVector();
+	this->JW_STv = JW_ST.toCppVector();
+	this->len_leafv = len_leaf.toCppVector();
+	this->Delta_JS_STv = Delta_JS_ST.toCppVector();
+	this->C_amontv = C_amont.toCppVector();
+	this->Delta2v = Delta2.toCppVector();
+	this->Deltav = Delta.toCppVector();
+
 	if(doTroubleshooting){
 		std::cout<<"computeOrgGrowth"<<std::endl;
 	}

@@ -226,7 +226,14 @@ class PhloemFlux: public CPlantBox::Photosynthesis, public std::enable_shared_fr
 	std::vector<std::vector<double>> rhoSucrose;
 	std::vector<std::vector<double>> krm1v; 
 	std::vector<std::vector<double>> krm2v;
-	
+
+	// For python side
+	std::vector<double> len_leafv;
+	std::vector<double> Delta_JS_STv;
+	std::vector<double> C_amontv;
+	std::vector<double> Deltav;
+	std::vector<double> Delta2v;
+
 	// solver and other
 	double atol_double = 1e-017;//max absolute error
 	double rtol_double = 1e-023;//max realtive error

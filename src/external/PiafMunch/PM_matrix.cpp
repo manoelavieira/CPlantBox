@@ -177,3 +177,50 @@ Fortran_matrix submatrix(const Fortran_matrix &A, const int &i1, const int &i2, 
 	}
 	return T;
 }
+
+std::vector<double> SpUnit_matrix::toCppVector() {
+	// Prepare an empty output vector
+	std::vector<double> out;
+
+    const int m = m_;
+    const int n = n_;
+    const int nnz = nnz_;
+
+	// If dimensions are invalid, return an empty vector
+    if (m <= 0 || n <= 0) {
+        return out; // empty matrix -> empty vector
+    }
+
+    // Allocate a dense (column-major) buffer initialized to zeros
+    const int mn = m * n;
+    out.assign(mn, 0.0);
+
+    // Internal layout (as used in Fortran_matrix(SpUnit_matrix)):
+    // ij_ holds: [ ni_[1..n] , nj_[1..m] , cmi_[1..nnz] , rmj_[1..nnz] , cmv_[1..nnz] , rmv_[1..nnz] ]
+    // We use the column-major view: ni_ (per-column counts), cmi_ (1-based row indices), cmv_ (±1 flags)
+    // Reference from PM_matrix.cpp constructor Fortran_matrix(SpUnit_matrix):
+    //   temp_ni  = U.ij_ - 1;
+    //   temp_cmi = temp_ni + m + n;
+    //   temp_cmv = temp_cmi + nnz + nnz;
+    // and the value logic: if (temp_cmv[ks]) +1 else -1
+    const int* temp_ni  = ij_ - 1; // make it look 1-based (matches existing code style)
+    const int* temp_cmi = temp_ni + m + n;
+    const int* temp_cmv = temp_cmi + nnz + nnz;
+
+    int ks = 0; // global counter over nnz, scanned column by column
+    for (int j = 1; j <= n; ++j) {
+        const int cnt = temp_ni[j]; // number of nnz in column j
+        for (int k = 1; k <= cnt; ++k) {
+            ++ks;
+            const int i_fortran = temp_cmi[ks]; // 1-based row index
+            const int i0 = i_fortran - 1; // convert to 0-based
+            const int j0 = j - 1; // convert to 0-based
+
+			// cmv encodes sign: nonzero -> +1, zero -> -1
+            const int pos = i0 + j0 * m;
+            out[pos] = (temp_cmv[ks] ? 1.0 : -1.0);
+        }
+    }
+
+    return out;
+}

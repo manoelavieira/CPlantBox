@@ -432,6 +432,8 @@ class SpUnit_matrix
 	void add_elemult(const SpUnit_matrix &U1, const SpUnit_matrix &U2, int ad = 1, bool save_count = true); // seul (ad = 0) est accepte
 	void SpUnit_elemult_set_ij_set(const SpUnit_matrix &U1, const SpUnit_matrix &U2) ; //
 
+	std::vector<double> toCppVector();
+
 	friend class Fortran_matrix;
 	friend class Fortran_vector;
 	friend class Sparse_matrix;

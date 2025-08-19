@@ -45,7 +45,8 @@ name = "Triticum_aestivum_test_2021" # "Triticum_aestivum_adapted_2023"
 plant.readParameters(path + name + ".xml")
 
 sdf = pb.SDF_PlantBox(np.inf, np.inf, depth)
-plant.setGeometry(sdf) 
+plant.setGeometry(sdf) # creates soil space to stop roots from growing out of the soil
+
 verbose = False
 plant.initialize(verbose)
 plant.simulate(plant_age, verbose)
@@ -65,8 +66,8 @@ hm = PhloemFluxPython(plant, params, psiXylInit=min(sx), ciInit=weatherData['co2
 hm.wilting_point = -10000
 
 path = '../modelparameter/functional/'
-hm.read_photosynthesis_parameters(filename=path + "plant_photosynthesis/photosynthesis_parameters2025")
-hm.read_phloem_parameters(filename=path + "plant_sucrose/phloem_parameters2025")
+hm.read_photosynthesis_parameters(filename=path+"plant_photosynthesis/photosynthesis_parameters2025")
+hm.read_phloem_parameters(filename=path+"plant_sucrose/phloem_parameters2025")
 # list_data = hm.get_phloem_data_list() # option of data that can be obtained from the phloem model
 # hm.write_phloem_parameters(filename='phloem_parameters')
 
@@ -89,11 +90,11 @@ for i in range(N):
     es = hm.get_es(weatherData_i['Tair'])
     ea = es * weatherData_i['RH']
 
-    hm.solve(sim_time = plant_age, rsx = sx, cells = True,  
-             ea = ea, es = es, 
-             PAR = weatherData_i['PAR'] * (24 * 3600) / 1e4, 
-             TairC = weatherData_i['Tair'],
-             verbose = 0)
+    hm.solve(sim_time=plant_age, rsx=sx, cells=True,
+             ea=ea, es=es,
+             PAR=weatherData_i['PAR']*(24*3600)/1e4,
+             TairC=weatherData_i['Tair'],
+             verbose=0)
     
     """ Plant inner carbon balance """
     hm.solve_phloem_flow(plant_age, dt,  weatherData_i['Tair'])

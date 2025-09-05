@@ -146,6 +146,9 @@ extern Fortran_vector r_Xyl, r_Trsv, r_ST, r_ST_ref, r_Sympl, r_Apo, r_PhlMb, r_
 extern int resistance_changed ;
 Fortran_vector  radius_ST ; // vol_Sympl is considered a variable, driven by its variation rate -- see function  Smooth_Parameter_and_BoundaryConditions_Changes()  below
 
+static long long DBG_ITER = 0;  // accumulates values at each solver iteration
+static const int DBG_EVERY_ITER = 100; // logs progress every DBG_EVERY_ITER iterations
+inline bool dbg_sample_iter(long long it) { return (it % DBG_EVERY_ITER) == 0; }
 
 void PhloemFlux::C_fluxes(double t, int Nt)  
 {
@@ -230,7 +233,7 @@ void PhloemFlux::C_fluxes(double t, int Nt)
 				 
 								   
 		
-		if(doTroubleshooting){
+		if(doTroubleshooting && dbg_sample_iter(DBG_ITER)){
 			std::cout<<"C_fluxes "<<i<<" "<<vol_ST[i]<<" "<<vol_ParApo[i]<<" "<<vol_Seg[i]<<" CSTimin "<<CSTimin<<std::endl;
 			std::cout<<"max(0.,C_ST[i]) "<<max(0.,C_ST[i])<<std::endl;
 			std::cout<<" C_ST[i] "<<C_ST[i]<<" Q_ST[i] "<<Q_ST[i]<<" "<<Q_Fl[i]<<" "<<CSTi<<" "<<Cmeso<<" "<<len_leaf[i]<<" max(0., CSTi-CSTimin) "<< max(0., CSTi-CSTimin)<<std::endl;
@@ -252,9 +255,10 @@ void PhloemFlux::C_fluxes(double t, int Nt)
 			outfile<<std::endl<<std::flush;
 			errorID = i; //will stop computation in PhloemFlux::f
 		}
-             
+
 	}
 		
+	++DBG_ITER;
 }
 
 

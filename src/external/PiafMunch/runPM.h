@@ -238,7 +238,7 @@ class PhloemFlux: public CPlantBox::Photosynthesis, public std::enable_shared_fr
 	double atol_double = 1e-017;//max absolute error
 	double rtol_double = 1e-023;//max realtive error
 	int solver = 1;//which solver to use
-	bool doTroubleshooting =false; //do extra printing
+	bool doTroubleshooting = true; //do extra printing
 	
 	// not implemented																								  
 	//used if sameVolume_meso_st == false, sameVolume_meso_seg == false

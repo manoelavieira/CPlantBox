@@ -46,4 +46,4 @@
 "description": "maximum growth rate when water and carbon limitation is activated"}}, 
 "Soil": {"DefaultC": {"value": 0.0001, "unit": "mmol Suc cm-3", "description": "dummy value for soil concentration"}}, 
 "Solver": {"atol": {"value": 1e-12, "description": "Absolute tolerance"}, "rtol": {"value": 1e-08, "description": "Relative tolerance"}, 
-"doTroubleshooting": {"value": false, "description": "Enable troubleshooting"}}}
+"doTroubleshooting": {"value": true, "description": "Enable troubleshooting"}}}

@@ -231,8 +231,10 @@ class PhloemFlux: public CPlantBox::Photosynthesis, public std::enable_shared_fr
 	std::vector<double> len_leafv;
 	std::vector<double> Delta_JS_STv;
 	std::vector<double> C_amontv;
-	std::vector<double> Deltav;
-	std::vector<double> Delta2v;
+	std::vector<int> I_Upflow;
+	std::vector<int> I_Downflow;
+	CooMatrix CooDelta;
+	CooMatrix CooDelta2;
 
 	// solver and other
 	double atol_double = 1e-017;//max absolute error

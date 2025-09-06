@@ -50,6 +50,12 @@ int MsgBox(const char* message, const char* titre = "Message", int button0 = 102
 //
 // ----------------------------------------------------------------------------------------------------------------------------
 
+struct CooMatrix {
+    std::vector<int> row, col;
+    std::vector<double> val;
+    int m = 0, n = 0, nnz = 0;
+};
+
 class Index_vector ;
 class Fortran_vector ;
 class Index_matrix ;
@@ -432,7 +438,7 @@ class SpUnit_matrix
 	void add_elemult(const SpUnit_matrix &U1, const SpUnit_matrix &U2, int ad = 1, bool save_count = true); // seul (ad = 0) est accepte
 	void SpUnit_elemult_set_ij_set(const SpUnit_matrix &U1, const SpUnit_matrix &U2) ; //
 
-	std::vector<double> toCppVector();
+	CooMatrix toCooMatrix();
 
 	friend class Fortran_matrix;
 	friend class Fortran_vector;

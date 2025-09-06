@@ -300,8 +300,12 @@ int PhloemFlux::startPM(double StartTime, double EndTime, int OutputStep,double 
 	this->len_leafv = len_leaf.toCppVector();
 	this->Delta_JS_STv = Delta_JS_ST.toCppVector();
 	this->C_amontv = C_amont.toCppVector();
-	this->Delta2v = Delta2.toCppVector();
-	this->Deltav = Delta.toCppVector();
+	this->CooDelta = Delta.toCooMatrix();
+	this->CooDelta2 = Delta2.toCooMatrix();
+
+	// 0-based already
+	this->I_Upflow = I_Upflow;
+	this->I_Downflow = I_Downflow;
 
 	if(doTroubleshooting){
 		std::cout<<"computeOrgGrowth"<<std::endl;

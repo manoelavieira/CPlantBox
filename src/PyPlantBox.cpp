@@ -1140,6 +1140,15 @@ PYBIND11_MODULE(plantbox, m) {
             .value("C4", Photosynthesis::PhotoTypes::C4)
             .export_values();
 
+    py::class_<::CooMatrix>(m, "CooMatrix")
+        .def(py::init<>())
+        .def_readonly("row", &CooMatrix::row)
+        .def_readonly("col", &CooMatrix::col)
+        .def_readonly("val", &CooMatrix::val)
+        .def_readonly("m", &CooMatrix::m)
+        .def_readonly("n", &CooMatrix::n)
+        .def_readonly("nnz", &CooMatrix::nnz);
+
 	/*
      * runPM.h
      */
@@ -1234,8 +1243,10 @@ PYBIND11_MODULE(plantbox, m) {
             .def_readwrite("len_leaf", &PhloemFlux::len_leafv)
             .def_readwrite("Delta_JS_ST", &PhloemFlux::Delta_JS_STv)
             .def_readwrite("C_amont", &PhloemFlux::C_amontv)
-            .def_readwrite("Delta2", &PhloemFlux::Delta2v)
-            .def_readwrite("Delta", &PhloemFlux::Deltav);
+            .def_readwrite("I_Upflow", &PhloemFlux::I_Upflow)
+            .def_readwrite("I_Downflow", &PhloemFlux::I_Downflow)
+            .def_readwrite("CooDelta", &PhloemFlux::CooDelta)
+            .def_readwrite("CooDelta2", &PhloemFlux::CooDelta2);
 
     py::class_<PlantVisualiser, std::shared_ptr<PlantVisualiser>>(m, "PlantVisualiser")
         .def(py::init<>())

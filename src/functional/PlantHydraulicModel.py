@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import plantbox as pb
 from plantbox import PlantHydraulicModel as PlantHydraulicModelCPP
 from structural.MappedOrganism import MappedPlantPython
+from functional.Perirhizal import PerirhizalPython as Perirhizal
 
 import rsml.rsml_reader as rsml
 
@@ -241,6 +242,7 @@ class PlantHydraulicModel(PlantHydraulicModelCPP):
         return heff[0]
 
     def test_unmapped(self):
+        """ test for unmapped segments """
         pass_ = True
         segs = self.get_segments()
         types = self.ms.subTypes
@@ -303,8 +305,8 @@ class PlantHydraulicModel(PlantHydraulicModelCPP):
         for seg_id, cell_id in map.items():
             # if seg_id < 5:
             #     print("seg_id", seg_id, "cell_id", cell_id)
-            if (cell_id < 0)&(types[seg_id] == int(pb.root)):
-                print("Warning: root segment ", seg_id, "is not mapped (out of the soil domain), this could cause problems with coupling!", 
+            if (cell_id < 0) & (types[seg_id] == int(pb.root)):
+                print("Warning: root segment ", seg_id, "is not mapped (out of the soil domain), this could cause problems with coupling!",
                 nodes[segments[seg_id][0]], nodes[segments[seg_id][1]])
         print()
 
@@ -319,7 +321,7 @@ class HydraulicModel_Meunier(PlantHydraulicModel):
     (no convenient sparse cholesky implementation in scipy)
     """
 
-    def __init__(self, ms, params, cached = True):
+    def __init__(self, ms, params, cached = False):
         """ 
             @param ms is of type MappedSegments (or specializations), or a string containing a rsml filename
             @param params hydraulic conductivities described by PlantHydraulicParameters
@@ -430,6 +432,10 @@ class HydraulicModel_Meunier(PlantHydraulicModel):
 
         return x
 
+    def get_transpiration(self, sim_time, rx, rsx, cells = False, soil_k = []):
+        """ actual transpiration [cm3 day-1], calculated as the sum of all radial fluxes"""
+        return np.sum(self.radial_fluxes(sim_time, rx, rsx, cells, soil_k))
+        
     def radial_fluxes(self, sim_time, rx, rsx, cells = False, soil_k = []):
         """ returns the exact radial fluxes per segment (calls base class)
             @param sim_time [day]       needed for age dependent conductivities (age = sim_time - segment creation time)        
@@ -613,6 +619,7 @@ class HydraulicModel_Doussan(PlantHydraulicModel):
             @return [cm] root matric potential per root system node  
         """
         self.update(sim_time)
+        #print('suf', self.suf.shape)
         if cells:
             rsx = self.get_hs(rsx)  # matric potential per root segment
         collar = self.get_collar_potential(t_act, rsx)
@@ -702,18 +709,37 @@ class HydraulicModel_Doussan(PlantHydraulicModel):
 
     def update(self, sim_time):
         """ call before solve(), get_collar_potential(), and get_Heff() """
-        # print("update")
         self.ci = self.collar_index()  # segment index of the collar segment
         A_d, self.Kr, self.kx0 = self.doussan_system_matrix(sim_time)
         self.A_d_splu = LA.splu(A_d)
         self.krs, _ = self.get_krs_(sim_time)
-        # print("update, krs", self.krs)
         self.suf = np.transpose(self.get_suf_())
-        # print("update, sum suf", np.sum(self.suf))
 
     def get_collar_potential(self, t_act, rsx):
         """ collar potential for an actual transpiration (call update() before) """
         return (self.krs * self.get_heff_(rsx) - (-t_act)) / self.krs
+
+    def get_soil_rootsystem_conductance(self, sim_time, h_bs, h_sr, sp):  # Vanderborgth et al. (2023), Eqn (12)
+        """ The soil root system conductance per soil layer [day-1]
+        
+        sim_time             simulation time in days
+        h_bs           bulk soil matric potential
+        h_sr           matric potential at the soil root interface   
+        sp             soil parameter: van Genuchten parameter set (type vg.Parameters)           
+        """
+        # krs, _ = self.get_krs(sim_time)  # [cm2/day]
+        krs = self.krs
+        area = (self.ms.maxBound.x - self.ms.minBound.x) * (self.ms.maxBound.y - self.ms.minBound.y)  # [cm2]
+        # print("area", area)  #
+        krs = krs / area  # [day-1]
+        peri = Perirhizal(self.ms)  # helper class, wrap mappedSegments
+        k_prhiz = peri.perirhizal_conductance_per_layer(h_bs, h_sr, sp)  # [day-1], Vanderborght et al. 2023, Eqn (6)
+        # print("k_prhiz", np.nanmin(k_prhiz), np.nanmax(k_prhiz))
+        # suf_ = self.get_suf(sim_time)  # [1]
+        suf_ = self.suf
+        suf = peri.aggregate(suf_[0,:])  # [1]
+        # print("suf", np.min(suf), np.max(suf), np.sum(suf))
+        return np.divide(krs * k_prhiz, suf * krs + k_prhiz)  # [day-1], see Vanderborgth et al. (2023), Eqn (12)
 
     def get_krs_(self, sim_time):
         """ calculatets root system conductivity [cm2/day] at simulation time @param sim_time [day] """

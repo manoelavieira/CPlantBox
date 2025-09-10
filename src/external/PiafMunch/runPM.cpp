@@ -64,6 +64,7 @@ vector<double> extra_output_times, breakpoint_times ; // may contain already exi
 extern int is, solver ; // (see below) solver config.# -- default = 1 = cvode (SPILS: SPFGMR, MODIFIED_GS, PREC_NONE... Try diff. value if calc. fails or too slow !
 void auxout(double t, double * y){phloem_.lock()->aux(t, y);} ;	// launch auxiliary calculations to store dynamics of temporary variables
 void fout(double t, double *y, double *y_dot){phloem_.lock()->f(t, y, y_dot);} ; // the function to be processed by the solver  (implemented in 'solve.cpp')
+bool FORCE_DBG_C_FLUXES = false;
 
 // Full list of printable/savable variables -- to be updated in case of hard-updating the model (number and nature of local compartments within each archit. element) :
 int NumAllNodeVariablesNames = 62 ; // 62 node variables :
@@ -279,6 +280,24 @@ int PhloemFlux::startPM(double StartTime, double EndTime, int OutputStep,double 
 	}
     // MEMORY LIBERATIONS:
     delete [] y_dot;
+
+	std::cout << "[FINAL] Solver results" << std::endl;
+
+	// Build the final state vector (1-based) for calling f(tf, ...)
+	std::vector<double> y_final_buf(1 + neq, 0.0);
+	for (std::size_t jj = 1; jj <= neq; ++jj) {
+		y_final_buf[jj] = Y0[jj];
+	}
+
+	double* y_final = y_final_buf.data();
+	std::vector<double> y_dot_tmp(1 + neq, 0.0);
+	
+	FORCE_DBG_C_FLUXES = true;
+	this->f(tf, y_final, y_dot_tmp.data());
+	FORCE_DBG_C_FLUXES = false;
+
+	std::cout << "[FINAL] Done" << std::endl;
+
 	//for python:
 	this->Q_outv = Y0.toCppVector();//att: now has several outputs
 	

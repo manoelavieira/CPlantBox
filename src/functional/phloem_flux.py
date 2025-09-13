@@ -55,7 +55,7 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
                 
         self.Q_out = self.Q_out * 0
 
-    def solve_phloem_flow(self, simDuration, dt, TairC, verbose=False, outputfile="outputs.txt" ):
+    def solve_phloem_flow(self, simDuration, dt, TairC, verbose=False, outputfile="outputs.txt"):
         """ Advance phloem-carbon model by one step of size `dt` (days) """
         
         self.startPM(simDuration, simDuration+dt, 1, (TairC+273.15), verbose, outputfile)
@@ -135,11 +135,11 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
      
     def get_nodes(self):
         """ Convert the list of Vector3d to a 2D (N,3) numpy array """
-        return np.array(list(map(lambda x: np.array(x), self.rs.nodes)))
+        return np.array(list(map(lambda x: np.array(x), self.plant.nodes)))
 
     def get_segments(self):
         """ converts the list of Vector2i to a 2D (M, 2) numpy array """
-        return np.array(list(map(lambda x: np.array(x), self.rs.segments)), dtype = np.int64)
+        return np.array(list(map(lambda x: np.array(x), self.plant.segments)), dtype = np.int64)
 
     def get_ages(self, final_age = 0.):
         """ 
@@ -147,7 +147,7 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
 
         :param day final_age: current root system age (default = 0 means detect from nodeCT)
         """
-        cts = np.array(self.rs.nodeCTs)
+        cts = np.array(self.plant.nodeCTs)
         if final_age == 0.:
             final_age = np.max(cts)
         ages = final_age * np.ones(cts.shape) - cts  # from creation time to age
@@ -178,11 +178,11 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
 
     def get_organ_types(self):
         """ Segment organ types as numpy array """
-        return np.array(self.rs.organTypes)
+        return np.array(self.plant.organTypes)
 
     def get_subtypes(self):
         """ Segment sub types as numpy array """
-        return np.array(self.rs.subTypes)
+        return np.array(self.plant.subTypes)
 
     def get_organ_nodes_tips(self):
         """ Return index of nodes at the end of each organ """
@@ -211,8 +211,8 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
     def get_suf(self, sim_time):
         """ Calculate the surface uptake fraction [1] of the root system at simulation time `sim_time`[day]
             (suf is constant for age independent conductivities) """
-        segs = self.rs.segments
-        nodes = self.rs.nodes
+        segs = self.plant.segments
+        nodes = self.plant.nodes
         p_s = np.zeros((len(segs),))
         for i, s in enumerate(segs):
             p_s[i] = -500 - 0.5 * (nodes[s.x].z + nodes[s.y].z)  # constant total potential (hydraulic equilibrium)
@@ -225,8 +225,8 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
     def get_mean_suf_depth(self, sim_time):
         """  Mean depth [cm] of water uptake based suf """
         suf = self.get_suf(sim_time)
-        segs = self.rs.segments
-        nodes = self.rs.nodes
+        segs = self.plant.segments
+        nodes = self.plant.nodes
         z_ = 0
         for i, s in enumerate(segs):
             z = 0.5 * (nodes[s.x].z + nodes[s.y].z)
@@ -238,7 +238,7 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
         (slow for large root systesms)
         """
         s_ = []
-        segs = self.rs.segments
+        segs = self.plant.segments
         for i, s in enumerate(segs):
             if s.x in self.dirichlet_ind:
                 s_.append(i)
@@ -251,8 +251,8 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
         
         If there is no single collar segment at index 0, pass indices using `seg_ind`, see `find_base_segments`        
         """
-        segs = self.rs.segments
-        nodes = self.rs.nodes
+        segs = self.plant.segments
+        nodes = self.plant.nodes
         p_s = np.zeros((len(segs),))
         for i, s in enumerate(segs):
             p_s[i] = -500 - 0.5 * (nodes[s.x].z + nodes[s.y].z)  # constant total potential (hydraulic equilibrium)
@@ -268,9 +268,9 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
         Calculate the equivalent soil water potential [cm] at simulation time `sim_tim`[day] for 
         the soil matric potential `p_s`[cm] given per cell
         """
-        segs = self.rs.segments
-        nodes = self.rs.nodes
-        seg2cell = self.rs.seg2cell
+        segs = self.plant.segments
+        nodes = self.plant.nodes
+        seg2cell = self.plant.seg2cell
         suf = self.get_suf(sim_time)
         eswp = 0.
         for i, s in enumerate(segs):
@@ -345,7 +345,7 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
                 "atol": {"value": self.atol, "description": "Absolute tolerance"},
                 "rtol": {"value": self.rtol, "description": "Relative tolerance"},
                 # "solver": {"value": self.solver, "description": "Solver type"},
-                "doTroubleshooting": {"value": self.doTroubleshooting, "description": "Enable troubleshooting"}
+                # "doTroubleshooting": {"value": self.doTroubleshooting, "description": "Enable troubleshooting"}
             }
         }
 
@@ -407,7 +407,7 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
         self.atol = parameters["Solver"]["atol"]["value"]
         self.rtol = parameters["Solver"]["rtol"]["value"]
         # self.solver = parameters["Solver"]["solver"]["value"]
-        self.doTroubleshooting = parameters["Solver"]["doTroubleshooting"]["value"]
+        # self.doTroubleshooting = parameters["Solver"]["doTroubleshooting"]["value"]
 
     @staticmethod
     def convert_(x, dtype = np.float64):

@@ -5,7 +5,7 @@ import json
 
 import plantbox as pb
 from plantbox import PhloemFlux
-from functional.Photosynthesis import PhotosynthesisPython 
+from functional.Photosynthesis import PhotosynthesisPython
 
 
 class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
@@ -20,12 +20,12 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
         :param psiXylInit: Initial guess of plant water potential [cm] for fixed point iteration.
         :param ciInit: Initial guess of leaf internal CO2 partial pressure [-].
         """
-        
+
         PhloemFlux.__init__(self, plant_, params, psiXylInit, ciInit)
         PhotosynthesisPython.__init__(self, plant_, params, psiXylInit, ciInit)
         self.reset()
         # self.update_outputs()
-        
+
     def reset(self):
         """ Initialize state and 'previous-step' buffers """
         self.Nt = len(self.plant.nodes)
@@ -35,8 +35,8 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
         self.Q_Gr = np.array([])
         self.Q_Exud = np.array([])
         self.Q_ST = np.array([])
-        self.C_ST_np = np.array([])    
-        self.Q_meso = np.array([])   
+        self.C_ST_np = np.array([])
+        self.Q_meso = np.array([])
         self.C_meso = np.array([])
 
         # Previous-step buffers
@@ -128,11 +128,11 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
         if doSum:
             outputs = sum(outputs)
         return outputs
-    
+
     def getPsiAir(self, RH, TairC): # constants are within photosynthesys.h
         """ Air water potential [cm]. Constants defined in Photosynthesis """
         return np.log(RH) * self.rho_h2o * self.R_ph * (TairC+237.3)/self.Mh2o * (1/0.9806806); # in cm
-     
+
     def get_nodes(self):
         """ Convert the list of Vector3d to a 2D (N,3) numpy array """
         return np.array(list(map(lambda x: np.array(x), self.plant.nodes)))
@@ -142,7 +142,7 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
         return np.array(list(map(lambda x: np.array(x), self.plant.segments)), dtype = np.int64)
 
     def get_ages(self, final_age = 0.):
-        """ 
+        """
         Convert the list of nodeCT to a numpy array of segment ages
 
         :param day final_age: current root system age (default = 0 means detect from nodeCT)
@@ -246,10 +246,10 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
         return s_
 
     def get_krs(self, sim_time, seg_ind = [0]):
-        """ 
-        Calculate root system conductivity [cm2/day] at simulation time `sim_time`[day] 
-        
-        If there is no single collar segment at index 0, pass indices using `seg_ind`, see `find_base_segments`        
+        """
+        Calculate root system conductivity [cm2/day] at simulation time `sim_time`[day]
+
+        If there is no single collar segment at index 0, pass indices using `seg_ind`, see `find_base_segments`
         """
         segs = self.plant.segments
         nodes = self.plant.nodes
@@ -265,7 +265,7 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
 
     def get_eswp(self, sim_time, p_s):
         """
-        Calculate the equivalent soil water potential [cm] at simulation time `sim_tim`[day] for 
+        Calculate the equivalent soil water potential [cm] at simulation time `sim_tim`[day] for
         the soil matric potential `p_s`[cm] given per cell
         """
         segs = self.plant.segments
@@ -284,7 +284,7 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
     def kx_f(self, age, st, ot = 2, seg_ind = 0):
         """ Root axial conductivity [cm3 day-1]  for backwards compatibility """
         return self.kx_f_cpp(seg_ind, age, st, ot)  # kx_f_cpp is XylemFlux::kx_f
-            
+
     def write_phloem_parameters(self, filename="phloem_parameters"):
         """ Write phloem flow module parameters to a JSON file """
         parameters = {
@@ -393,15 +393,15 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
         self.surfMeso = parameters["Mesophyll"]["surfMeso"]["value"]
         self.sameVolume_meso_seg = parameters["Mesophyll"]["sameVolume_meso_seg"]["value"]
         self.sameVolume_meso_st = parameters["Mesophyll"]["sameVolume_meso_st"]["value"]
-        
-        self.setKrm2(parameters["PerType"]["Krm2"]["value"]) 
-        self.setKrm1(parameters["PerType"]["Krm1"]["value"]) 
-        self.setRhoSucrose(parameters["PerType"]["Rho_s"]["value"]) 
-        self.setRmax_st(parameters["PerType"]["Rmax_st"]["value"]) 
-        self.setKr_st(parameters["PerType"]["kr_st"]["value"]) 
-        self.setKx_st(parameters["PerType"]["kx_st"]["value"]) 
-        self.setAcross_st(parameters["PerType"]["Across_st"]["value"]) 
-                    
+
+        self.setKrm2(parameters["PerType"]["Krm2"]["value"])
+        self.setKrm1(parameters["PerType"]["Krm1"]["value"])
+        self.setRhoSucrose(parameters["PerType"]["Rho_s"]["value"])
+        self.setRmax_st(parameters["PerType"]["Rmax_st"]["value"])
+        self.setKr_st(parameters["PerType"]["kr_st"]["value"])
+        self.setKx_st(parameters["PerType"]["kx_st"]["value"])
+        self.setAcross_st(parameters["PerType"]["Across_st"]["value"])
+
         self.CsoilDefault = parameters["Soil"]["DefaultC"]["value"]
 
         self.atol = parameters["Solver"]["atol"]["value"]

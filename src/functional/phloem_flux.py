@@ -2,6 +2,8 @@ import timeit
 
 import numpy as np
 import json
+import os
+import h5py
 
 import plantbox as pb
 from plantbox import PhloemFlux
@@ -52,72 +54,203 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
         self.Q_Rm_i = np.array([])
         self.Q_Gr_i = np.array([])
         self.Q_Exud_i = np.array([])
-                
+
         self.Q_out = self.Q_out * 0
 
     def solve_phloem_flow(self, simDuration, dt, TairC, verbose=False, outputfile="outputs.txt"):
         """ Advance phloem-carbon model by one step of size `dt` (days) """
-        
+
         self.startPM(simDuration, simDuration+dt, 1, (TairC+273.15), verbose, outputfile)
 
         # Node count may change (growth)
-        self.Nt = len(self.plant.nodes)     
-        
+        self.Nt = len(self.plant.nodes)
+
         Q_out = np.array(self.Q_out) * 1e-3 * 12 # mmol Suc -> mol C
         self.Q_ST = np.array(Q_out[0:self.Nt]) # sieve tube sucrose content
         self.Q_meso = np.array(Q_out[self.Nt:(self.Nt*2)]) # mesophyll sucrose content
         self.Q_Rm = np.array(Q_out[(self.Nt*2):(self.Nt*3)]) # sucrose used for maintenance respiration
         self.Q_Exud = np.array(Q_out[(self.Nt*3):(self.Nt*4)]) # sucrose used for exudation
         self.Q_Gr = np.array(Q_out[(self.Nt*4):(self.Nt*5)]) # sucrose used for growth and growth respiration
-        
+
         # self.Ntbu = len(self.Q_STbu)
         self.Q_STbu = np.concatenate((self.Q_STbu, np.full(self.Nt - self.Ntbu, 0.)))
         self.Q_Rmbu = np.concatenate((self.Q_Rmbu, np.full(self.Nt - self.Ntbu, 0.)))
-        self.Q_Grbu = np.concatenate((self.Q_Grbu, np.full(self.Nt - self.Ntbu, 0.))) 
-        self.Q_Exudbu = np.concatenate((self.Q_Exudbu, np.full(self.Nt - self.Ntbu, 0.))) 
-            
+        self.Q_Grbu = np.concatenate((self.Q_Grbu, np.full(self.Nt - self.Ntbu, 0.)))
+        self.Q_Exudbu = np.concatenate((self.Q_Exudbu, np.full(self.Nt - self.Ntbu, 0.)))
+
         self.Q_ST_i = self.Q_ST - self.Q_STbu # in the sieve tubes
         self.Q_Rm_i = self.Q_Rm - self.Q_Rmbu # for maintenance
         self.Q_Gr_i = self.Q_Gr - self.Q_Grbu # for growth
         self.Q_Exud_i = self.Q_Exud - self.Q_Exudbu # for exudation
         # self.Q_out_i = self.Q_Rm_i + self.Q_Exud_i + self.Q_Gr_i # total usage
-                    
+
         volST = np.array(self.vol_ST) # sieve tube volume
-        volMeso = np.array(self.vol_Meso) # mesophyll volume  
-        self.C_ST_np = np.array(self.C_ST)    
-        self.C_meso = self.Q_meso/volMeso  
-        
+        volMeso = np.array(self.vol_Meso) # mesophyll volume
+        self.C_ST_np = np.array(self.C_ST)
+        self.C_meso = self.Q_meso/volMeso
+
         self.Ntbu = self.Nt
         self.Q_STbu = self.Q_ST.copy()
         self.Q_Rmbu = self.Q_Rm.copy()
-        self.Q_Grbu = self.Q_Gr.copy() 
+        self.Q_Grbu = self.Q_Gr.copy()
         self.Q_Exudbu = self.Q_Exud.copy()
-    
+
     def update_outputs(self):
-        """ (Re)build output dictionaries from current state """    
-        
+        """ (Re)build output dictionaries from current state """
+
         self.outputs_options = {
-                "sieve tube concentration":self.C_ST_np, 
-                "sieve tube content":self.Q_ST, 
-                "mesophyll concentration":self.C_meso, 
-                "mesophyll content":self.Q_meso, 
+                "sieve tube concentration":self.C_ST_np,
+                "sieve tube content":self.Q_ST,
+                "mesophyll concentration":self.C_meso,
+                "mesophyll content":self.Q_meso,
                 "maintenance respiration":self.Q_Rm,
-                "exudation":self.Q_Exud, 
+                "exudation":self.Q_Exud,
                 "growth":self.Q_Gr}
         self.outputs_options_last = {
-                "sieve tube concentration":self.C_ST_np, 
-                "sieve tube content":self.Q_ST, 
-                "mesophyll concentration":self.C_meso, 
+                "sieve tube concentration":self.C_ST_np,
+                "sieve tube content":self.Q_ST,
+                "mesophyll concentration":self.C_meso,
                 "mesophyll content":self.Q_meso,
                 "maintenance respiration":self.Q_Rm_i,
-                "exudation":self.Q_Exud_i, 
+                "exudation":self.Q_Exud_i,
                 "growth":self.Q_Gr_i}
-        
+
+    def _enum_organ_types(self):
+        """
+        Return the OrganTypes enum items in a stable order
+        """
+        members = pb.OrganTypes.__members__ # e.g. {'organ': OrganTypes.organ, ...}
+        return list(members.values())
+
+
+    def _node_types_from_enum(self, Nt: int):
+        """
+        Build a vector of node-type labels (length Nt) using get_nodes_index(enum).
+        """
+        types = ["unknown"] * Nt
+        organ_types = self._enum_organ_types()
+
+        for ot in organ_types:
+            idxs = self.get_nodes_index(ot)
+            label = getattr(ot, "name", str(ot))
+            for i in idxs:
+                if 0 <= i < Nt:
+                    types[i] = label
+        return types
+
+    def save_simulation_data(self, step, sim_time, dt, outdir, save_params=False):
+        """
+        Save all simulation data (nodes, segments, matrices) in HDF5 format
+
+        Parameters
+        ----------
+        step : int
+            Current simulation step number
+        sim_time : float
+            Current simulation time in days
+        dt : float
+            Time step size in days
+        outdir : str
+            Output directory path
+        save_params : bool
+            Whether to save simulation parameters (only needed once)
+        """
+
+        os.makedirs(outdir, exist_ok=True)
+        h5_path = os.path.join(outdir, "phloem_simulation.h5")
+
+        with h5py.File(h5_path, 'a') as f:
+            # Create timestep group
+            step_group = f.create_group(f'step_{step:03d}')
+            step_group.attrs['sim_time'] = float(f"{sim_time:.5f}")
+            step_group.attrs['dt'] = dt
+
+            # Save node data
+            node_fields = [
+                "len_leaf", "C_meso", "C_ST", "Q_Exudmax", "Q_Rmmax",
+                "Q_Grmax", "Csoil_node", "psiXyl4Phloem", "C_amont",
+                "Q_ST", "Q_Rm", "Q_Gr", "Q_Exud"
+            ]
+
+            nodes_group = step_group.create_group('nodes')
+            nodes = self.get_nodes()
+            node_types = self._node_types_from_enum(len(nodes))
+
+            # Save node positions and types
+            nodes_group.create_dataset('positions', data=nodes)
+            nodes_group.create_dataset('types', data=node_types)
+
+            # Save node fields
+            for field in node_fields:
+                if hasattr(self, field):
+                    arr = getattr(self, field)
+                    if isinstance(arr, (list, np.ndarray)):
+                        nodes_group.create_dataset(field, data=arr)
+
+            # Save segment data
+            segments_group = step_group.create_group('segments')
+            segments = self.get_segments()
+            organ_types = self.get_organ_types()
+
+            segments_group.create_dataset('connectivity', data=segments)
+            segments_group.create_dataset('organ_types', data=organ_types)
+
+            for attr in ['r_ST', 'vol_ST', 'vol_Meso']:
+                if hasattr(self, attr):
+                    segments_group.create_dataset(attr, data=getattr(self, attr))
+
+            # Save matrices and arrays
+            matrices_group = step_group.create_group('matrices')
+
+            # Save sparse matrices
+            for name, mat in [('Delta', self.CooDelta), ('Delta2', self.CooDelta2)]:
+                if mat is not None:
+                    mat_group = matrices_group.create_group(name)
+                    mat_group.create_dataset('row', data=mat.row)
+                    mat_group.create_dataset('col', data=mat.col)
+                    mat_group.create_dataset('val', data=mat.val)
+                    mat_group.attrs['shape'] = (mat.m, mat.n)
+                    mat_group.attrs['nnz'] = mat.nnz
+
+            # Save index arrays
+            arrays_group = matrices_group.create_group('arrays')
+            if self.I_Upflow is not None:
+                arrays_group.create_dataset('I_Upflow', data=self.I_Upflow)
+            if self.I_Downflow is not None:
+                arrays_group.create_dataset('I_Downflow', data=self.I_Downflow)
+
+            # Save parameters (only once)
+            if save_params and 'parameters' not in f:
+                params_group = f.create_group('parameters')
+
+                # Simulation parameters
+                sim_group = params_group.create_group('Simulation')
+                sim_group.attrs['plant_age'] = step * dt
+
+                # Sieve tube parameters
+                st_group = params_group.create_group('SieveTube')
+                st_params = {
+                    'Vmaxloading': (self.Vmaxloading, 'mmol cm-1 d-1'),
+                    'CSTimin': (self.CSTimin, '-'),
+                    'beta_loading': (self.beta_loading, '-'),
+                    'Mloading': (self.Mloading, '-'),
+                    'C_targ': (self.C_targ, 'mmol Suc cm-3'),
+                    'Q10': (self.Q10, '-'),
+                    'TrefQ10': (self.TrefQ10, 'Celsius'),
+                    'KMfu': (self.KMfu, '-'),
+                    'krm2v': (self.krm2v, '-')
+                }
+
+                for param, (value, unit) in st_params.items():
+                    st_group.attrs[param] = value
+                    st_group.attrs[f'{param}_unit'] = unit
+
+
     def get_phloem_data_list(self):
         """ Return a sorted list of valid keys for `get_phloem_data()` """
         self.update_outputs()
         return sorted(self.outputs_options.keys())
-        
+
     def get_phloem_data(self, data, last=False, doSum=False):
         """ Return array (per-node) or scalar (if doSum=True) for the selected output """
         self.update_outputs()

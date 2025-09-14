@@ -57,7 +57,7 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
 
         self.Q_out = self.Q_out * 0
 
-    def solve_phloem_flow(self, simDuration, dt, TairC, verbose=False, outputfile="outputs.txt"):
+    def solve_phloem_flow(self, simDuration, dt, TairC, verbose=False, unit=1, outputfile="outputs.txt"):
         """ Advance phloem-carbon model by one step of size `dt` (days) """
 
         self.startPM(simDuration, simDuration+dt, 1, (TairC+273.15), verbose, outputfile)
@@ -65,7 +65,10 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
         # Node count may change (growth)
         self.Nt = len(self.plant.nodes)
 
-        Q_out = np.array(self.Q_out) * 1e-3 * 12 # mmol Suc -> mol C
+        if not unit:
+            Q_out = np.array(self.Q_out) * 1e-3 * 12 # mmol Suc -> mol C
+        else:
+            Q_out = np.array(self.Q_out) # mmol Suc
         self.Q_ST = np.array(Q_out[0:self.Nt]) # sieve tube sucrose content
         self.Q_meso = np.array(Q_out[self.Nt:(self.Nt*2)]) # mesophyll sucrose content
         self.Q_Rm = np.array(Q_out[(self.Nt*2):(self.Nt*3)]) # sucrose used for maintenance respiration
@@ -88,6 +91,7 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
         volMeso = np.array(self.vol_Meso) # mesophyll volume
         self.C_ST_np = np.array(self.C_ST)
         self.C_meso = self.Q_meso/volMeso
+        # self.C_ST_vol = self.Q_ST/volST
 
         self.Ntbu = self.Nt
         self.Q_STbu = self.Q_ST.copy()

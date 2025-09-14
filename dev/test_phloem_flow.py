@@ -107,7 +107,7 @@ for i in range(N):
     os.makedirs(phloem_flow_dir, exist_ok=True)
     phloem_flow_file = f"{phloem_flow_dir}/phloem_{i:02d}.txt"
 
-    hm.solve_phloem_flow(plant_age, dt, weatherData_i['Tair'], outputfile=phloem_flow_file)
+    hm.solve_phloem_flow(plant_age, dt, weatherData_i['Tair'], unit=1, outputfile=phloem_flow_file)
 
     # Save all simulation data in HDF5 format
     hm.save_simulation_data(

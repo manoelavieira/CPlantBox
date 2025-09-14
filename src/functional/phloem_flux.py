@@ -167,18 +167,20 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
 
             # Save node data
             node_fields = [
-                "len_leaf", "C_meso", "C_ST", "Q_Exudmax", "Q_Rmmax",
+                "len_leaf", "C_meso", "C_ST_np", "Q_Exudmax", "Q_Rmmax",
                 "Q_Grmax", "Csoil_node", "psiXyl4Phloem", "C_amont",
-                "Q_ST", "Q_Rm", "Q_Gr", "Q_Exud"
+                "Q_ST", "Q_Rm", "Q_Gr", "Q_Exud", "Q_meso", "vol_ST", "vol_Meso"
             ]
 
             nodes_group = step_group.create_group('nodes')
             nodes = self.get_nodes()
             node_types = self._node_types_from_enum(len(nodes))
+            organ_types = self.get_organ_types()
 
             # Save node positions and types
             nodes_group.create_dataset('positions', data=nodes)
             nodes_group.create_dataset('types', data=node_types)
+            nodes_group.create_dataset('organ_types', data=organ_types)
 
             # Save node fields
             for field in node_fields:
@@ -190,12 +192,10 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
             # Save segment data
             segments_group = step_group.create_group('segments')
             segments = self.get_segments()
-            organ_types = self.get_organ_types()
 
             segments_group.create_dataset('connectivity', data=segments)
-            segments_group.create_dataset('organ_types', data=organ_types)
 
-            for attr in ['r_ST', 'vol_ST', 'vol_Meso']:
+            for attr in ['r_ST']:
                 if hasattr(self, attr):
                     segments_group.create_dataset(attr, data=getattr(self, attr))
 

@@ -78,8 +78,6 @@ cumulAssimilation = 0.
 cumulTranspiration = 0.
 Q_Rm_is, Q_Gr_is, Q_Exud_is, Q_Water_is = [], [], [], []
 
-# snapshots = []
-
 print("Entering simulation loop...")
 """ Simulation loop """
 for i in range(N):

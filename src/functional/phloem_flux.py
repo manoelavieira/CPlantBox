@@ -127,18 +127,18 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
         return list(members.values())
 
 
-    def _node_types_from_enum(self, Nt: int):
+    def _node_types_from_enum(self, Nc: int):
         """
-        Build a vector of node-type labels (length Nt) using get_nodes_index(enum).
+        Build a vector of edge-type labels (length Nc) using get_segments_index(enum).
         """
-        types = ["unknown"] * Nt
+        types = ["unknown"] * Nc
         organ_types = self._enum_organ_types()
 
         for ot in organ_types:
-            idxs = self.get_nodes_index(ot)
+            idxs = self.get_segments_index(ot)
             label = getattr(ot, "name", str(ot))
             for i in idxs:
-                if 0 <= i < Nt:
+                if 0 <= i < Nc:
                     types[i] = label
         return types
 
@@ -172,25 +172,25 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
             # Save node data
             node_fields = [
                 "len_leaf", "C_meso", "C_ST_np", "Q_Exudmax", "Q_Rmmax",
-                "Q_Grmax", "Csoil_node", "psiXyl4Phloem", "C_amont",
+                "Q_Grmax", "Csoil_node", "psiXyl4Phloem",
                 "Q_ST", "Q_Rm", "Q_Gr", "Q_Exud", "Q_meso", "vol_ST", "vol_Meso"
             ]
 
             nodes_group = step_group.create_group('nodes')
             nodes = self.get_nodes()
-            node_types = self._node_types_from_enum(len(nodes))
-            organ_types = self.get_organ_types()
 
             # Save node positions and types
             nodes_group.create_dataset('positions', data=nodes)
-            nodes_group.create_dataset('types', data=node_types)
-            nodes_group.create_dataset('organ_types', data=organ_types)
 
             # Save node fields
             for field in node_fields:
                 if hasattr(self, field):
                     arr = getattr(self, field)
                     if isinstance(arr, (list, np.ndarray)):
+                        # Special handling for len_leaf to avoid floating point noise
+                        if field == "len_leaf":
+                            arr = np.array(arr)
+                            arr = np.round(arr, decimals=6)
                         nodes_group.create_dataset(field, data=arr)
 
             # Save segment data
@@ -199,9 +199,16 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
 
             segments_group.create_dataset('connectivity', data=segments)
 
-            for attr in ['r_ST']:
+            for attr in ["r_ST", "C_amont"]:
                 if hasattr(self, attr):
                     segments_group.create_dataset(attr, data=getattr(self, attr))
+
+            segments = self.get_segments()
+            segments_types = self._node_types_from_enum(len(segments))
+            organ_types = self.get_organ_types()
+
+            segments_group.create_dataset('types', data=segments_types)
+            segments_group.create_dataset('organ_types', data=organ_types)
 
             # Save matrices and arrays
             matrices_group = step_group.create_group('matrices')

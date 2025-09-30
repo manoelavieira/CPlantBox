@@ -11,7 +11,7 @@ Expected `Data` fields per graph (per timestep)
 ----------------------------------------------
 - data.edge_index: LongTensor [2, E]
 - data.edge_attr:  FloatTensor [E, 1]      # r_st (resistance); can expand later
-- data.x_cont:     FloatTensor [N, 2]      # [psi, vol_st]
+- data.x_cont:     FloatTensor [N, 3]      # [psi, vol_st, time]  (time in days)
 - data.x_org:      LongTensor   [N]        # organ type indices (e.g., 0=LEAF,1=STEM,2=ROOT)
 - data.y:          FloatTensor [N, 1]      # target sucrose at t+1 (or t, if you prefer)
 - Optional: data.batch for mini-batching multiple graphs
@@ -66,7 +66,7 @@ class ModelConfig:
     """Configuration for PhloemNNConv model.
 
     Attributes:
-        x_cont_dim: Dimension of continuous node features [psi, vol_st]
+        x_cont_dim: Dimension of continuous node features [psi, vol_st, time]
         n_org_types: Number of organ types [LEAF, STEM, ROOT]
         org_emb_dim: Dimension of organ type embeddings
         hidden_dim: Hidden dimension in neural networks
@@ -75,7 +75,7 @@ class ModelConfig:
         aggr: NNConv aggregator type ("add", "mean", or "max")
         dropout: Dropout probability
     """
-    x_cont_dim: int = 2
+    x_cont_dim: int = 3  # [psi, vol_st, time]
     n_org_types: int = 3
     org_emb_dim: int = 8
     hidden_dim: int = 64
@@ -354,10 +354,11 @@ class DummyTemporalDataset(torch.utils.data.Dataset):
             # Node features
             psi = (torch.rand(N, 1, generator=g) - 0.5) * 2.0  # [-1, 1] MPa (scaled)
             vol = torch.rand(N, 1, generator=g) * 1.0 + 0.1
-            x_cont = torch.cat([psi, vol], dim=1)
+            time = torch.rand(N, 1, generator=g) * 5.0  # Random time between 0-5 days
+            x_cont = torch.cat([psi, vol, time], dim=1)  # [psi, vol_st, time]
 
-            # Target sucrose (mock): linear + noise
-            y = 0.2*psi - 0.1*vol + 0.05*torch.randn(N, 1, generator=g)
+            # Target sucrose (mock): linear + time-dependent noise
+            y = 0.2*psi - 0.1*vol + 0.1*time + 0.05*torch.randn(N, 1, generator=g)
 
             self.items.append(Data(edge_index=edge_index,
                                    edge_attr=edge_attr,
@@ -388,7 +389,7 @@ def main():
 
     # Dataset preparation
     ds = DummyTemporalDataset(n_graphs=80)
-    print(f"Total graphs in dataset: {len(ds)}")
+    print(f"\nTotal graphs in dataset: {len(ds)}")
     print(f"Example graph:")
     print(f"edge_index.shape: {ds[0].edge_index.shape}, x_cont.shape: {ds[0].x_cont.shape}, edge_attr.shape: {ds[0].edge_attr.shape}, y.shape: {ds[0].y.shape}")
 
@@ -406,7 +407,7 @@ def main():
     # Data loaders
     train_loader = DataLoader(train_set, batch_size=8, shuffle=True, collate_fn=collate_graphs)
     val_loader = DataLoader(val_set, batch_size=8, shuffle=False, collate_fn=collate_graphs)
-    print(f"Train batches: {len(train_loader)}, val batches: {len(val_loader)}")
+    print(f"Train batches: {len(train_loader)}, Validation batches: {len(val_loader)}")
 
     # Training setup
     optim = torch.optim.AdamW(model.parameters(), lr=3e-3, weight_decay=1e-5)

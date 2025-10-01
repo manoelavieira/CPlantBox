@@ -279,24 +279,34 @@ def main():
           f"Test batches: {len(test_loader)}")
 
     # Setup standardization on training data
-    feature_scaler = Standardizer() # for input features (x_cont)
+    feature_scaler = Standardizer() # for input node features (psi, vol)
     target_scaler = Standardizer() # for targets (y)
+    time_scaler = Standardizer() # for graph-level time (scalar)
 
     # Fit scalers on training data
     with torch.no_grad():
-        x_list, y_list = [], []
-        for batch in train_loader:
-            x_list.append(batch.x_cont) # node features [N, 3]
-            y_list.append(batch.y) # targets [N, 1]
+        x_list, y_list, t_list = [], []
 
-        Xs = torch.cat(x_list, dim=0)
-        Ys = torch.cat(y_list, dim=0)
+        for batch in train_loader:
+            x_list.append(batch.x_cont[:, :model_cfg.x_cont_dim])
+            y_list.append(batch.y)
+            if hasattr(batch, 'time'):
+                t_list.append(batch.time.view(-1, 1)) # collect per-graph scalars
+            else:
+                raise ValueError("Each Data must carry a graph-level `time` tensor.")
+
+        Xs = torch.cat(x_list, dim=0) # [sum_N, 2]
+        Ys = torch.cat(y_list, dim=0) # [sum_N, 1]
+        Ts = torch.cat(t_list, dim=0) # [sum_B, 1], one per graph
+
         feature_scaler.fit(Xs)
         target_scaler.fit(Ys)
+        time_scaler.fit(Ts)
 
     # Add scalers to the model
     model.feature_scaler = feature_scaler
     model.target_scaler = target_scaler
+    model.time_scaler = time_scaler
 
     # Training setup
     optimizer = torch.optim.AdamW(
@@ -354,6 +364,11 @@ def main():
                 'std': target_scaler.std,
                 'device': str(target_scaler.device)
             }
+            time_scaler_state = {
+                'mean': time_scaler.mean,
+                'std': time_scaler.std,
+                'device': str(time_scaler.device)
+            }
 
             torch.save({
                 'epoch': epoch,
@@ -365,6 +380,7 @@ def main():
                 'val_mse': val_mse,
                 'feature_scaler': feature_scaler_state,
                 'target_scaler': target_scaler_state,
+                'time_scaler': time_scaler_state,
             }, 'model/best_model.pt')
         else:
             patience_counter += 1
@@ -394,9 +410,15 @@ def main():
         target_scaler.std = best_checkpoint['target_scaler']['std']
         target_scaler.device = device
 
+        time_scaler = Standardizer()
+        time_scaler.mean = best_checkpoint['time_scaler']['mean']
+        time_scaler.std  = best_checkpoint['time_scaler']['std']
+        time_scaler.device = device
+
         # Assign scalers to model
         model.feature_scaler = feature_scaler
         model.target_scaler = target_scaler
+        model.time_scaler   = time_scaler
 
         print(f"Loaded best model from epoch {best_checkpoint['epoch']} "
               f"with validation MSE {best_checkpoint['val_mse']:.4f}")

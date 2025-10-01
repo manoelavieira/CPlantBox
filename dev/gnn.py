@@ -11,7 +11,8 @@ Expected `Data` fields per graph (per timestep)
 ----------------------------------------------
 - data.edge_index: LongTensor [2, E]
 - data.edge_attr:  FloatTensor [E, 1]      # r_st (resistance)
-- data.x_cont:     FloatTensor [N, 3]      # [psi, vol_st, time]  (time in days)
+- data.x_cont:     FloatTensor [N, 2]      # [psi, vol_st]
+- data.time:       FloatTensor [1]         # time in days (graph-level)
 - data.y:          FloatTensor [N, 1]      # target sucrose at t
 - Optional: data.batch for mini-batching multiple graphs
 """
@@ -90,7 +91,7 @@ class ModelConfig:
     """Configuration for PhloemNNConv model.
 
     Attributes:
-        x_cont_dim: Dimension of continuous node features [psi, vol_st, time]
+        x_cont_dim: Dimension of continuous node features [psi, vol_st]
         n_org_types: Number of organ types [LEAF, STEM, ROOT]
         org_emb_dim: Dimension of organ type embeddings
         hidden_dim: Hidden dimension in neural networks
@@ -99,7 +100,7 @@ class ModelConfig:
         aggr: NNConv aggregator type ("add", "mean", or "max")
         dropout: Dropout probability
     """
-    x_cont_dim: int = 3  # [psi, vol_st, time]
+    x_cont_dim: int = 2 # [psi, vol_st]
     n_org_types: int = 3
     org_emb_dim: int = 8
     hidden_dim: int = 64
@@ -168,9 +169,11 @@ class PhloemNNConv(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
         self.cfg = cfg
+        # optional scaler for graph-level time (fit/set from training script)
+        self.time_scaler = None
 
         # Use continuous node features directly
-        in_channels = cfg.x_cont_dim
+        in_channels = cfg.x_cont_dim + 1 # concatenate a (scaled) time feature in forward
 
         layers = []
         norms = []
@@ -233,9 +236,11 @@ class PhloemNNConv(nn.Module):
             self.feature_scaler.to(device)
         if hasattr(self, 'target_scaler') and self.target_scaler is not None:
             self.target_scaler.to(device)
+        if hasattr(self, 'time_scaler') and self.time_scaler is not None:
+            self.time_scaler.to(device)
         return super().to(device)
 
-    def forward(self, data: Data) -> torch.Tensor:
+    def forward(self, data: Data, t: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Forward pass of the model.
 
         Args:
@@ -247,10 +252,37 @@ class PhloemNNConv(nn.Module):
         self._validate_input(data)
         device = next(self.parameters()).device
 
-        x: torch.Tensor = data.x_cont.to(device) # [N, Dc] node features
+        x: torch.Tensor = data.x_cont.to(device) # [N, 2] [psi, vol_st]
         edge_index: torch.Tensor = data.edge_index.to(device) # [2, E] graph connectivity (sources, targets indices)
         edge_attr: torch.Tensor = data.edge_attr.to(device)  # [E, De] continuous edge features
         edge_org: torch.Tensor = data.edge_org.to(device)  # [E] categorical organ type per edge
+
+        # Graph-level time handling
+        # Accept t from argument, or read from data.time (required if t is None)
+        if t is None:
+            if not hasattr(data, 'time'):
+                raise ValueError("Missing graph-level time. Provide t or set data.time.")
+            t = data.time
+        t = t.to(device)
+
+        # Ensure shape [num_graphs] for batching logic
+        if t.dim() == 0:
+            t = t.unsqueeze(0)
+
+        # Standardize time if a scaler is available (keep it differentiable)
+        if self.time_scaler is not None and getattr(self.time_scaler, "mean", None) is not None:
+            t_scaled = self.time_scaler.transform(t.view(-1, 1)).view(-1)
+        else:
+            t_scaled = t
+
+        # Broadcast per-graph time to per-node time
+        if hasattr(data, 'batch') and data.batch is not None:
+            t_node = t_scaled[data.batch]
+        else:
+            t_node = t_scaled.expand(x.size(0))
+
+        # Concatenate as an extra channel (keep gradient w.r.t. t_node)
+        x = torch.cat([x, t_node.view(-1, 1)], dim=1) # [N, 3]
 
         # Pre-allocate tensor for edge features
         edge_features = torch.empty(edge_attr.size(0), edge_attr.size(1) + 1,

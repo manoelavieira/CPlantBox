@@ -182,7 +182,8 @@ def get_dataloaders(dataset_type: DatasetType, args: argparse.Namespace) -> Tupl
     validate_split_ratios(args.train_ratio, args.val_ratio)
     if dataset_type == DatasetType.DUMMY:
         # Create dummy dataset
-        ds = DummyTemporalDataset(n_graphs=args.n_graphs)
+        # ds = DummyTemporalDataset(n_graphs=args.n_graphs)
+        ds = DummyTemporalDataset()
         print(f"\nCreated dummy dataset with {len(ds)} graphs")
 
         # Split dataset
@@ -285,7 +286,7 @@ def main():
 
     # Fit scalers on training data
     with torch.no_grad():
-        x_list, y_list, t_list = [], []
+        x_list, y_list, t_list = [], [], []
 
         for batch in train_loader:
             x_list.append(batch.x_cont[:, :model_cfg.x_cont_dim])

@@ -203,7 +203,6 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
                 if hasattr(self, attr):
                     segments_group.create_dataset(attr, data=getattr(self, attr))
 
-            segments = self.get_segments()
             segments_types = self._node_types_from_enum(len(segments))
             organ_types = self.get_organ_types()
 

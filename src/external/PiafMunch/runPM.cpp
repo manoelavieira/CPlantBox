@@ -322,9 +322,19 @@ int PhloemFlux::startPM(double StartTime, double EndTime, int OutputStep,double 
 	this->CooDelta = Delta.toCooMatrix();
 	this->CooDelta2 = Delta2.toCooMatrix();
 
-	// 0-based already
-	this->I_Upflow = I_Upflow;
-	this->I_Downflow = I_Downflow;
+	// Convert from 1-based to 0-based indices, skipping index 0 and reducing size by 1
+	std::vector<int> I_Upflow_0based(I_Upflow.size() - 1);
+	std::vector<int> I_Downflow_0based(I_Downflow.size() - 1);
+
+	// Copy and transform values starting from index 1
+	for(size_t i = 1; i < I_Upflow.size(); i++) {
+		I_Upflow_0based[i-1] = I_Upflow[i] - 1;
+	}
+	for(size_t i = 1; i < I_Downflow.size(); i++) {
+		I_Downflow_0based[i-1] = I_Downflow[i] - 1;
+	}
+	this->I_Upflow = I_Upflow_0based;
+	this->I_Downflow = I_Downflow_0based;
 
 	if(doTroubleshooting){
 		std::cout<<"computeOrgGrowth"<<std::endl;

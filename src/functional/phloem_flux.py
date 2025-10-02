@@ -142,7 +142,7 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
                     types[i] = label
         return types
 
-    def save_simulation_data(self, step, sim_time, dt, outdir, save_params=False):
+    def save_simulation_data(self, step, sim_time, plant_age, dt, outdir, save_params=False):
         """
         Save all simulation data (nodes, segments, matrices) in HDF5 format
 
@@ -166,8 +166,8 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
         with h5py.File(h5_path, 'a') as f:
             # Create timestep group
             step_group = f.create_group(f'step_{step:03d}')
-            step_group.attrs['sim_time'] = float(f"{sim_time:.5f}")
-            step_group.attrs['dt'] = dt
+            step_group.attrs['plant_age'] = float(f"{plant_age:.5f}")
+            step_group.attrs['iteration'] = step
 
             # Save node data
             node_fields = [
@@ -210,20 +210,19 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
             segments_group.create_dataset('organ_types', data=organ_types)
 
             # Save matrices and arrays
-            matrices_group = step_group.create_group('matrices')
+            arrays_group = step_group.create_group('arrays')
 
             # Save sparse matrices
-            for name, mat in [('Delta', self.CooDelta), ('Delta2', self.CooDelta2)]:
-                if mat is not None:
-                    mat_group = matrices_group.create_group(name)
-                    mat_group.create_dataset('row', data=mat.row)
-                    mat_group.create_dataset('col', data=mat.col)
-                    mat_group.create_dataset('val', data=mat.val)
-                    mat_group.attrs['shape'] = (mat.m, mat.n)
-                    mat_group.attrs['nnz'] = mat.nnz
+            for name, arr in [('Delta', self.CooDelta), ('Delta2', self.CooDelta2)]:
+                if arr is not None:
+                    arr_group = arrays_group.create_group(name)
+                    arr_group.create_dataset('row', data=arr.row)
+                    arr_group.create_dataset('col', data=arr.col)
+                    arr_group.create_dataset('val', data=arr.val)
+                    arr_group.attrs['shape'] = (arr.m, arr.n)
+                    arr_group.attrs['nnz'] = arr.nnz
 
             # Save index arrays
-            arrays_group = matrices_group.create_group('arrays')
             if self.I_Upflow is not None:
                 arrays_group.create_dataset('I_Upflow', data=self.I_Upflow)
             if self.I_Downflow is not None:
@@ -234,11 +233,15 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
                 params_group = f.create_group('parameters')
 
                 # Simulation parameters
-                sim_group = params_group.create_group('Simulation')
-                sim_group.attrs['plant_age'] = step * dt
+                sim_group = params_group.create_group('simulation')
+                sim_group.attrs['plant_age_init'] = plant_age
+                sim_group.attrs['plant_age_final'] = plant_age + sim_time
+                sim_group.attrs['sim_time'] = sim_time
+                sim_group.attrs['dt'] = dt
+                sim_group.attrs['steps'] = int(sim_time/dt)
 
                 # Sieve tube parameters
-                st_group = params_group.create_group('SieveTube')
+                st_group = params_group.create_group('sieve_tube')
                 st_params = {
                     'Vmaxloading': (self.Vmaxloading, 'mmol cm-1 d-1'),
                     'CSTimin': (self.CSTimin, '-'),
@@ -253,7 +256,7 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
 
                 for param, (value, unit) in st_params.items():
                     st_group.attrs[param] = value
-                    st_group.attrs[f'{param}_unit'] = unit
+                    # st_group.attrs[f'{param}_unit'] = unit
 
 
     def get_phloem_data_list(self):

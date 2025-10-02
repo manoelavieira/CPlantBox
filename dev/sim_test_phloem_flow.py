@@ -100,6 +100,11 @@ for i in range(N):
             TairC=weatherData_i['Tair'],
             verbose=0)
 
+    # print(f"get_nodes = {hm.get_nodes()}")
+    # print(f"len(nodes) = {hm.get_nodes().shape[0]}")
+    # print(f"get_segments = {hm.get_segments()}")
+    # print(f"len(segments) = {hm.get_segments().shape[0]}")
+
     """ Plant inner carbon balance """
     print("Solve: Phloem flow...")
     os.makedirs(phloem_flow_dir, exist_ok=True)
@@ -110,7 +115,8 @@ for i in range(N):
     # Save all simulation data in HDF5 format
     hm.save_simulation_data(
         step=i,
-        sim_time=plant_age,
+        sim_time=sim_time,
+        plant_age=plant_age,
         dt=dt,
         outdir=phloem_flow_dir,
         save_params=(i==0)  # Only save parameters on first step

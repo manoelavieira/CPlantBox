@@ -150,7 +150,13 @@ def evaluate(
             total_mae += mae.item()
             n_nodes += y.size(0)
 
-    return total_mse / max(n_nodes, 1), total_mae / max(n_nodes, 1)
+    metrics = (total_mse / max(n_nodes, 1), total_mae / max(n_nodes, 1))
+
+    # Clear GPU memory after evaluation
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    return metrics
 
 def validate_split_ratios(train_ratio: float, val_ratio: float) -> None:
     """Validate that dataset split ratios are valid.
@@ -230,6 +236,24 @@ def get_dataloaders(dataset_type: DatasetType, args: argparse.Namespace) -> Tupl
 
     return train_loader, val_loader, test_loader
 
+def print_model_summary(model: nn.Module):
+    """Print model architecture summary."""
+    print("\nModel Architecture:")
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total parameters: {total_params:,}")
+    print(f"Trainable parameters: {trainable_params:,}")
+    print(f"Non-trainable parameters: {total_params - trainable_params:,}")
+    print("\nLayer Overview:")
+    for name, module in model.named_children():
+        print(f"{name}: {module.__class__.__name__}")
+
+def log_experiment_config(args: argparse.Namespace):
+    """Log experiment configuration."""
+    print("\nExperiment Configuration:")
+    for arg, value in vars(args).items():
+        print(f"{arg}: {value}")
+
 def main():
     # Parse arguments
     parser = argparse.ArgumentParser(description="Train phloem GNN model")
@@ -275,9 +299,14 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
+    # Log experiment configuration
+    log_experiment_config(args)
+
     model_cfg = ModelConfig()
     model = PhloemNNConv(model_cfg).to(device)
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+
+    # Print detailed model summary
+    print_model_summary(model)
 
     # Get data loaders
     dataset_type = DatasetType[args.dataset.upper()]

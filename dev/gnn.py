@@ -170,7 +170,11 @@ class PhloemNNConv(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
         self.cfg = cfg
-        self.time_scaler = None # optional time normalization
+        # Initialize all scalers as None
+        self.feature_scaler = None  # for node features
+        self.target_scaler = None   # for output values
+        self.time_scaler = None     # for time normalization
+        self._validated_input = False  # Track if input has been validated
 
         # Node input = continuous node features + (scaled) time
         in_node_dim = cfg.node_feat_dim + 1
@@ -218,7 +222,10 @@ class PhloemNNConv(nn.Module):
                 nn.init.zeros_(m.bias)
 
     def _validate_input(self, data: Data) -> None:
-        """Validate input data dimensions and types."""
+        """Validate input data dimensions and types. Only runs once on first forward pass."""
+        if self._validated_input:
+            return
+
         if not hasattr(data, 'node_feat'):
             raise ValueError("Data must have node_feat attribute")
         if data.node_feat.size(1) != self.cfg.node_feat_dim:
@@ -229,6 +236,9 @@ class PhloemNNConv(nn.Module):
             raise ValueError("Data must have edge_org attribute")
         if data.edge_org.max() >= self.cfg.num_org_types:
             raise ValueError(f"Edge organ type index {data.edge_org.max()} >= num_org_types {self.cfg.num_org_types}")
+
+        self._validated_input = True
+        print("Input validation successful: data format matches model configuration.")
 
     def to(self, device):
         """Move the model and its scalers to the specified device."""

@@ -279,7 +279,7 @@ class PhloemNNConv(nn.Module):
         if hasattr(data, 'batch') and data.batch is not None:
             t_node = t_scaled[data.batch]
         else:
-            t_node = t_scaled.expand(x.size(0))
+            t_node = t_scaled.expand(node_feat.size(0))
 
         # Concatenate as an extra channel (keep gradient w.r.t. t_node)
         node_feat = torch.cat([node_feat, t_node.view(-1, 1)], dim=1) # [N, 3]

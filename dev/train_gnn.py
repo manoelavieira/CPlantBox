@@ -26,14 +26,18 @@ class DatasetType(Enum):
 def collate_graphs(batch):
     return Batch.from_data_list(batch)
 
-def train_one_epoch(model: nn.Module, loader: DataLoader, optimizer: torch.optim.Optimizer, target_scaler: Optional[Standardizer] = None, clip_grad_norm: float = 1.0) -> Tuple[float, float]:
+def train_one_epoch(
+        model: nn.Module,
+        loader: DataLoader,
+        optimizer: torch.optim.Optimizer,
+        clip_grad_norm: float = 1.0
+    ) -> Tuple[float, float]:
     """Train model for one epoch.
 
     Args:
         model: The neural network model
         loader: DataLoader containing training data
         optimizer: Optimizer for updating model parameters
-        target_scaler: Optional scaler for target values
         clip_grad_norm: Maximum norm for gradient clipping
 
     Returns:
@@ -82,11 +86,12 @@ def train_one_epoch(model: nn.Module, loader: DataLoader, optimizer: torch.optim
         optimizer.step()
 
         with torch.no_grad():
-            # Report MAE in original units
-            if target_scaler is not None:
-                pred_un = target_scaler.inv_transform(pred)
+            # Report MAE in original units (use model's saved scaler)
+            if hasattr(model, 'target_scaler') and model.target_scaler is not None:
+                pred_un = model.target_scaler.inv_transform(pred)
             else:
                 pred_un = pred
+
 
             mae = (pred_un - y).abs().sum() # (pred_un - y): per-node errors, shape [N, 1]
             total_mae += mae.item() # accumulates the sum of absolute errors across batches
@@ -101,13 +106,15 @@ def train_one_epoch(model: nn.Module, loader: DataLoader, optimizer: torch.optim
 
     return avg_loss, avg_mae
 
-def evaluate(model: nn.Module, loader: DataLoader, target_scaler: Optional[Standardizer] = None) -> Tuple[float, float]:
+def evaluate(
+        model: nn.Module,
+        loader: DataLoader,
+    ) -> Tuple[float, float]:
     """Evaluate model on a dataset.
 
     Args:
         model: The neural network model
         loader: DataLoader containing evaluation data
-        target_scaler: Optional scaler for target values
 
     Returns:
         Tuple of (average_mse, average_mae)
@@ -309,6 +316,9 @@ def main():
     model.target_scaler = target_scaler
     model.time_scaler = time_scaler
 
+    # Ensure scalers live on the same device as model (explicit)
+    model.to(device)
+
     # Training setup
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -328,16 +338,10 @@ def main():
     print("\nStarting training...")
     for epoch in range(1, args.epochs + 1):
         # Training
-        tr_loss, tr_mae = train_one_epoch(
-            model, train_loader, optimizer,
-            target_scaler=target_scaler
-        )
+        tr_loss, tr_mae = train_one_epoch(model, train_loader, optimizer)
 
         # Validation
-        val_mse, val_mae = evaluate(
-            model, val_loader,
-            target_scaler=target_scaler
-        )
+        val_mse, val_mae = evaluate(model, val_loader)
 
         # Learning rate scheduling
         scheduler.step(val_mse)
@@ -427,10 +431,7 @@ def main():
         print(f"Error loading best model: {str(e)}")
         print("Using current model state for evaluation")
 
-    test_mse, test_mae = evaluate(
-        model, test_loader,
-        target_scaler=target_scaler
-    )
+    test_mse, test_mae = evaluate(model, test_loader)
 
     print(f"\nFinal test metrics - MSE: {test_mse:.4f}, MAE: {test_mae:.4f}")
 

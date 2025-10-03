@@ -71,10 +71,10 @@ def load_graph_data(h5_file: h5py.File, timestep: int) -> Data:
     # Load node features
     psi = torch.tensor(h5_file[f'{step_key}/nodes/psiXyl4Phloem'][:], dtype=torch.float32)
     vol = torch.tensor(h5_file[f'{step_key}/nodes/vol_ST'][:], dtype=torch.float32)
-    x_cont = torch.stack([psi, vol], dim=1)  # [N, 2]
+    node_feat = torch.stack([psi, vol], dim=1)  # [N, 2]
     num_nodes = psi.shape[0]  # get actual number of nodes
     print(f"\nStep {timestep}: Number of nodes = {num_nodes}")
-    print(f"x_cont_shape: {x_cont.shape}, x_cont_dtype: {x_cont.dtype}")
+    print(f"node_feat_shape: {node_feat.shape}, node_feat_dtype: {node_feat.dtype}")
 
     # Get graph structure from both methods for comparison
     I_Up = h5_file[f'{step_key}/arrays/I_Upflow'][:]
@@ -96,8 +96,8 @@ def load_graph_data(h5_file: h5py.File, timestep: int) -> Data:
     # Load per-edge resistance values r_ST [E], then reshape to [E, 1]
     # so each edge has an explicit single feature column (required by PyG)
     r_st = torch.tensor(h5_file[f'{step_key}/segments/r_ST'][:], dtype=torch.float32)
-    edge_attr = r_st.view(-1, 1)  # [E, 1]
-    print(f"edge_attr_shape: {edge_attr.shape}, edge_attr_dtype: {edge_attr.dtype}")
+    edge_feat = r_st.view(-1, 1)  # [E, 1]
+    print(f"edge_feat_shape: {edge_feat.shape}, edge_feat_dtype: {edge_feat.dtype}")
 
     org_types = torch.tensor(h5_file[f'{step_key}/segments/organ_types'][:], dtype=torch.long)
     # Map organ types: 2->0 (root), 3->1 (stem), 4->2 (leaf) for embedding lookup
@@ -114,9 +114,9 @@ def load_graph_data(h5_file: h5py.File, timestep: int) -> Data:
 
     # Create PyG Data object with explicit num_nodes
     data = Data(
-        x_cont=x_cont,          # Node features [N, 2]
+        node_feat=node_feat,    # Node features [N, 2]
         edge_index=edge_index,  # Graph connectivity [2, E]
-        edge_attr=edge_attr,    # Edge features [E, 1]
+        edge_feat=edge_feat,    # Edge features [E, 1]
         edge_org=edge_org,      # Edge organ types [E]
         y=y,                    # Target values [N, 1]
         time=time,              # Graph-level time feature [1]

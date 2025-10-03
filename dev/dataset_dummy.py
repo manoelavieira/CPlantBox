@@ -269,13 +269,13 @@ class DummyTemporalDataset(torch.utils.data.Dataset):
         u = edges_features[:, 0].astype(np.int64)
         v = edges_features[:, 1].astype(np.int64)
         edge_index = np.vstack([u, v])
-        edge_attr = edges_features[:, 2:3]  # just the resistance [R]
+        edge_feat = edges_features[:, 2:3]  # just the resistance [R]
 
-        edge_attr = edges_features[:, 2:3]  # just the resistance [R]
+        edge_feat = edges_features[:, 2:3]  # just the resistance [R]
         edge_org = edges_features[:, 3]  # organ_id for each edge
 
         self.edge_index_t = torch.as_tensor(edge_index, dtype=torch.long)
-        self.edge_attr_t = torch.as_tensor(edge_attr, dtype=torch.float32)
+        self.edge_feat_t = torch.as_tensor(edge_feat, dtype=torch.float32)
         self.edge_org_t = torch.as_tensor(edge_org, dtype=torch.long)
         self.pos_t = torch.as_tensor(pos, dtype=torch.float32)
         self.node_type_t = torch.as_tensor(node_type, dtype=torch.long)
@@ -298,13 +298,13 @@ class DummyTemporalDataset(torch.utils.data.Dataset):
         C = self._simulate_to_index(idx)
 
         t = idx * self.cfg.dt
-        x_t = torch.as_tensor(self.x_node, dtype=torch.float32)  # [psi, volume]
+        node_feat_t = torch.as_tensor(self.x_node, dtype=torch.float32)  # [psi, volume]
         y_t = torch.as_tensor(C.reshape(-1, 1), dtype=torch.float32)  # sucrose at time t
 
         return Data(
-            x_cont=x_t,
+            node_feat=node_feat_t,
             edge_index=self.edge_index_t,
-            edge_attr=self.edge_attr_t,
+            edge_feat=self.edge_feat_t,
             edge_org=self.edge_org_t,
             y=y_t,
             time=torch.tensor([t], dtype=torch.float32),
@@ -342,13 +342,13 @@ def visualize_graph(data: Data, title: str = "Plant graph", show_labels: bool = 
     pos = data.pos.cpu().numpy()
     N = pos.shape[0]
 
-    # Node features (use x_cont: [psi, volume])
-    if not hasattr(data, "x_cont"):
-        raise AttributeError("Expected 'x_cont' in Data (shape [N, 2] = [psi, volume]).")
-    x_cont = data.x_cont.cpu().numpy()
-    if x_cont.shape[1] < 2:
-        raise ValueError(f"'x_cont' expected at least 2 columns, got shape {x_cont.shape}")
-    vol = x_cont[:, 1]
+    # Node features (use node_feat: [psi, volume])
+    if not hasattr(data, "node_feat"):
+        raise AttributeError("Expected 'node_feat' in Data (shape [N, 2] = [psi, volume]).")
+    node_feat = data.node_feat.cpu().numpy()
+    if node_feat.shape[1] < 2:
+        raise ValueError(f"'node_feat' expected at least 2 columns, got shape {node_feat.shape}")
+    vol = node_feat[:, 1]
     vol_scaled = 200 * (vol / (np.max(vol) + 1e-8)) + 50
 
     node_type = data.node_type.cpu().numpy() if hasattr(data, "node_type") else np.zeros(N, dtype=int)
@@ -424,7 +424,7 @@ def plot_timeseries(dummy_dataset: DummyTemporalDataset,
     Plots psi (water potential) per node vs time for a temporal PyG dataset whose
     Data objects have:
         - data.time: FloatTensor [1]  (graph-level scalar)
-        - data.x_cont: FloatTensor [N, *] with psi in column 0
+        - data.node_feat: FloatTensor [N, *] with psi in column 0
 
     Args:
         dummy_dataset: sequence of Data snapshots (supports __len__/__getitem__)
@@ -460,12 +460,12 @@ def plot_timeseries(dummy_dataset: DummyTemporalDataset,
 
         # choose source by data_type
         if data_type == "psi":
-            if not hasattr(d, "x_cont"):
-                raise AttributeError("Expected 'x_cont' attribute on Data.")
-            x_cont = d.x_cont
-            if isinstance(x_cont, torch.Tensor):
-                x_cont = x_cont.detach().cpu().numpy()
-            data_rows.append(np.asarray(x_cont[:, 0], dtype=float))
+            if not hasattr(d, "node_feat"):
+                raise AttributeError("Expected 'node_feat' attribute on Data.")
+            node_feat = d.node_feat
+            if isinstance(node_feat, torch.Tensor):
+                node_feat = node_feat.detach().cpu().numpy()
+            data_rows.append(np.asarray(node_feat[:, 0], dtype=float))
         elif data_type == "sucrose":
             if not hasattr(d, "y"):
                 raise AttributeError("Expected 'y' attribute on Data.")

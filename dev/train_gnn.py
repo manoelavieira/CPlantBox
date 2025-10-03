@@ -51,10 +51,10 @@ def train_one_epoch(model: nn.Module, loader: DataLoader, optimizer: torch.optim
         optimizer.zero_grad(set_to_none=True)
 
         # Keep original features for physics computation
-        x_orig = data.x_cont.clone()
+        x_orig = data.node_feat.clone()
 
         # Standardize features for the model
-        data.x_cont = model.feature_scaler.transform(data.x_cont)
+        data.node_feat = model.feature_scaler.transform(data.node_feat)
 
         # Forward pass returns predictions in standardized space
         pred = model(data) # [N,1]
@@ -68,12 +68,12 @@ def train_one_epoch(model: nn.Module, loader: DataLoader, optimizer: torch.optim
         # Physics computation in original space
         pred_orig = model.target_scaler.inv_transform(pred)
         # Temporarily restore original features for physics computation
-        data.x_cont = x_orig
+        data.node_feat = x_orig
         phys = physics_residual(pred_orig, data)
         if phys.dim() > 0:
             phys = phys.sum()
         # Restore standardized features for next iteration
-        data.x_cont = model.feature_scaler.transform(x_orig)
+        data.node_feat = model.feature_scaler.transform(x_orig)
 
         loss = mse + phys
         loss.backward()
@@ -121,10 +121,10 @@ def evaluate(model: nn.Module, loader: DataLoader, target_scaler: Optional[Stand
             data = data.to(next(model.parameters()).device)
 
             # Keep original features
-            x_orig = data.x_cont.clone()
+            x_orig = data.node_feat.clone()
 
             # Standardize features for the model
-            data.x_cont = model.feature_scaler.transform(data.x_cont)
+            data.node_feat = model.feature_scaler.transform(data.node_feat)
 
             # Forward pass returns predictions in standardized space
             pred = model(data)
@@ -137,7 +137,7 @@ def evaluate(model: nn.Module, loader: DataLoader, target_scaler: Optional[Stand
             pred_un = model.target_scaler.inv_transform(pred)
 
             # Restore original features for consistent state
-            data.x_cont = x_orig
+            data.node_feat = x_orig
             mae = (pred_un - y).abs().sum()
             total_mse += mse.item()
             total_mae += mae.item()
@@ -289,7 +289,7 @@ def main():
         x_list, y_list, t_list = [], [], []
 
         for batch in train_loader:
-            x_list.append(batch.x_cont[:, :model_cfg.x_cont_dim])
+            x_list.append(batch.node_feat[:, :model_cfg.node_feat_dim])
             y_list.append(batch.y)
             if hasattr(batch, 'time'):
                 t_list.append(batch.time.view(-1, 1)) # collect per-graph scalars

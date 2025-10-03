@@ -1,3 +1,8 @@
+# ignore data, plots and models generated during development
+/dev/data/
+/dev/model/
+/dev/plot/
+
 # build system clutter
 build-*
 Testing

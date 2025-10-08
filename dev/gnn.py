@@ -327,21 +327,23 @@ class PhloemNNConv(nn.Module):
 # -----------------
 def create_delta2(data: Data, psi: torch.Tensor, align_to_upstream: bool = True,
                   device: Optional[torch.device] = None):
-    """Create a flow-aligned incidence matrix per-edge using node potentials `psi`.
+    """Create a per-graph flow-aligned incidence matrix Delta2 (rows = nodes, cols = edges)
 
-    For each edge e (src->dst) we compute Jw = psi_j - psi_i. The sign of Jw indicates
-    the flow proxy. If `align_to_upstream=True`, columns are multiplied so that the +1
-    entry lies on the upstream node (the node where the fluid originates). If False,
-    +1 will be placed on the downstream node.
+    Each column corresponds to one edge and has two nonzero entries (+1 and -1)
+    representing how that edge connects two nodes. The orientation of these signs
+    is aligned with the physical flow direction inferred from the node potentials `psi`.
 
     Args:
-        data: torch_geometric.data.Data with `edge_index` and optional `batch`/`num_graphs`.
-        psi: per-node potential tensor of shape [N] (or [N,] float tensor).
-        align_to_upstream: if True, +1 is on upstream node (source of flow); else +1 on downstream.
-        dtype, device: optional dtype/device for outputs.
+        data: PyG Data object with `edge_index` [2, E] and `batch` [N].
+        psi: Per-node potential (e.g., water potential) tensor [N].
+        align_to_upstream:
+            If True, +1 is placed on the upstream node (source of flow).
+            If False, +1 is placed on the downstream node (sink of flow).
+        device: Target device; inferred automatically if None.
 
     Returns:
-        sparse_coo_tensor or list of such (or dense tensors if as_dense=True).
+        List[torch.sparse_coo_tensor]: One sparse incidence matrix per graph,
+        each with shape (N_g, E_g).
     """
     if device is None:
         device = data.edge_index.device if hasattr(data, 'edge_index') else torch.device('cpu')
@@ -349,68 +351,71 @@ def create_delta2(data: Data, psi: torch.Tensor, align_to_upstream: bool = True,
     edge_index = data.edge_index.to(device)
     psi = psi.to(device)
 
+    # Total number of nodes across all graphs in the batch
     N_total = int(edge_index.max().item() + 1)
 
-    src = edge_index[0]
-    dst = edge_index[1]
+    src, dst = edge_index[0], edge_index[1] # edge_index[0] = source nodes, edge_index[1] = destination nodes
 
-    # Flow proxy Jw and its sign
-    # If Jw > 0, flow is dst -> src (dst is upstream); If Jw < 0, flow is src -> dst (src is upstream)
+    # Jw per edge and its sign
+    # If Jw > 0, flow from dst -> src (opposite arrow, dst is upstream)
+    # If Jw < 0, flow from src -> dst (same as arrow, src is upstream)
     Jw = psi[dst] - psi[src]
     sign = torch.sign(Jw)
 
-    # Replace zeros (no gradient) with +1 to keep a deterministic orientation
+    # Replace zeros (no difference in potential) with +1 to keep a deterministic orientation
     sign[sign == 0.] = 1.
 
     # If align_to_upstream is True, multiply by sign so that +1 is at upstream node
-    # Original column has [-1 at src, +1 at dst]. Multiplying by sign gives [-sign, +sign].
     # If align_to_upstream=False, flip the sign to put +1 on downstream.
     col_multiplier = sign if align_to_upstream else -sign
 
     # Per-graph signed incidence
-    batch = data.batch.to(device)
-    edge_graph = batch[src]
+    batch = data.batch.to(device)               # [N_total], node -> graph id
+    edge_graph = batch[src]                     # [E_total], edge -> graph id (edges never connect nodes from different graphs)
     num_graphs = int(batch.max().item() + 1)
     out = []
+
     for g in range(num_graphs):
+        # Identify nodes and edges belonging to this graph g
         mask_nodes = (batch == g)
+        mask_edges = (edge_graph == g)
+
         node_idx = torch.nonzero(mask_nodes, as_tuple=False).view(-1) # torch.nonzero returns the indices where mask_nodes is True
         N_g = node_idx.numel()
-
-        mask_edges = (edge_graph == g)
         E_g = int(mask_edges.sum().item())
 
-        # local mapping
-        local_map = torch.full((N_total,), -1, device=device, dtype=torch.long)
-        local_map[node_idx] = torch.arange(N_g, device=device, dtype=torch.long) # torch.arange(N_g) generates [0, 1, 2, ..., N_g-1].
+        # Map global node indices -> local indices [0..N_g-1]
+        local_map = torch.full((N_total,), -1, device=device, dtype=torch.long) # initializes an array of length N_total filled with -1
+        local_map[node_idx] = torch.arange(N_g, device=device, dtype=torch.long) # torch.arange(N_g) generates [0, 1, 2, ..., N_g-1]
 
-        src_g = local_map[src[mask_edges]]
-        dst_g = local_map[dst[mask_edges]]
+        src_g = local_map[src[mask_edges]]  # local source node index for each edge
+        dst_g = local_map[dst[mask_edges]]  # local target node index for each edge
+        cm_g = col_multiplier[mask_edges]   # column multiplier (+1 or -1) for each edge
 
-        cm_g = col_multiplier[mask_edges]
+        # Concatenate src_g and dst_g means listing all rows (node indices) where nonzeros will appear
+        # The first E_g entries -> rows for the source nodes; the last E_g entries -> rows for the target nodes
+        # row_indices = [src_0, src_1, ..., src_(E_g-1), dst_0, dst_1, ..., dst_(E_g-1)]
+        # col_indices = [0, 1, ..., E_g-1, 0, 1, ..., E_g-1]
+        row_indices = torch.cat([src_g, dst_g], dim=0)
+        col_indices = torch.cat([torch.arange(E_g, device=device), torch.arange(E_g, device=device)], dim=0)
 
-        # For an N x E incidence matrix (rows=nodes, cols=edges) we need
-        # indices shaped as [row_indices(node), col_indices(edge)]. Each edge
-        # contributes two entries: -1 on source node row, +1 on target node row.
-        row_indices = torch.cat([src_g, dst_g], dim=0)               # node rows
-        col_indices = torch.cat([torch.arange(E_g, device=device), torch.arange(E_g, device=device)], dim=0)  # edge cols
+        vals = torch.cat([-cm_g, cm_g], dim=0).to(torch.float32)
 
-        # Optionally sort by column (edge) for nicer ordering/debugging
+        # Optionally sort by column (edge)
         perm = torch.argsort(col_indices)
         row_indices = row_indices[perm]
         col_indices = col_indices[perm]
+        vals = vals[perm]
 
         indices = torch.stack([row_indices, col_indices], dim=0)  # [2, nnz]
 
-        vals = torch.cat([-cm_g, cm_g], dim=0).to(torch.float32)
-        vals = vals[perm]
-
         # Create sparse tensor with shape (N_g, E_g): rows=nodes, cols=edges
         sparse_g = torch.sparse_coo_tensor(indices, vals, size=(N_g, E_g), dtype=torch.float32, device=device)
+        out.append(sparse_g)
+
         # print(f"[GNN][CREATE_DELTA2] Graph {g}: N_g={N_g}, E_g={E_g}, nnz: {sparse_g._nnz()}")
         # print(f"[GNN][CREATE_DELTA2] Indices sample: {sparse_g._indices()}")
         # print(f"[GNN][CREATE_DELTA2] Values sample: {sparse_g._values()}")
-        out.append(sparse_g)
 
     return out
 
@@ -424,7 +429,6 @@ def physics_residual(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
     Args:
         y_pred: Predicted sucrose concentrations [N, 1]
         data: Graph data containing topology and features
-        model: PhloemNNConv model instance for scaling transformations
 
     Returns:
         torch.Tensor: Physics residual loss term
@@ -462,7 +466,7 @@ def physics_residual(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
     Jw = psi_j - psi_i
 
     # (Optional / debug) Incidence matrices aligned by physics; not used in residual here
-    # deltas_physics = create_delta2(data, psi)
+    # delta2_physics = create_delta2(data, psi)
 
     # Use the upstream node’s sucrose for the advective term:
     # If Jw < 0 (src -> dst), upstream is src, thus pick s_i
@@ -489,7 +493,7 @@ def physics_residual(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
     if hasattr(data, 'time_node'):
         # Compute gradient of predictions w.r.t. time_node [N,1]
         ds_dt = torch.autograd.grad(
-            y_pred.sum(),        # sum to get scalar for gradient computation
+            y_pred.sum(),        # sum to get scalar for gradient computation. trick to avoid building the full Jacobian
             data.time_node,      # [N,1] per-node time features
             create_graph=True,   # needed for second backward pass
             retain_graph=True    # keep graph for subsequent loss computation

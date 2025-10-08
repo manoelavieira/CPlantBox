@@ -112,23 +112,6 @@ def load_graph_data(h5_file: h5py.File, timestep: int) -> Data:
     # Use timestep as time feature
     time = torch.tensor(timestep, dtype=torch.float32)
 
-    cols = torch.tensor(h5_file[f'{step_key}/arrays/Delta2/col'][:], dtype=torch.long)
-    rows = torch.tensor(h5_file[f'{step_key}/arrays/Delta2/row'][:], dtype=torch.long)
-    vals = torch.tensor(h5_file[f'{step_key}/arrays/Delta2/val'][:], dtype=torch.float32)
-
-    # print(f"\nLoading Delta2 sparse matrix:")
-    # print(f"row_shape: {rows.shape}, col_shape: {cols.shape}, val_shape: {vals.shape}")
-
-    indices = torch.stack([rows, cols], dim=0)
-
-    n_rows = int(rows.max().item() + 1)
-    n_cols = int(cols.max().item() + 1)
-
-    # print(f"Delta2 matrix size: {n_rows} x {n_cols}")
-    # print(f"indices shape: {indices.shape}")
-
-    Delta2_sparse = torch.sparse_coo_tensor(indices, vals, size=(n_rows, n_cols), dtype=torch.float32)
-
     # Create PyG Data object with explicit num_nodes
     data = Data(
         node_feat=node_feat,    # Node features [N, 2]
@@ -137,8 +120,7 @@ def load_graph_data(h5_file: h5py.File, timestep: int) -> Data:
         edge_org=edge_org,      # Edge organ types [E]
         y=y,                    # Target values [N, 1]
         time=time,              # Graph-level time feature [1]
-        num_nodes=num_nodes,    # Explicitly set number of nodes
-        Delta2=Delta2_sparse    # Sparse matrix for sucrose diffusion
+        num_nodes=num_nodes    # Explicitly set number of nodes
     )
 
     return data

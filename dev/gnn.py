@@ -325,107 +325,6 @@ class PhloemNNConv(nn.Module):
 # -----------------
 # Physics hook
 # -----------------
-def reconstruct_delta2(data: Data, device: Optional[torch.device] = None):
-    """
-    Reconstruct a list of per-graph Delta2 matrices from a batched Data object.
-
-    In the batched format, Delta2 matrices are concatenated along the edge dimension
-    (columns) while each graph retains its original local node row indexing.
-
-    Args:
-        data: Batched PyG Data object containing Delta2 sparse matrix and batch information
-        device: Target device for the output matrices
-
-    Returns:
-        List[torch.sparse_coo_tensor]: List of per-graph Delta2 matrices with shapes [(N_g, E_g), ...]
-        where rows=nodes and columns=edges, consistent with create_delta2 format.
-    """
-    if device is None:
-        device = data.edge_index.device if hasattr(data, 'edge_index') else torch.device('cpu')
-
-    if not hasattr(data, 'Delta2'):
-        raise ValueError("Data object must contain Delta2 attribute")
-
-    if not hasattr(data, 'batch'):
-        raise ValueError("Data object must contain batch information for graph separation")
-
-    # Move data to target device
-    edge_index = data.edge_index.to(device)
-    batch = data.batch.to(device)
-    delta2 = data.Delta2.to(device)
-
-    src = edge_index[0]
-    dst = edge_index[1]
-
-    # Get batch information
-    edge_graph = batch[src]  # Graph index for each edge
-    num_graphs = int(batch.max().item() + 1)
-
-    # Get global Delta2 indices and values
-    global_indices = delta2._indices()  # [2, nnz]
-    global_values = delta2._values()    # [nnz]
-
-    per_graph_matrices = []
-    edge_offset = 0
-
-    for g in range(num_graphs):
-        # Get nodes and edges for this graph
-        mask_nodes = (batch == g)
-        mask_edges = (edge_graph == g)
-
-        node_idx = torch.nonzero(mask_nodes, as_tuple=False).view(-1)
-        N_g = node_idx.numel()
-        E_g = int(mask_edges.sum().item())
-
-        # Define the range of edges for this graph (columns in Delta2)
-        edge_start = edge_offset
-        edge_end = edge_offset + E_g
-
-        # Build a local map from global node index -> local node index [0, N_g-1]
-        # The Delta2 global indices use global node ids for rows, so we must
-        # remap them into the local node index space for this graph.
-        total_nodes = batch.size(0)
-        local_map = torch.full((total_nodes,), -1, device=device, dtype=torch.long)
-        if N_g > 0:
-            local_map[node_idx] = torch.arange(N_g, device=device, dtype=torch.long)
-
-        # Select entries where row (global node id) belongs to this graph
-        # and column (global edge id) falls into this graph's edge range
-        row_in_graph = local_map[global_indices[0]] >= 0
-        col_in_graph = (global_indices[1] >= edge_start) & (global_indices[1] < edge_end)
-        entry_mask = row_in_graph & col_in_graph
-
-        if entry_mask.sum() == 0:
-            # Create empty sparse matrix
-            empty_indices = torch.zeros((2, 0), dtype=torch.long, device=device)
-            empty_values = torch.zeros(0, dtype=delta2.dtype, device=device)
-            sparse_g = torch.sparse_coo_tensor(empty_indices, empty_values,
-                                             size=(N_g, E_g), dtype=delta2.dtype, device=device)
-        else:
-            # Extract relevant indices and values
-            local_indices = global_indices[:, entry_mask].clone()
-            local_values = global_values[entry_mask].clone()
-
-            # Map global row indices (global node ids) to local node indices
-            local_indices[0] = local_map[local_indices[0]]
-            # Convert global edge column indices to local edge indices
-            local_indices[1] = local_indices[1] - edge_start
-
-            # Create sparse matrix for this graph [N_g, E_g]: rows=nodes, cols=edges
-            sparse_g = torch.sparse_coo_tensor(local_indices, local_values,
-                                               size=(N_g, E_g), dtype=delta2.dtype, device=device)
-
-        # print(f"[GNN][RECONSTRUCT_DELTA2] Graph {g}: N_g={N_g}, E_g={E_g}, nnz={sparse_g._nnz()}")
-        # print(f"[GNN][RECONSTRUCT_DELTA2] Indices sample: {sparse_g._indices()}")
-
-        per_graph_matrices.append(sparse_g)
-
-        # Update edge offset for next graph
-        edge_offset += E_g
-
-    return per_graph_matrices
-
-
 def create_delta2(data: Data, psi: torch.Tensor, align_to_upstream: bool = True,
                   dtype: Optional[torch.dtype] = None, device: Optional[torch.device] = None):
     """Create a flow-aligned incidence matrix per-edge using node potentials `psi`.
@@ -564,14 +463,6 @@ def physics_residual(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
     Jw = psi_j - psi_i
 
     deltas_physics = create_delta2(data, psi)
-    deltas_h5 = reconstruct_delta2(data)
-
-    print(f"[PHYSICS] Created {len(deltas_physics)} Delta2 matrices from psi")
-    print(f"[PHYSICS] delta2[0] nnz: {deltas_physics[0]._nnz()}, shape: {deltas_physics[0].shape}")
-    print(f"[PHYSICS] delta2[1] nnz: {deltas_physics[1]._nnz()}, shape: {deltas_physics[1].shape}")
-    print(f"[PHYSICS] Reconstructed {len(deltas_h5)} Delta2 matrices from data")
-    print(f"[PHYSICS] delta2[0] nnz: {deltas_h5[0]._nnz()}, shape: {deltas_h5[0].shape}")
-    print(f"[PHYSICS] delta2[1] nnz: {deltas_h5[1]._nnz()}, shape: {deltas_h5[1].shape}")
 
     # Upwind sucrose (take upstream node’s sucrose)
     # s_ij is the sucrose value of the node where the fluid originates (the source/upstream node)

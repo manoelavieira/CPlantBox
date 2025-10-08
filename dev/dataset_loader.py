@@ -31,13 +31,13 @@ def get_edge_index_from_topology(I_Upflow: np.ndarray, I_Downflow: np.ndarray, c
     edges = []
 
     if connectivity is not None:
-        print("> Using connectivity array for edge construction")
+        # print("> Using connectivity array for edge construction")
         n_edges = len(connectivity)
         for e in range(n_edges):
             up, down = connectivity[e]
             edges.append([up, down])  # add directed edge
     else:
-        print("> Using I_Upflow/I_Downflow arrays for edge construction")
+        # print("> Using I_Upflow/I_Downflow arrays for edge construction")
         n_edges = len(I_Upflow)
         for e in range(n_edges):
             up, down = I_Upflow[e], I_Downflow[e]
@@ -46,7 +46,7 @@ def get_edge_index_from_topology(I_Upflow: np.ndarray, I_Downflow: np.ndarray, c
     if not edges:
         raise ValueError("No valid edges found")
 
-    print(f"Number of edges: {len(edges)}")
+    # print(f"Number of edges: {len(edges)}")
 
     # Convert list of [src, dst] edges (shape [E, 2]) into PyG format [2, E]:
     #   1. torch.tensor(..., long) -> create integer tensor of edges
@@ -97,20 +97,37 @@ def load_graph_data(h5_file: h5py.File, timestep: int) -> Data:
     # so each edge has an explicit single feature column (required by PyG)
     r_st = torch.tensor(h5_file[f'{step_key}/segments/r_ST'][:], dtype=torch.float32)
     edge_feat = r_st.view(-1, 1)  # [E, 1]
-    print(f"edge_feat_shape: {edge_feat.shape}, edge_feat_dtype: {edge_feat.dtype}")
+    # print(f"edge_feat_shape: {edge_feat.shape}, edge_feat_dtype: {edge_feat.dtype}")
 
     org_types = torch.tensor(h5_file[f'{step_key}/segments/organ_types'][:], dtype=torch.long)
     # Map organ types: 2->0 (root), 3->1 (stem), 4->2 (leaf) for embedding lookup
     org_type_map = {2: 0, 3: 1, 4: 2}
     edge_org = torch.tensor([org_type_map[int(t)] for t in org_types], dtype=torch.long)
-    print(f"edge_org_shape: {edge_org.shape}, edge_org_dtype: {edge_org.dtype}")
+    # print(f"edge_org_shape: {edge_org.shape}, edge_org_dtype: {edge_org.dtype}")
 
     # Load target values (sucrose concentration)
-    y = torch.tensor(h5_file[f'{step_key}/nodes/C_ST_np'][:], dtype=torch.float32).view(-1, 1)
-    print(f"y_shape: {y.shape}, y_dtype: {y.dtype}")
+    y = torch.tensor(h5_file[f'{step_key}/nodes/Q_ST'][:], dtype=torch.float32).view(-1, 1)
+    # print(f"y_shape: {y.shape}, y_dtype: {y.dtype}")
 
     # Use timestep as time feature
     time = torch.tensor(timestep, dtype=torch.float32)
+
+    cols = torch.tensor(h5_file[f'{step_key}/arrays/Delta2/col'][:], dtype=torch.long)
+    rows = torch.tensor(h5_file[f'{step_key}/arrays/Delta2/row'][:], dtype=torch.long)
+    vals = torch.tensor(h5_file[f'{step_key}/arrays/Delta2/val'][:], dtype=torch.float32)
+
+    # print(f"\nLoading Delta2 sparse matrix:")
+    # print(f"row_shape: {rows.shape}, col_shape: {cols.shape}, val_shape: {vals.shape}")
+
+    indices = torch.stack([rows, cols], dim=0)
+
+    n_rows = int(rows.max().item() + 1)
+    n_cols = int(cols.max().item() + 1)
+
+    # print(f"Delta2 matrix size: {n_rows} x {n_cols}")
+    # print(f"indices shape: {indices.shape}")
+
+    Delta2_sparse = torch.sparse_coo_tensor(indices, vals, size=(n_rows, n_cols), dtype=torch.float32)
 
     # Create PyG Data object with explicit num_nodes
     data = Data(
@@ -120,7 +137,8 @@ def load_graph_data(h5_file: h5py.File, timestep: int) -> Data:
         edge_org=edge_org,      # Edge organ types [E]
         y=y,                    # Target values [N, 1]
         time=time,              # Graph-level time feature [1]
-        num_nodes=num_nodes     # Explicitly set number of nodes
+        num_nodes=num_nodes,    # Explicitly set number of nodes
+        Delta2=Delta2_sparse    # Sparse matrix for sucrose diffusion
     )
 
     return data

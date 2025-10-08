@@ -322,24 +322,291 @@ class PhloemNNConv(nn.Module):
         return out
 
 
-# -----------------------------------------
-# Physics hook (non operational for now)
-# -----------------------------------------
-def physics_residual(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
-    """Placeholder for future physics-informed residuals.
-    Currently returns 0.0 and issues a warning. When implemented, will compute
-    physical residuals using the predicted values and data fields.
+# -----------------
+# Physics hook
+# -----------------
+def reconstruct_delta2(data: Data, device: Optional[torch.device] = None):
+    """
+    Reconstruct a list of per-graph Delta2 matrices from a batched Data object.
+
+    In the batched format, Delta2 matrices are concatenated along the edge dimension
+    (columns) while each graph retains its original local node row indexing.
 
     Args:
-        y_pred: Predicted values from the model
-        data: Graph data object containing features and topology
+        data: Batched PyG Data object containing Delta2 sparse matrix and batch information
+        device: Target device for the output matrices
 
     Returns:
-        torch.Tensor: Physics-based residual term (currently 0.0)
+        List[torch.sparse_coo_tensor]: List of per-graph Delta2 matrices with shapes [(N_g, E_g), ...]
+        where rows=nodes and columns=edges, consistent with create_delta2 format.
     """
-    warnings.warn(
-        "physics_residual() is not yet implemented and returns 0.0. "
-        "Physical constraints are not being enforced.",
-        RuntimeWarning, stacklevel=2
-    )
-    return torch.tensor(0.0, device=y_pred.device)
+    if device is None:
+        device = data.edge_index.device if hasattr(data, 'edge_index') else torch.device('cpu')
+
+    if not hasattr(data, 'Delta2'):
+        raise ValueError("Data object must contain Delta2 attribute")
+
+    if not hasattr(data, 'batch'):
+        raise ValueError("Data object must contain batch information for graph separation")
+
+    # Move data to target device
+    edge_index = data.edge_index.to(device)
+    batch = data.batch.to(device)
+    delta2 = data.Delta2.to(device)
+
+    src = edge_index[0]
+    dst = edge_index[1]
+
+    # Get batch information
+    edge_graph = batch[src]  # Graph index for each edge
+    num_graphs = int(batch.max().item() + 1)
+
+    # Get global Delta2 indices and values
+    global_indices = delta2._indices()  # [2, nnz]
+    global_values = delta2._values()    # [nnz]
+
+    per_graph_matrices = []
+    edge_offset = 0
+
+    for g in range(num_graphs):
+        # Get nodes and edges for this graph
+        mask_nodes = (batch == g)
+        mask_edges = (edge_graph == g)
+
+        node_idx = torch.nonzero(mask_nodes, as_tuple=False).view(-1)
+        N_g = node_idx.numel()
+        E_g = int(mask_edges.sum().item())
+
+        # Define the range of edges for this graph (columns in Delta2)
+        edge_start = edge_offset
+        edge_end = edge_offset + E_g
+
+        # Build a local map from global node index -> local node index [0, N_g-1]
+        # The Delta2 global indices use global node ids for rows, so we must
+        # remap them into the local node index space for this graph.
+        total_nodes = batch.size(0)
+        local_map = torch.full((total_nodes,), -1, device=device, dtype=torch.long)
+        if N_g > 0:
+            local_map[node_idx] = torch.arange(N_g, device=device, dtype=torch.long)
+
+        # Select entries where row (global node id) belongs to this graph
+        # and column (global edge id) falls into this graph's edge range
+        row_in_graph = local_map[global_indices[0]] >= 0
+        col_in_graph = (global_indices[1] >= edge_start) & (global_indices[1] < edge_end)
+        entry_mask = row_in_graph & col_in_graph
+
+        if entry_mask.sum() == 0:
+            # Create empty sparse matrix
+            empty_indices = torch.zeros((2, 0), dtype=torch.long, device=device)
+            empty_values = torch.zeros(0, dtype=delta2.dtype, device=device)
+            sparse_g = torch.sparse_coo_tensor(empty_indices, empty_values,
+                                             size=(N_g, E_g), dtype=delta2.dtype, device=device)
+        else:
+            # Extract relevant indices and values
+            local_indices = global_indices[:, entry_mask].clone()
+            local_values = global_values[entry_mask].clone()
+
+            # Map global row indices (global node ids) to local node indices
+            local_indices[0] = local_map[local_indices[0]]
+            # Convert global edge column indices to local edge indices
+            local_indices[1] = local_indices[1] - edge_start
+
+            # Create sparse matrix for this graph [N_g, E_g]: rows=nodes, cols=edges
+            sparse_g = torch.sparse_coo_tensor(local_indices, local_values,
+                                               size=(N_g, E_g), dtype=delta2.dtype, device=device)
+
+        # print(f"[GNN][RECONSTRUCT_DELTA2] Graph {g}: N_g={N_g}, E_g={E_g}, nnz={sparse_g._nnz()}")
+        # print(f"[GNN][RECONSTRUCT_DELTA2] Indices sample: {sparse_g._indices()}")
+
+        per_graph_matrices.append(sparse_g)
+
+        # Update edge offset for next graph
+        edge_offset += E_g
+
+    return per_graph_matrices
+
+
+def create_delta2(data: Data, psi: torch.Tensor, align_to_upstream: bool = True,
+                  dtype: Optional[torch.dtype] = None, device: Optional[torch.device] = None):
+    """Create a flow-aligned incidence matrix per-edge using node potentials `psi`.
+
+    For each edge e (src->dst) we compute Jw = psi_j - psi_i. The sign of Jw indicates
+    the flow proxy. If `align_to_upstream=True`, columns are multiplied so that the +1
+    entry lies on the upstream node (the node where the fluid originates). If False,
+    +1 will be placed on the downstream node.
+
+    Args:
+        data: torch_geometric.data.Data with `edge_index` and optional `batch`/`num_graphs`.
+        psi: per-node potential tensor of shape [N] (or [N,] float tensor).
+        align_to_upstream: if True, +1 is on upstream node (source of flow); else +1 on downstream.
+        dtype, device: optional dtype/device for outputs.
+
+    Returns:
+        sparse_coo_tensor or list of such (or dense tensors if as_dense=True).
+    """
+    if device is None:
+        device = data.edge_index.device if hasattr(data, 'edge_index') else torch.device('cpu')
+
+    edge_index = data.edge_index.to(device)
+    psi = psi.to(device)
+
+    N_total = int(edge_index.max().item() + 1)
+
+    src = edge_index[0]
+    dst = edge_index[1]
+
+    # Flow proxy Jw and its sign
+    # If Jw > 0, flow is dst -> src (dst is upstream); If Jw < 0, flow is src -> dst (src is upstream)
+    Jw = psi[dst] - psi[src]
+    sign = torch.sign(Jw)
+
+    # Replace zeros (no gradient) with +1 to keep a deterministic orientation
+    sign[sign == 0.] = 1.
+
+    # If align_to_upstream is True, multiply by sign so that +1 is at upstream node
+    # Original column has [-1 at src, +1 at dst]. Multiplying by sign gives [-sign, +sign].
+    # If align_to_upstream=False, flip the sign to put +1 on downstream.
+    col_multiplier = sign if align_to_upstream else -sign
+
+    # Per-graph signed incidence
+    batch = data.batch.to(device)
+    edge_graph = batch[src]
+    num_graphs = int(batch.max().item() + 1)
+    out = []
+    for g in range(num_graphs):
+        mask_nodes = (batch == g)
+        node_idx = torch.nonzero(mask_nodes, as_tuple=False).view(-1) # torch.nonzero returns the indices where mask_nodes is True
+        N_g = node_idx.numel()
+
+        mask_edges = (edge_graph == g)
+        E_g = int(mask_edges.sum().item())
+
+        # local mapping
+        local_map = torch.full((N_total,), -1, device=device, dtype=torch.long)
+        local_map[node_idx] = torch.arange(N_g, device=device, dtype=torch.long) # torch.arange(N_g) generates [0, 1, 2, ..., N_g-1].
+
+        src_g = local_map[src[mask_edges]]
+        dst_g = local_map[dst[mask_edges]]
+
+        cm_g = col_multiplier[mask_edges]
+
+        # For an N x E incidence matrix (rows=nodes, cols=edges) we need
+        # indices shaped as [row_indices(node), col_indices(edge)]. Each edge
+        # contributes two entries: -1 on source node row, +1 on target node row.
+        row_indices = torch.cat([src_g, dst_g], dim=0)               # node rows
+        col_indices = torch.cat([torch.arange(E_g, device=device), torch.arange(E_g, device=device)], dim=0)  # edge cols
+
+        # Optionally sort by column (edge) for nicer ordering/debugging
+        perm = torch.argsort(col_indices)
+        row_indices = row_indices[perm]
+        col_indices = col_indices[perm]
+
+        indices = torch.stack([row_indices, col_indices], dim=0)  # [2, nnz]
+
+        vals = torch.cat([-cm_g, cm_g], dim=0).to(torch.float32)
+        vals = vals[perm]
+
+        # Create sparse tensor with shape (N_g, E_g): rows=nodes, cols=edges
+        sparse_g = torch.sparse_coo_tensor(indices, vals, size=(N_g, E_g), dtype=torch.float32, device=device)
+        # print(f"[GNN][CREATE_DELTA2] Graph {g}: N_g={N_g}, E_g={E_g}, nnz: {sparse_g._nnz()}")
+        # print(f"[GNN][CREATE_DELTA2] Indices sample: {sparse_g._indices()}")
+        out.append(sparse_g)
+
+    return out
+
+
+def physics_residual(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
+    """Compute physics-informed residual term based on sucrose transport equations.
+
+    Implements the simplified governing equation:
+    ds_{st,q,j}/dt = J_{ax,st,j}
+
+    Args:
+        y_pred: Predicted sucrose concentrations [N, 1]
+        data: Graph data containing topology and features
+        model: PhloemNNConv model instance for scaling transformations
+
+    Returns:
+        torch.Tensor: Physics residual loss term
+    """
+    device = y_pred.device
+
+    # Constants (should be loaded from H5 file in practice)
+    R = 8.314  # Gas constant [J/(mol·K)]
+    T = 298.15  # Temperature [K]
+    RT = R * T
+
+    # Get edge topology and features
+    edge_index = data.edge_index.to(device)  # [2, E]
+
+    src, dst = edge_index[0], edge_index[1]
+    r_st = data.edge_feat.to(device).squeeze(-1)  # [E, 1] resistance terms (K_ax/L)
+
+    node_graph = data.batch  # graph index per node
+    edge_graph = data.batch[src]  # graph index per edge (edges never connect nodes from different graphs)
+    # for g in range(data.num_graphs):
+    #     mask_nodes = (node_graph == g)
+    #     mask_edges = (edge_graph == g)
+
+    # Node features (already in original space)
+    node_feat = data.node_feat.to(device)
+    psi = node_feat[:, 0]
+
+    # Sucrose at endpoints (original units)
+    s_i = y_pred[src, 0]
+    s_j = y_pred[dst, 0]
+
+    # Water potential differences
+    psi_i = psi[src]
+    psi_j = psi[dst]
+
+    # Flow direction proxy: Jw < 0 means i -> j; Jw > 0 means j -> i
+    Jw = psi_j - psi_i
+
+    deltas_physics = create_delta2(data, psi)
+    deltas_h5 = reconstruct_delta2(data)
+
+    print(f"[PHYSICS] Created {len(deltas_physics)} Delta2 matrices from psi")
+    print(f"[PHYSICS] delta2[0] nnz: {deltas_physics[0]._nnz()}, shape: {deltas_physics[0].shape}")
+    print(f"[PHYSICS] delta2[1] nnz: {deltas_physics[1]._nnz()}, shape: {deltas_physics[1].shape}")
+    print(f"[PHYSICS] Reconstructed {len(deltas_h5)} Delta2 matrices from data")
+    print(f"[PHYSICS] delta2[0] nnz: {deltas_h5[0]._nnz()}, shape: {deltas_h5[0].shape}")
+    print(f"[PHYSICS] delta2[1] nnz: {deltas_h5[1]._nnz()}, shape: {deltas_h5[1].shape}")
+
+    # Upwind sucrose (take upstream node’s sucrose)
+    # s_ij is the sucrose value of the node where the fluid originates (the source/upstream node)
+    s_ij = torch.where(Jw < 0, s_i, s_j)
+
+    for g in range(data.num_graphs):
+        mask_edges = (edge_graph == g)
+        s_ij_g = s_ij[mask_edges]
+
+        # print(f"s_ij for graph {g}: {s_ij_g}")
+
+    # Compute axial flux J_ax for each edge
+    # J_{ax} = s_ij * r_st * (RT * (s_j - s_i) + (psi_j - psi_i))
+    J_ax = s_ij * r_st * (RT * (s_j - s_i) + (psi_j - psi_i))
+
+    # Divergence of flux -> net inflow per node
+    # This computes the sum of incoming/outgoing fluxes for each node
+    N = y_pred.size(0)
+    dS_dt_from_flux = torch.zeros(N, device=device)
+    dS_dt_from_flux.scatter_add_(0, dst, J_ax)   # Add incoming fluxes
+    dS_dt_from_flux.scatter_add_(0, src, -J_ax)  # Subtract outgoing fluxes
+
+    # Get time derivatives using per-node time gradients
+    if hasattr(data, 'time_node'):
+        # Compute gradient of predictions w.r.t. time_node [N,1]
+        ds_dt = torch.autograd.grad(
+            y_pred.sum(),        # sum to get scalar for gradient computation
+            data.time_node,      # [N,1] per-node time features
+            create_graph=True,   # needed for second backward pass
+            retain_graph=True    # keep graph for subsequent loss computation
+        )[0].squeeze()
+    else:
+        raise ValueError("data.time_node not found. data.time_node is required for physics residual computation.")
+
+    # Compute residual as the difference between computed derivatives
+    residual = (ds_dt.squeeze() - dS_dt_from_flux)**2
+
+    return residual.mean()

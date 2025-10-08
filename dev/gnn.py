@@ -250,11 +250,11 @@ class PhloemNNConv(nn.Module):
             self.time_scaler.to(device)
         return super().to(device)
 
-    def forward(self, data: Data, t: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, data: Data) -> torch.Tensor:
         """Forward pass of the model.
 
         Args:
-            data: Graph data object containing node features, edge features, and topology
+            data: Graph data object containing node features, edge features, topology and time
 
         Returns:
             torch.Tensor: Predicted sucrose concentration for each node [N, 1]
@@ -268,31 +268,35 @@ class PhloemNNConv(nn.Module):
         edge_org: torch.Tensor = data.edge_org.to(device)  # [E] categorical organ type per edge
 
         # Graph-level time handling
-        # Accept t from argument, or read from data.time (required if t is None)
-        if t is None:
-            if not hasattr(data, 'time'):
-                raise ValueError("Missing graph-level time. Provide t or set data.time.")
-            t = data.time
-        t = t.to(device)
+        if not hasattr(data, 'time'):
+            raise ValueError("Missing graph-level time. data.time is required.")
+        t = data.time.to(device)
 
-        # Ensure shape [num_graphs] for batching logic
+        # Create differentiable per-node time feature
         if t.dim() == 0:
             t = t.unsqueeze(0)
 
-        # Standardize time if a scaler is available (keep it differentiable)
+        # Standardize time if scaler available
         if self.time_scaler is not None and getattr(self.time_scaler, "mean", None) is not None:
             t_scaled = self.time_scaler.transform(t.view(-1, 1)).view(-1)
         else:
             t_scaled = t
 
-        # Broadcast per-graph time to per-node time
+        # Create per-node time with requires_grad=True
         if hasattr(data, 'batch') and data.batch is not None:
-            t_node = t_scaled[data.batch]
+            # For batched graphs
+            t_node = t_scaled[data.batch].clone()
         else:
-            t_node = t_scaled.expand(node_feat.size(0))
+            # Single graph
+            t_node = t_scaled.expand(node_feat.size(0)).clone()
 
-        # Concatenate as an extra channel (keep gradient w.r.t. t_node)
-        node_feat = torch.cat([node_feat, t_node.view(-1, 1)], dim=1) # [N, 3]
+        # Ensure time has gradients and reshape
+        t_node = t_node.view(-1, 1)     # [N, 1]
+        t_node.requires_grad_(True)     # make time differentiable per node
+        data.time_node = t_node         # store time in data for physics computation
+
+        # Concatenate as extra channel
+        node_feat = torch.cat([node_feat, t_node], dim=1)  # [N, 3]
 
         # Pre-allocate tensor for edge features
         edge_features = torch.empty(edge_feat.size(0), edge_feat.size(1) + 1,

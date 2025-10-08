@@ -25,10 +25,11 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch_scatter import scatter_mean
 
 from torch_geometric.data import Data
 from torch_geometric.nn import NNConv
-import warnings
+from torch_geometric.nn.norm import GraphNorm  # per-graph normalization
 
 # -----------------------------
 # Small utilities
@@ -197,7 +198,7 @@ class PhloemNNConv(nn.Module):
                           nn=edge_mlp,
                           aggr=cfg.aggr)
             conv_layers.append(conv)
-            norm_layers.append(nn.BatchNorm1d(cfg.hidden_size))
+            norm_layers.append(GraphNorm(cfg.hidden_size))  # per-graph stats
             current_dim = cfg.hidden_size
 
         self.convs = nn.ModuleList(conv_layers)
@@ -304,11 +305,18 @@ class PhloemNNConv(nn.Module):
         edge_features[:, :-1] = edge_feat
         edge_features[:, -1] = edge_org.float()
 
-        # stack NNConv layers with residual connections
+        # Stack NNConv layers with residual connections
+        # GraphNorm needs a batch vector; synthesize one if missing
+        batch_vec = getattr(data, "batch", None)
         for conv, bn in zip(self.convs, self.norms):
             # Process combined edge features through NNConv
             h = conv(node_feat, edge_index, edge_features)
-            h = bn(h)
+            if batch_vec is None:
+                # single-graph case: put all nodes in graph 0
+                fake_batch = torch.zeros(h.size(0), dtype=torch.long, device=h.device)
+                h = bn(h, fake_batch)
+            else:
+                h = bn(h, batch_vec)
             h = F.relu(h)
             h = self.dropout(h)
 
@@ -502,6 +510,16 @@ def physics_residual(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
         raise ValueError("data.time_node not found. data.time_node is required for physics residual computation.")
 
     # Compute residual as the difference between computed derivatives
-    residual = (ds_dt.squeeze() - dS_dt_from_flux)**2
+    residual_node = (ds_dt.squeeze() - dS_dt_from_flux).pow(2)
 
-    return residual.mean()
+    # Average per graph first (so each graph contributes equally),
+    # then average across graphs. Fall back to simple mean if no batch.
+    batch_vec = getattr(data, "batch", None)
+    if batch_vec is not None:
+        # [G] mean per graph
+        residual_per_graph = scatter_mean(residual_node, batch_vec, dim=0)
+        loss = residual_per_graph.mean()
+    else:
+        loss = residual_node.mean()
+
+    return loss

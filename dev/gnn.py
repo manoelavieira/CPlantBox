@@ -326,7 +326,7 @@ class PhloemNNConv(nn.Module):
 # Physics hook
 # -----------------
 def create_delta2(data: Data, psi: torch.Tensor, align_to_upstream: bool = True,
-                  dtype: Optional[torch.dtype] = None, device: Optional[torch.device] = None):
+                  device: Optional[torch.device] = None):
     """Create a flow-aligned incidence matrix per-edge using node potentials `psi`.
 
     For each edge e (src->dst) we compute Jw = psi_j - psi_i. The sign of Jw indicates
@@ -409,6 +409,7 @@ def create_delta2(data: Data, psi: torch.Tensor, align_to_upstream: bool = True,
         sparse_g = torch.sparse_coo_tensor(indices, vals, size=(N_g, E_g), dtype=torch.float32, device=device)
         # print(f"[GNN][CREATE_DELTA2] Graph {g}: N_g={N_g}, E_g={E_g}, nnz: {sparse_g._nnz()}")
         # print(f"[GNN][CREATE_DELTA2] Indices sample: {sparse_g._indices()}")
+        # print(f"[GNN][CREATE_DELTA2] Values sample: {sparse_g._values()}")
         out.append(sparse_g)
 
     return out
@@ -443,9 +444,6 @@ def physics_residual(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
 
     node_graph = data.batch  # graph index per node
     edge_graph = data.batch[src]  # graph index per edge (edges never connect nodes from different graphs)
-    # for g in range(data.num_graphs):
-    #     mask_nodes = (node_graph == g)
-    #     mask_edges = (edge_graph == g)
 
     # Node features (already in original space)
     node_feat = data.node_feat.to(device)
@@ -459,33 +457,35 @@ def physics_residual(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
     psi_i = psi[src]
     psi_j = psi[dst]
 
-    # Flow direction proxy: Jw < 0 means i -> j; Jw > 0 means j -> i
+    # Jw < 0: psi_i > psi_j (physical flow src -> dst (arrow direction))
+    # Jw > 0: psi_j > psi_i (physical flow dst -> src (arrow direction))
     Jw = psi_j - psi_i
 
-    deltas_physics = create_delta2(data, psi)
+    # (Optional / debug) Incidence matrices aligned by physics; not used in residual here
+    # deltas_physics = create_delta2(data, psi)
 
-    # Upwind sucrose (take upstream node’s sucrose)
-    # s_ij is the sucrose value of the node where the fluid originates (the source/upstream node)
+    # Use the upstream node’s sucrose for the advective term:
+    # If Jw < 0 (src -> dst), upstream is src, thus pick s_i
+    # If Jw > 0 (dst -> src), upstream is dst, thus pick s_j
     s_ij = torch.where(Jw < 0, s_i, s_j)
 
-    for g in range(data.num_graphs):
-        mask_edges = (edge_graph == g)
-        s_ij_g = s_ij[mask_edges]
-
-        # print(f"s_ij for graph {g}: {s_ij_g}")
-
-    # Compute axial flux J_ax for each edge
-    # J_{ax} = s_ij * r_st * (RT * (s_j - s_i) + (psi_j - psi_i))
-    J_ax = s_ij * r_st * (RT * (s_j - s_i) + (psi_j - psi_i))
+    # Sign choice below makes J_ax > 0 correspond to flow src -> dst (arrow direction)
+    # Jax > 0: Flow along edge direction (src → dst)
+    # Jax < 0: Flow opposite to edge direction (dst → src)
+    # If psi_i > psi_j (and/or s_i > s_j), driving > 0, giving J_ax > 0 (src -> dst).
+    J_ax = s_ij * r_st * (RT * (s_i - s_j) + (psi_i - psi_j))
 
     # Divergence of flux -> net inflow per node
     # This computes the sum of incoming/outgoing fluxes for each node
+    # dst node accumulates +J_ax   (incoming)
+    # src node accumulates -J_ax   (outgoing)
     N = y_pred.size(0)
     dS_dt_from_flux = torch.zeros(N, device=device)
     dS_dt_from_flux.scatter_add_(0, dst, J_ax)   # Add incoming fluxes
     dS_dt_from_flux.scatter_add_(0, src, -J_ax)  # Subtract outgoing fluxes
 
-    # Get time derivatives using per-node time gradients
+    # We need ds/dt from the model with respect to a differentiable time feature.
+    # Here data.time_node is assumed to be [N,1] and part of the computation graph.
     if hasattr(data, 'time_node'):
         # Compute gradient of predictions w.r.t. time_node [N,1]
         ds_dt = torch.autograd.grad(

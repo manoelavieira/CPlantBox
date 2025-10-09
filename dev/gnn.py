@@ -3,7 +3,7 @@ Phloem GNN (baseline) — NNConv with edge features
 -------------------------------------------------
 Predicts sucrose concentration per node at timestep t, given:
 - Plant topology (edge_index)
-- Node features at time t: water potential (psi), sieve-tube volume (vol_st)
+- Node features at time t: water potential (psi), sieve-tube volume (vol_st), leaf length (len_leaf)
 - Edge features at time t: sieve-tube resistance (r_st), organ type (categorical)
 
 
@@ -11,7 +11,7 @@ Expected `Data` fields per graph (per timestep)
 ----------------------------------------------
 - data.edge_index: LongTensor  [2, E]
 - data.edge_feat:  FloatTensor [E, 1]      # r_st (resistance)
-- data.node_feat:  FloatTensor [N, 2]      # [psi, vol_st]
+- data.node_feat:  FloatTensor [N, 3]      # [psi, vol_st, len_leaf]
 - data.time:       FloatTensor [1]         # time in days (graph-level)
 - data.y:          FloatTensor [N, 1]      # target sucrose at t
 - Optional: data.batch for mini-batching multiple graphs
@@ -92,7 +92,7 @@ class ModelConfig:
     """Configuration for PhloemNNConv model.
 
     Attributes:
-        node_feat_dim: Dimension of continuous node features [psi, vol_st]
+        node_feat_dim: Dimension of continuous node features [psi, vol_st, len_leaf]
         num_org_types: Number of organ types [LEAF, STEM, ROOT]
         org_emb_size: Dimension of organ type embeddings
         hidden_size: Dimension of hidden layers in NNConv/MLPs
@@ -101,7 +101,7 @@ class ModelConfig:
         aggr: NNConv aggregator type ("add", "mean", or "max")
         dropout: Dropout probability
     """
-    node_feat_dim: int = 2 # [psi, vol_st]
+    node_feat_dim: int = 3 # [psi, vol_st, len_leaf]
     edge_feat_dim: int = 1 # [r_st]
     num_org_types: int = 3
     org_emb_size: int = 8 # embedding dimension for categorical organ type

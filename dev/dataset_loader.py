@@ -9,7 +9,7 @@ import h5py
 import numpy as np
 import torch
 from torch_geometric.data import Data, Batch
-from typing import Tuple, List
+from typing import Tuple, List, Sequence, Dict
 from torch.utils.data import DataLoader
 import warnings
 
@@ -71,8 +71,25 @@ def load_graph_data(h5_file: h5py.File, timestep: int) -> Data:
     # Load node features
     psi = torch.tensor(h5_file[f'{step_key}/nodes/psiXyl4Phloem'][:], dtype=torch.float32)
     vol = torch.tensor(h5_file[f'{step_key}/nodes/vol_ST'][:], dtype=torch.float32)
-    node_feat = torch.stack([psi, vol], dim=1)  # [N, 2]
+    len_leaf = torch.tensor(h5_file[f'{step_key}/nodes/len_leaf'][:], dtype=torch.float32)
+
+    node_feat = torch.stack([psi, vol, len_leaf], dim=1)  # [N, 3]
     num_nodes = psi.shape[0]  # get actual number of nodes
+
+    # Load additional features needed physics residual calculation
+    node_fields_names = [
+        "C_ST_np", "C_meso", "Csoil_node", "Q_Exud", "Q_Exudmax",
+        "Q_Gr", "Q_Grmax", "Q_Rm", "Q_Rmmax", "Q_meso",
+        "vol_Meso", "vol_ST"
+    ]
+
+    node_fields = torch.empty((num_nodes, len(node_fields_names)), dtype=torch.float32)
+    for j, n in enumerate(node_fields_names):
+        node_fields[:, j] = torch.from_numpy(h5_file[f"{step_key}/nodes/{n}"][:]).to(torch.float32)
+
+    node_pos_np = h5_file[f"{step_key}/nodes/positions"][:]  # [N, 3]
+    node_pos = torch.from_numpy(node_pos_np.astype(np.float32, copy=False))
+
     print(f"\nStep {timestep}: Number of nodes = {num_nodes}")
     print(f"node_feat_shape: {node_feat.shape}, node_feat_dtype: {node_feat.dtype}")
 
@@ -112,15 +129,44 @@ def load_graph_data(h5_file: h5py.File, timestep: int) -> Data:
     # Use timestep as time feature
     time = torch.tensor(timestep, dtype=torch.float32)
 
+    # Load physics constants from parameters
+    sim_params = h5_file['parameters/SieveTube'].attrs
+
+    sim_params_names: Sequence[str] = (
+        "CSTimin", "C_targ", "KMfu", "Mloading", "Q10", "TrefQ10",
+        "beta_loading", "Vmaxloading", "krm2v"
+    )
+
+    sim_param_vals = []
+    sim_param_missing: Dict[str, bool] = {}
+    for k in sim_params_names:
+        if k in sim_params:
+            val = np.array(sim_params[k]).item()
+            sim_param_vals.append(float(val))
+        else:
+            sim_param_missing[k] = True
+            sim_param_vals.append(float("nan"))
+
+    if sim_param_missing:
+        missing_keys = ", ".join(sim_param_missing.keys())
+        print(f"[WARN] Missing SieveTube attrs at {step_key}: {missing_keys}")
+
+    sim_params = torch.tensor(sim_param_vals, dtype=torch.float32).view(1, -1)  # [1, K]
+
     # Create PyG Data object with explicit num_nodes
     data = Data(
-        node_feat=node_feat,    # Node features [N, 2]
+        node_feat=node_feat,    # Node features [N, 3] - [psi, vol_ST, len_leaf]
         edge_index=edge_index,  # Graph connectivity [2, E]
         edge_feat=edge_feat,    # Edge features [E, 1]
         edge_org=edge_org,      # Edge organ types [E]
         y=y,                    # Target values [N, 1]
         time=time,              # Graph-level time feature [1]
-        num_nodes=num_nodes    # Explicitly set number of nodes
+        num_nodes=num_nodes,    # Explicitly set number of nodes
+        sim_params=sim_params,                      # [1,K]
+        sim_params_names=list(sim_params_names),    # list[str] (not used in math; for reference)
+        node_fields=node_fields,                    # Additional node fields for physics residual [N, len(names)]
+        node_fields_names=list(node_fields_names),  # list[str] (not used in math; for reference)
+        node_pos=node_pos                           # Node positions [N, 3] (optional; for visualization)
     )
 
     return data

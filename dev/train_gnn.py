@@ -71,11 +71,13 @@ def train_one_epoch(
 
         # Physics computation in original space
         pred_orig = model.target_scaler.inv_transform(pred)
+
         # Temporarily restore original features for physics computation
         data.node_feat = x_orig
         phys = physics_residual(pred_orig, data)
         if phys.dim() > 0:
             phys = phys.sum()
+
         # Restore standardized features for next iteration
         data.node_feat = model.feature_scaler.transform(x_orig)
 

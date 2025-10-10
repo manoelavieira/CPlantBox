@@ -254,6 +254,10 @@ class PhloemNNConv(nn.Module):
     def forward(self, data: Data) -> torch.Tensor:
         """Forward pass of the model.
 
+        IMPORTANT: This method modifies the input data object by adding data.time_node,
+        which is essential for physics-informed loss computation. Always use the same
+        data object for both model forward pass and physics_residual calculation.
+
         Args:
             data: Graph data object containing node features, edge features, topology and time
 
@@ -431,22 +435,32 @@ def create_delta2(data: Data, psi: torch.Tensor, align_to_upstream: bool = True,
 def physics_residual(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
     """Compute physics-informed residual term based on sucrose transport equations.
 
-    Implements the simplified governing equation:
-    ds_{st,q,j}/dt = J_{ax,st,j}
+    Implements the governing equation:
+    ds_{st}/dt = J_ax + (F_in - F_out)
+
+    where:
+    - J_ax is the axial sucrose flux
+    - F_in is the phloem loading rate
+    - F_out is the sucrose outflow
+
+    IMPORTANT: y_pred MUST come from a model forward pass using the same data object,
+    so that data.time_node is properly connected to y_pred in the computation graph.
+    Without this connection, ds/dt cannot be computed and the physics constraint is meaningless.
 
     Args:
-        y_pred: Predicted sucrose concentrations [N, 1]
-        data: Graph data containing topology and features
+        y_pred: Predicted sucrose content [N, 1] - MUST be connected to data.time_node
+        data: Graph data containing topology, features, simulation parameters, and node fields
 
     Returns:
         torch.Tensor: Physics residual loss term
-    """
-    device = y_pred.device
 
-    # Constants (should be loaded from H5 file in practice)
-    R = 8.314  # Gas constant [J/(mol·K)]
-    T = 298.15  # Temperature [K]
-    RT = R * T
+    Raises:
+        ValueError: If y_pred is not connected to data.time_node in the computation graph
+    """
+    # Constants
+    R = 83.14  # gas constant [cm3 bar K-1 mol-1]
+
+    device = y_pred.device
 
     # Get edge topology and features
     edge_index = data.edge_index.to(device)  # [2, E]
@@ -454,12 +468,75 @@ def physics_residual(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
     src, dst = edge_index[0], edge_index[1]
     r_st = data.edge_feat.to(device).squeeze(-1)  # [E, 1] resistance terms (K_ax/L)
 
-    node_graph = data.batch  # graph index per node
-    edge_graph = data.batch[src]  # graph index per edge (edges never connect nodes from different graphs)
-
     # Node features (already in original space)
     node_feat = data.node_feat.to(device)
     psi = node_feat[:, 0]
+    len_leaf = node_feat[:, 2]
+
+    # Get physics constants from data (loaded from H5 file)
+    # Handle both single graphs and batched graphs with potentially different constants
+    batch_vec = getattr(data, "batch", None)
+
+    # Get simulation and step parameters
+    # Extract simulation and step parameters: order matches sim_params_names and step_params_names in dataset_loader.py
+    # ["CSTimin", "C_targ", "KMfu", "Mloading", "Q10", "TrefQ10", "beta_loading", "Vmaxloading", "krm2v"]
+    # ["PAR", "RH", "Tair", "co2", "iteration", "plant_age"]
+    sim_params = data.sim_params.to(device)  # [1, K] or [B, K] for batched data
+    step_params = data.step_params.to(device)  # [1, P] or [B, P] for batched data
+
+    if batch_vec is not None:
+        # Batched case: parameters per graph, map to nodes
+        CSTimin_per_node = sim_params[batch_vec, 0]
+        C_targ_per_node = sim_params[batch_vec, 1]
+        KMfu_per_node = sim_params[batch_vec, 2]
+        Mloading_per_node = sim_params[batch_vec, 3]
+        Q10_per_node = sim_params[batch_vec, 4]
+        TrefQ10_per_node = sim_params[batch_vec, 5]
+        beta_loading_per_node = sim_params[batch_vec, 6]
+        Vmaxloading_per_node = sim_params[batch_vec, 7]
+        krm2v_per_node = sim_params[batch_vec, 8]
+
+        PAR_per_node = step_params[batch_vec, 0]
+        RH_per_node = step_params[batch_vec, 1]
+        TairC_per_node = step_params[batch_vec, 2]
+        co2_per_node = step_params[batch_vec, 3]
+    else:
+        # Single graph case: broadcast parameters to all nodes
+        N = y_pred.size(0)
+        CSTimin_per_node = sim_params[0, 0].expand(N)
+        C_targ_per_node = sim_params[0, 1].expand(N)
+        KMfu_per_node = sim_params[0, 2].expand(N)
+        Mloading_per_node = sim_params[0, 3].expand(N)
+        Q10_per_node = sim_params[0, 4].expand(N)
+        TrefQ10_per_node = sim_params[0, 5].expand(N)
+        beta_loading_per_node = sim_params[0, 6].expand(N)
+        Vmaxloading_per_node = sim_params[0, 7].expand(N)
+        krm2v_per_node = sim_params[0, 8].expand(N)
+
+        PAR_per_node = step_params[0, 0].expand(N)
+        RH_per_node = step_params[0, 1].expand(N)
+        TairC_per_node = step_params[0, 2].expand(N)
+        co2_per_node = step_params[0, 3].expand(N)
+
+    # Get node fields: order matches node_fields_names in dataset_loader.py
+    # ["C_ST_np", "C_meso", "Csoil_node", "Q_Exud", "Q_Exudmax", "Q_Gr", "Q_Grmax",
+    # "Q_Rm", "Q_Rmmax", "Q_meso", "vol_Meso", "vol_ST"]
+    node_fields = data.node_fields.to(device)  # [N, num_fields]
+
+    C_ST_np = node_fields[:, 0]      # Previous sucrose concentration
+    C_meso = node_fields[:, 1]       # Mesophyll sucrose concentration
+    Csoil_node = node_fields[:, 2]   # Soil concentration per node
+    Q_Exud = node_fields[:, 3]       # Current exudation
+    Q_Exudmax = node_fields[:, 4]    # Maximum exudation rate
+    Q_Gr = node_fields[:, 5]         # Current growth rate
+    Q_Grmax = node_fields[:, 6]      # Maximum growth rate
+    Q_Rm = node_fields[:, 7]         # Current respiration rate
+    Q_Rmmax = node_fields[:, 8]      # Maximum respiration rate
+    Q_meso = node_fields[:, 9]       # Mesophyll sucrose amount
+    vol_Meso = node_fields[:, 10]    # Mesophyll volume
+    vol_ST = node_fields[:, 11]      # Sieve tube volume
+
+    RT = R * (TairC_per_node + 273.15)  # [cm3 bar mol-1]
 
     # Sucrose at endpoints (original units)
     s_i = y_pred[src, 0]
@@ -485,7 +562,8 @@ def physics_residual(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
     # Jax > 0: Flow along edge direction (src → dst)
     # Jax < 0: Flow opposite to edge direction (dst → src)
     # If psi_i > psi_j (and/or s_i > s_j), driving > 0, giving J_ax > 0 (src -> dst).
-    J_ax = s_ij * r_st * (RT * (s_i - s_j) + (psi_i - psi_j))
+    RT_i = RT[src]
+    J_ax = s_ij * r_st * (RT_i * (s_i - s_j) + (psi_i - psi_j))
 
     # Divergence of flux -> net inflow per node
     # This computes the sum of incoming/outgoing fluxes for each node
@@ -496,21 +574,70 @@ def physics_residual(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
     dS_dt_from_flux.scatter_add_(0, dst, J_ax)   # Add incoming fluxes
     dS_dt_from_flux.scatter_add_(0, src, -J_ax)  # Subtract outgoing fluxes
 
-    # We need ds/dt from the model with respect to a differentiable time feature.
-    # Here data.time_node is assumed to be [N,1] and part of the computation graph.
-    if hasattr(data, 'time_node'):
-        # Compute gradient of predictions w.r.t. time_node [N,1]
+    # We need ds/dt from the model with respect to a differentiable time feature
+    # Here data.time_node is assumed to be [N,1] and part of the computation graph
+    # This is ESSENTIAL for physics-informed learning - without it, the physics constraint is meaningless.
+    if not hasattr(data, 'time_node'):
+        raise ValueError("data.time_node not found. data.time_node is required for physics residual computation.")
+
+    if data.time_node is None or not data.time_node.requires_grad:
+        raise ValueError("data.time_node must have requires_grad=True for physics residual computation.")
+
+    # Compute gradient of predictions w.r.t. time_node [N,1]
+    # This represents ds/dt - the time derivative of sucrose content
+    try:
         ds_dt = torch.autograd.grad(
             y_pred.sum(),        # sum to get scalar for gradient computation. trick to avoid building the full Jacobian
             data.time_node,      # [N,1] per-node time features
             create_graph=True,   # needed for second backward pass
-            retain_graph=True    # keep graph for subsequent loss computation
-        )[0].squeeze()
-    else:
-        raise ValueError("data.time_node not found. data.time_node is required for physics residual computation.")
+            retain_graph=True,   # keep graph for subsequent loss computation
+            allow_unused=False   # ERROR if time_node is not connected - this is required for physics
+        )[0]
+        ds_dt = ds_dt.squeeze()
+    except RuntimeError as e:
+        if "not have been used in the graph" in str(e):
+            raise ValueError(
+                "Physics residual computation failed: y_pred is not connected to time_node. "
+                "This indicates that the model predictions don't depend on time, which breaks the physics constraint. "
+                "Ensure that y_pred comes from a model forward pass that uses the same data object, "
+                "or that the model architecture properly utilizes the time feature."
+            ) from e
+        else:
+            raise  # re-raise other runtime errors
 
-    # Compute residual as the difference between computed derivatives
-    residual_node = (ds_dt.squeeze() - dS_dt_from_flux).pow(2)
+    # CSTi is the sucrose concentration in sieve tube
+    CSTi = y_pred.squeeze(-1) / vol_ST
+    CSTi_positive = torch.clamp(CSTi, min=0.0)  # ensure non-negative concentrations
+
+    # F_in: phloem loading term per node
+    # IMPORTANT: Uses original CSTi_positive (before CSTimin threshold) as per original code
+    F_in = (Vmaxloading_per_node * len_leaf) * C_meso / (Mloading_per_node + C_meso) * torch.exp(-CSTi_positive * beta_loading_per_node)
+
+    # F_out: sucrose outflow from sieve tubes (uses CSTi_thresholded for usage)
+    # F_out = F_out_MM + Exud
+    # where F_out_MM = (R_mmax + Q_Grmax) * (CSTi / (CSTi + KMfu))
+    # Apply CSTimin threshold: if CSTi < CSTimin, no sucrose usage
+    CSTi_effective = torch.clamp(CSTi_positive - CSTimin_per_node, min=0.0)
+    CSTi_delta = torch.clamp(CSTi_effective - Csoil_node, min=0.0)
+
+    # R_mmax = Q_Rmmax_ (PiafMunch2.cpp)
+    R_mmax = (Q_Rmmax + krm2v_per_node * CSTi_effective) * torch.pow(Q10_per_node, (TairC_per_node - TrefQ10_per_node) / 10.0)
+
+    # Sucrose usage rate for growth + maintenance
+    # F_out_MM = Fu_lim (PiafMunch2.cpp)
+    F_out_MM = (R_mmax + Q_Grmax) * (CSTi_effective / (CSTi_effective + KMfu_per_node))
+
+    # Root exudation rate (passive transport based on concentration gradient)
+    Exud = CSTi_delta * Q_Exudmax
+
+    # Total outflow
+    F_out = F_out_MM + Exud
+
+    # Total rate of change from physics: axial transport + phloem loading - outflow
+    dS_dt_from_physics = dS_dt_from_flux + F_in - F_out
+
+    # Compute residual as the difference between model derivative and physics derivative
+    residual_node = (ds_dt.squeeze() - dS_dt_from_physics).pow(2)
 
     # Average per graph first (so each graph contributes equally),
     # then average across graphs. Fall back to simple mean if no batch.

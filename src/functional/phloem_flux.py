@@ -142,7 +142,7 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
                     types[i] = label
         return types
 
-    def save_simulation_data(self, step, sim_time, plant_age, dt, outdir, save_params=False):
+    def save_simulation_data(self, step, sim_time, plant_age, dt, weather_data, outdir, save_params=False):
         """
         Save all simulation data (nodes, segments, matrices) in HDF5 format
 
@@ -168,6 +168,10 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
             step_group = f.create_group(f'step_{step:03d}')
             step_group.attrs['plant_age'] = float(f"{plant_age:.5f}")
             step_group.attrs['iteration'] = step
+            step_group.attrs['Tair'] = weather_data['Tair']
+            step_group.attrs['RH'] = weather_data['RH']
+            step_group.attrs['PAR'] = weather_data['PAR']
+            step_group.attrs['co2'] = weather_data['co2']
 
             # Save node data
             node_fields = [

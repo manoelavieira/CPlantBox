@@ -68,6 +68,27 @@ def load_graph_data(h5_file: h5py.File, timestep: int) -> Data:
     """
     step_key = f'step_{timestep:03d}'
 
+    step_params = h5_file[f'{step_key}'].attrs
+    step_params_names: Sequence[str] = (
+        "PAR", "RH", "Tair", "co2",
+        "iteration", "plant_age"
+    )
+
+    step_params_vals = []
+    step_params_missing: Dict[str, bool] = {}
+    for k in step_params_names:
+        if k in step_params:
+            val = np.array(step_params[k]).item()
+            step_params_vals.append(float(val))
+        else:
+            step_params_missing[k] = True
+            step_params_vals.append(float("nan"))
+
+    if step_params_missing:
+        missing_keys = ", ".join(step_params_missing.keys())
+        print(f"[WARN] Missing step attrs at {step_key}: {missing_keys}")
+    step_params = torch.tensor(step_params_vals, dtype=torch.float32).view(1, -1)
+
     # Load node features
     psi = torch.tensor(h5_file[f'{step_key}/nodes/psiXyl4Phloem'][:], dtype=torch.float32)
     vol = torch.tensor(h5_file[f'{step_key}/nodes/vol_ST'][:], dtype=torch.float32)
@@ -130,7 +151,7 @@ def load_graph_data(h5_file: h5py.File, timestep: int) -> Data:
     time = torch.tensor(timestep, dtype=torch.float32)
 
     # Load physics constants from parameters
-    sim_params = h5_file['parameters/SieveTube'].attrs
+    sim_params = h5_file['parameters/sieve_tube'].attrs
 
     sim_params_names: Sequence[str] = (
         "CSTimin", "C_targ", "KMfu", "Mloading", "Q10", "TrefQ10",
@@ -149,7 +170,7 @@ def load_graph_data(h5_file: h5py.File, timestep: int) -> Data:
 
     if sim_param_missing:
         missing_keys = ", ".join(sim_param_missing.keys())
-        print(f"[WARN] Missing SieveTube attrs at {step_key}: {missing_keys}")
+        print(f"[WARN] Missing sieve_tube attrs at {step_key}: {missing_keys}")
 
     sim_params = torch.tensor(sim_param_vals, dtype=torch.float32).view(1, -1)  # [1, K]
 
@@ -164,6 +185,8 @@ def load_graph_data(h5_file: h5py.File, timestep: int) -> Data:
         num_nodes=num_nodes,    # Explicitly set number of nodes
         sim_params=sim_params,                      # [1,K]
         sim_params_names=list(sim_params_names),    # list[str] (not used in math; for reference)
+        step_params=step_params,                    # [1,J]
+        step_params_names=list(step_params_names),  # list[str] (not used in math; for reference)
         node_fields=node_fields,                    # Additional node fields for physics residual [N, len(names)]
         node_fields_names=list(node_fields_names),  # list[str] (not used in math; for reference)
         node_pos=node_pos                           # Node positions [N, 3] (optional; for visualization)

@@ -71,7 +71,7 @@ hm.read_phloem_parameters(filename=path+"plant_sucrose/phloem_parameters2025")
 # list_data = hm.get_phloem_data_list() # option of data that can be obtained from the phloem model
 # hm.write_phloem_parameters(filename='phloem_parameters')
 
-phloem_flow_dir = "out"
+phloem_flow_dir = "data/sim_00"
 
 time = []
 cumulAssimilation = 0.
@@ -118,6 +118,7 @@ for i in range(N):
         sim_time=sim_time,
         plant_age=plant_age,
         dt=dt,
+        weather_data=weatherData_i,
         outdir=phloem_flow_dir,
         save_params=(i==0)  # Only save parameters on first step
     )

@@ -2,7 +2,9 @@
 Dataset loader for phloem flow simulation data from HDF5 files.
 
 This module provides utilities to load and preprocess phloem flow simulation
-data for training the PhloemNNConv GNN model.
+data for training the PhloemNNConv GNN model. Supports loading from both
+single HDF5 files and batch loading from directories containing multiple
+HDF5 files.
 """
 
 import h5py
@@ -12,6 +14,8 @@ from torch_geometric.data import Data, Batch
 from typing import Tuple, List, Sequence, Dict
 from torch.utils.data import DataLoader
 import warnings
+import os
+from pathlib import Path
 
 def collate_graphs(batch):
     return Batch.from_data_list(batch)
@@ -112,7 +116,7 @@ def load_graph_data(h5_file: h5py.File, timestep: int) -> Data:
     node_pos = torch.from_numpy(node_pos_np.astype(np.float32, copy=False))
 
     print(f"\nStep {timestep}: Number of nodes = {num_nodes}")
-    print(f"node_feat_shape: {node_feat.shape}, node_feat_dtype: {node_feat.dtype}")
+    # print(f"node_feat_shape: {node_feat.shape}, node_feat_dtype: {node_feat.dtype}")
 
     # Get graph structure from both methods for comparison
     I_Up = h5_file[f'{step_key}/arrays/I_Upflow'][:]
@@ -195,13 +199,53 @@ def load_graph_data(h5_file: h5py.File, timestep: int) -> Data:
     return data
 
 
+def load_graphs_from_file(h5_path: str) -> List[Data]:
+    """Load all graph data from a single HDF5 file.
+
+    Args:
+        h5_path: Path to HDF5 file containing simulation data
+
+    Returns:
+        graphs: List of PyG Data objects loaded from the file
+    """
+    graphs: List[Data] = []
+
+    try:
+        with h5py.File(h5_path, 'r') as f:
+            n_steps = None
+            sim_path = "parameters/simulation"
+            if sim_path in f:
+                sim_group = f[sim_path]
+                n_steps = sim_group.attrs.get('steps', None)
+            print(f"File {h5_path}: Simulation steps: {n_steps}")
+
+            if n_steps is None or n_steps <= 0:
+                raise ValueError(f"No timesteps found in HDF5 file {h5_path}")
+
+            # Load graphs from each timestep
+            for i in range(n_steps):
+                try:
+                    graph = load_graph_data(f, i)
+                    graphs.append(graph)
+                except Exception as e:
+                    warnings.warn(f"Error loading timestep {i} from {h5_path}: {str(e)}")
+                    continue
+    except Exception as e:
+        raise RuntimeError(f"Failed to load data from {h5_path}: {str(e)}")
+
+    if not graphs:
+        warnings.warn(f"No valid graphs loaded from file {h5_path}")
+
+    return graphs
+
+
 def load_phloem_data(h5_path: str, batch_size: int = 32,
                      train_ratio: float = 0.8, val_ratio: float = 0.1,
                      random_seed: int = 42) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """Load phloem simulation data and create train/val/test DataLoaders.
 
     Args:
-        h5_path: Path to HDF5 file containing simulation data
+        h5_path: Path to HDF5 file or directory containing HDF5 files with simulation data
         batch_size: Batch size for DataLoaders
         train_ratio: Proportion of data to use for training
         val_ratio: Proportion of data to use for validation
@@ -214,33 +258,43 @@ def load_phloem_data(h5_path: str, batch_size: int = 32,
 
     graphs: List[Data] = []
 
-    try:
-        with h5py.File(h5_path, 'r') as f:
-            n_steps = None
-            sim_path = "parameters/simulation"
-            if sim_path in f:
-                sim_group = f[sim_path]
-                n_steps = sim_group.attrs.get('steps', None)
-            print(f"Simulation steps: {n_steps}")
+    # Check if h5_path is a file or directory
+    path = Path(h5_path)
 
-            if n_steps is None or n_steps <= 0:
-                raise ValueError("No timesteps found in HDF5 file")
+    if path.is_file():
+        # Single file case (original behavior)
+        print(f"Loading data from single file: {h5_path}")
+        graphs = load_graphs_from_file(h5_path)
 
-            # Load graphs from each timestep
-            for i in range(n_steps):
-                try:
-                    graph = load_graph_data(f, i)
-                    graphs.append(graph)
-                except Exception as e:
-                    warnings.warn(f"Error loading timestep {i}: {str(e)}")
-                    continue
-    except Exception as e:
-        raise RuntimeError(f"Failed to load data from {h5_path}: {str(e)}")
+    elif path.is_dir():
+        # Directory case (new batch loading functionality)
+        print(f"Loading data from directory: {h5_path}")
+
+        # Find all .h5 files in the directory
+        h5_files = list(path.rglob("*.h5"))
+        if not h5_files:
+            raise RuntimeError(f"No .h5 files found in directory {h5_path}")
+
+        print(f"Found {len(h5_files)} .h5 files in directory")
+
+        # Load graphs from each file
+        for h5_file in sorted(h5_files):  # Sort for consistent ordering
+            print(f"\nProcessing file: {h5_file}")
+            try:
+                file_graphs = load_graphs_from_file(str(h5_file))
+                graphs.extend(file_graphs)
+                print(f"\nLoaded {len(file_graphs)} graphs from {h5_file}")
+            except Exception as e:
+                warnings.warn(f"Failed to load file {h5_file}: {str(e)}")
+                continue
+
+    else:
+        raise RuntimeError(f"Path {h5_path} is neither a file nor a directory")
 
     if not graphs:
-        raise RuntimeError("No valid graphs loaded from file")
+        raise RuntimeError("No valid graphs loaded")
 
-    print(f"\nSuccessfully loaded {len(graphs)} graphs from {h5_path}")
+    print(f"\nSuccessfully loaded {len(graphs)} total graphs")
 
     # Split graphs into train/val/test
     n_samples = len(graphs)
@@ -268,3 +322,28 @@ def load_phloem_data(h5_path: str, batch_size: int = 32,
                              shuffle=False, collate_fn=collate_graphs)
 
     return train_loader, val_loader, test_loader
+
+
+def main():
+    # Example 1: Load from single file (original behavior)
+    h5_path = 'data/sim_00/phloem_simulation.h5'
+    print("====== Loading from single file ======")
+    try:
+        train_loader, val_loader, test_loader = load_phloem_data(h5_path)
+        print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}, Test batches: {len(test_loader)}")
+    except Exception as e:
+        print(f"Single file loading failed: {e}")
+
+    # Example 2: Load from directory (new batch loading functionality)
+    h5_dir = 'data/'  # Directory containing multiple .h5 files
+    print("\n====== Loading from directory ======")
+    try:
+        train_loader, val_loader, test_loader = load_phloem_data(h5_dir)
+        print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}, Test batches: {len(test_loader)}")
+    except Exception as e:
+        print(f"Directory loading failed: {e}")
+
+    print("\nNote: Use either a single .h5 file path or a directory path containing .h5 files")
+
+if __name__ == '__main__':
+    main()

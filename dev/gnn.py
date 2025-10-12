@@ -65,23 +65,23 @@ class Standardizer:
             self.to(X.device)
         return X * self.std + self.mean
 
-    def to(self, device: torch.device) -> 'Standardizer':
+    def to(self, device) -> 'Standardizer':
         """Move internal tensors to the specified device.
 
         Args:
-            device: The device to move the tensors to
+            device: The device to move the tensors to (torch.device, str, or int)
 
         Returns:
             self: The Standardizer instance for method chaining
         """
-        if not isinstance(device, (torch.device, str)):
-            raise TypeError(f"device must be torch.device or str, got {type(device)}")
+        # Convert to torch.device for consistency
+        device = torch.device(device)
 
         if self.mean is not None:
             self.mean = self.mean.to(device)
         if self.std is not None:
             self.std = self.std.to(device)
-        self.device = torch.device(device)
+        self.device = device
         return self
 
 # -----------------------------

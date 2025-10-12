@@ -267,7 +267,7 @@ class PhloemNNConv(nn.Module):
         self._validate_input(data)
         device = next(self.parameters()).device
 
-        node_feat: torch.Tensor = data.node_feat.to(device) # [N, 2] [psi, vol_st]
+        node_feat: torch.Tensor = data.node_feat.to(device)
         edge_index: torch.Tensor = data.edge_index.to(device) # [2, E] graph connectivity (sources, targets indices)
         edge_feat: torch.Tensor = data.edge_feat.to(device)  # [E, De] continuous edge features
         edge_org: torch.Tensor = data.edge_org.to(device)  # [E] categorical organ type per edge

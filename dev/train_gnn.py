@@ -158,21 +158,22 @@ def train_one_epoch(
         y = data.y # [N,1]
         y_t = model.target_scaler.transform(y)  # Transform targets for loss computation
 
-        # MSE in standardized space
-        mse = F.mse_loss(pred, y_t, reduction='sum')
+        # MSE in standardized space (mean over nodes in batch)
+        mse = F.mse_loss(pred, y_t, reduction='mean')
 
         # Physics computation in original space
         pred_orig = model.target_scaler.inv_transform(pred)
 
         # Temporarily restore original features for physics computation
         data.node_feat = x_orig
-        phys = physics_residual(pred_orig, data)
-        phys_scalar = phys.sum() if phys.dim() > 0 else phys
+        phys = physics_residual(pred_orig, data)  # already a mean over nodes/graphs
+        phys_scalar = phys if phys.dim() == 0 else phys.mean()
 
         # Restore standardized features for next iteration
         data.node_feat = model.feature_scaler.transform(x_orig)
 
-        loss = mse + phys_scalar
+        # Combine with explicit physics weight
+        loss = mse + getattr(model, "lambda_phys", 1.0) * phys_scalar
         loss.backward()
 
         # Log gradient norms before clipping
@@ -199,29 +200,29 @@ def train_one_epoch(
             else:
                 pred_un = pred
 
-            mae = (pred_un - y).abs().sum() # (pred_un - y): per-node errors, shape [N, 1]
-            total_mae += mae.item() # accumulates the sum of absolute errors across batches
+            # Track means per batch; we'll average by number of batches
+            mae = (pred_un - y).abs().mean()
+            total_mae += mae.item()
             total_mse += mse.item()
-            total_physics += phys_scalar
-            total_loss += (mse.item() + phys_scalar)
-            n_nodes += y.size(0)
+            total_physics += phys_scalar.item() if hasattr(phys_scalar, "item") else float(phys_scalar)
+            total_loss += (mse + getattr(model, "lambda_phys", 1.0) * phys_scalar).item()
             n_batches += 1
 
             # Log batch-level metrics to TensorBoard (every 10 batches to avoid clutter)
             if writer is not None and batch_idx % 10 == 0:
                 step = epoch * len(loader) + batch_idx
-                writer.add_scalar('Training/Batch_Loss', (mse.item() + phys_scalar) / y.size(0), step)
-                writer.add_scalar('Training/Batch_MSE', mse.item() / y.size(0), step)
-                writer.add_scalar('Training/Batch_MAE', mae.item() / y.size(0), step)
-                writer.add_scalar('Training/Batch_Physics', phys_scalar / y.size(0), step)
+                writer.add_scalar('Training/Batch_Loss', (mse + getattr(model, "lambda_phys", 1.0)*phys_scalar).item(), step)
+                writer.add_scalar('Training/Batch_MSE', mse.item(), step)
+                writer.add_scalar('Training/Batch_MAE', mae.item(), step)
+                writer.add_scalar('Training/Batch_Physics', phys_scalar.item() if hasattr(phys_scalar,'item') else float(phys_scalar), step)
 
-    if n_nodes == 0:
+    if n_batches == 0:
         raise RuntimeError("No training samples this epoch.")
 
-    avg_loss = total_loss / n_nodes
-    avg_mae = total_mae / n_nodes
-    avg_mse = total_mse / n_nodes
-    avg_physics = total_physics / n_nodes
+    avg_loss = total_loss / n_batches
+    avg_mae = total_mae / n_batches
+    avg_mse = total_mse / n_batches
+    avg_physics = total_physics / n_batches
 
     return avg_loss, avg_mae, avg_mse, avg_physics
 
@@ -267,7 +268,7 @@ def evaluate(
 
             y = data.y
             y_t = model.target_scaler.transform(y)
-            mse = F.mse_loss(pred, y_t, reduction='sum')
+            mse = F.mse_loss(pred, y_t, reduction='mean')
 
             # Transform predictions back for MAE in original space
             pred_un = model.target_scaler.inv_transform(pred)
@@ -275,70 +276,31 @@ def evaluate(
             # Restore original features for consistent state
             data.node_feat = x_orig
 
-            # Compute physics residual for validation/test
-            phys_val = 0.0  # Default to zero for evaluation
+            # Compute physics residual for validation/test (mean)
+            phys_val = 0.0
             try:
-                # Temporarily enable gradients for physics computation during evaluation
                 if hasattr(data, 'time_node') and data.time_node is not None:
-                    # Create a copy of predictions that requires gradients
                     with torch.enable_grad():
-                        # Enable gradients on time_node for physics computation
                         time_node_grad = data.time_node.clone().requires_grad_(True)
                         data_with_grad = data.clone() if hasattr(data, 'clone') else data
                         data_with_grad.time_node = time_node_grad
-
-                        # Re-run model prediction with gradient tracking for physics
                         data_with_grad.node_feat = model.feature_scaler.transform(x_orig)
                         pred_for_physics = model(data_with_grad)
                         pred_orig_for_physics = model.target_scaler.inv_transform(pred_for_physics)
-
-                        # Restore original features and compute physics
                         data_with_grad.node_feat = x_orig
-                        phys_components = compute_physics_components(model, data_with_grad, pred_orig_for_physics)
-                        phys_val = phys_components['physics_total']
-            except Exception as e:
-                phys_val = 0.0  # Silently continue with zero physics
+                        phys_val = physics_residual(pred_orig_for_physics, data_with_grad)
+                        phys_val = phys_val if phys_val.dim() == 0 else phys_val.mean()
+            except Exception:
+                phys_val = 0.0
 
-            mae = (pred_un - y).abs().sum()
-            total_mse += mse.item()
-            total_mae += mae.item()
-            n_nodes += y.size(0)
-
-            # Compute physics residual for validation/test
-            phys_val = 0.0  # Default to zero for evaluation
-            try:
-                # Temporarily enable gradients for physics computation during evaluation
-                if hasattr(data, 'time_node') and data.time_node is not None:
-                    # Create a copy of predictions that requires gradients
-                    with torch.enable_grad():
-                        # Enable gradients on time_node for physics computation
-                        time_node_grad = data.time_node.clone().requires_grad_(True)
-                        data_with_grad = data.clone() if hasattr(data, 'clone') else data
-                        data_with_grad.time_node = time_node_grad
-
-                        # Re-run model prediction with gradient tracking for physics
-                        data_with_grad.node_feat = model.feature_scaler.transform(x_orig)
-                        pred_for_physics = model(data_with_grad)
-                        pred_orig_for_physics = model.target_scaler.inv_transform(pred_for_physics)
-
-                        # Restore original features and compute physics
-                        data_with_grad.node_feat = x_orig
-                        phys_components = compute_physics_components(model, data_with_grad, pred_orig_for_physics)
-                        phys_val = phys_components['physics_total']
-            except Exception as e:
-                phys_val = 0.0  # Silently continue with zero physics
-
-            mae = (pred_un - y).abs().sum()
-
-            # Ensure phys_val is scalar
+            mae = (pred_un - y).abs().mean()
             phys_val_scalar = phys_val.item() if hasattr(phys_val, 'item') else phys_val
+            loss = mse + getattr(model, "lambda_phys", 1.0) * phys_val_scalar
 
-            loss = mse + phys_val_scalar
-
-            total_loss += loss
-            total_mse += mse.item()
-            total_mae += mae.item()
-            total_physics += phys_val_scalar
+            total_loss += float(loss)
+            total_mse += float(mse)
+            total_mae += float(mae)
+            total_physics += float(phys_val_scalar)
             n_nodes += y.size(0)
             n_batches += 1
 
@@ -349,14 +311,16 @@ def evaluate(
                 writer.add_histogram(f'{phase}/Residuals', (pred_un - y).cpu(), epoch)
 
                 # Log loss values for debugging
-                writer.add_scalar(f'{phase}/MSE', mse / y.size(0), epoch)
-                writer.add_scalar(f'{phase}/Physics', phys_val_scalar / y.size(0), epoch)
-                writer.add_scalar(f'{phase}/Loss', loss / y.size(0), epoch)
+                writer.add_scalar(f'{phase}/MSE', float(mse), epoch)
+                writer.add_scalar(f'{phase}/Physics', float(phys_val_scalar), epoch)
+                writer.add_scalar(f'{phase}/Loss', float(loss), epoch)
 
-    avg_loss = total_loss / max(n_nodes, 1)
-    avg_mse = total_mse / max(n_nodes, 1)
-    avg_mae = total_mae / max(n_nodes, 1)
-    avg_physics = total_physics / max(n_nodes, 1)
+    # Compute averages per batch
+    denom = n_batches if n_batches > 0 else 1
+    avg_loss = total_loss / denom
+    avg_mse = total_mse / denom
+    avg_mae = total_mae / denom
+    avg_physics = total_physics / denom
 
     # Clear GPU memory after evaluation
     if torch.cuda.is_available():
@@ -493,6 +457,8 @@ def main():
                        help='Maximum number of epochs to train')
     parser.add_argument('--seed', type=int, default=42,
                        help='Random seed for reproducibility')
+    parser.add_argument('--lambda-phys', type=float, default=1.0,
+                        help='Weight for physics loss term (L = MSE + lambda_phys * Physics)')
     args = parser.parse_args()
 
     # Validate arguments
@@ -520,6 +486,8 @@ def main():
 
     model_cfg = ModelConfig()
     model = PhloemNNConv(model_cfg).to(device)
+    # Expose physics weight on the model for easy access in training/eval
+    model.lambda_phys = args.lambda_phys
 
     # Log hyperparameters to TensorBoard
     log_hyperparameters(writer, args, model_cfg)

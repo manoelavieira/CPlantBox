@@ -2,17 +2,22 @@
 Training script for the phloem GNN model
 """
 import argparse
-from enum import Enum
-from typing import Tuple, Optional
 import random
 import numpy as np
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
 import torch_geometric
+
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 from torch_geometric.data import Batch
+
+from enum import Enum
+from typing import Tuple, Optional
+from pathlib import Path
+from datetime import datetime
 
 from dataset_loader import load_phloem_data
 from dataset_dummy import DummyTemporalDataset
@@ -26,22 +31,105 @@ class DatasetType(Enum):
 def collate_graphs(batch):
     return Batch.from_data_list(batch)
 
+def create_tensorboard_writer(args: argparse.Namespace) -> SummaryWriter:
+    """Create TensorBoard writer with organized logging directory."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    dataset_name = args.dataset
+
+    # Create descriptive experiment name
+    # exp_name = (f"{dataset_name}_lr{args.lr}_bs{args.batch_size}_"
+    #             f"wd{args.weight_decay}_seed{args.seed}_{timestamp}")
+    exp_name = timestamp
+
+    log_dir = Path("tensorboard_logs") / exp_name
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    writer = SummaryWriter(log_dir=str(log_dir))
+    print(f"TensorBoard logs will be saved to: {log_dir}")
+    print(f"To view logs, run: tensorboard --logdir={log_dir.parent}")
+
+    return writer
+
+def log_hyperparameters(writer: SummaryWriter, args: argparse.Namespace, model_cfg: ModelConfig):
+    """Log hyperparameters to TensorBoard."""
+    hparams = {
+        # Training hyperparameters
+        'learning_rate': args.lr,
+        'batch_size': args.batch_size,
+        'weight_decay': args.weight_decay,
+        'epochs': args.epochs,
+        'patience': args.patience,
+        'seed': args.seed,
+        'train_ratio': args.train_ratio,
+        'val_ratio': args.val_ratio,
+
+        # Model architecture
+        'hidden_size': model_cfg.hidden_size,
+        'num_layers': model_cfg.num_layers,
+        'edge_feat_dim': model_cfg.edge_feat_dim,
+        'node_feat_dim': model_cfg.node_feat_dim,
+        'dropout': model_cfg.dropout,
+    }
+
+    if hasattr(args, 'data_path') and args.data_path:
+        hparams['data_path'] = args.data_path
+
+    metrics = {}
+
+    writer.add_hparams(hparams, metrics)
+
+
+def compute_physics_components(model: nn.Module, data, pred_orig) -> dict:
+    """Compute individual physics components for detailed logging."""
+    try:
+        if not torch.is_grad_enabled() or not data.time_node.requires_grad:
+            return {'physics_total': 0.0}
+
+        if not hasattr(data, 'time_node') or data.time_node is None:
+            return {'physics_total': 0.0}
+
+        x_orig = data.node_feat.clone() if hasattr(data, 'node_feat') else None
+
+        if hasattr(model, 'feature_scaler') and hasattr(data, 'node_feat'):
+            # Get original features if we have the inverse scaler
+            if hasattr(model.feature_scaler, 'inv_transform'):
+                data.node_feat = model.feature_scaler.inv_transform(data.node_feat)
+
+        phys_total = physics_residual(pred_orig, data)
+
+        if x_orig is not None:
+            if hasattr(model, 'feature_scaler'):
+                data.node_feat = model.feature_scaler.transform(x_orig)
+            else:
+                data.node_feat = x_orig
+
+        return {
+            'physics_total': phys_total.item() if phys_total.dim() > 0 else phys_total,
+        }
+    except Exception as e:
+        # Silently return zero for physics during evaluation phases
+        return {'physics_total': 0.0}
+
 def train_one_epoch(
         model: nn.Module,
         loader: DataLoader,
         optimizer: torch.optim.Optimizer,
+        writer: Optional[SummaryWriter] = None,
+        epoch: int = 0,
         clip_grad_norm: float = 1.0
-    ) -> Tuple[float, float]:
+    ) -> Tuple[float, float, float, float]:
     """Train model for one epoch.
 
     Args:
         model: The neural network model
         loader: DataLoader containing training data
         optimizer: Optimizer for updating model parameters
+        writer: TensorBoard writer for logging
+        epoch: Current epoch number
         clip_grad_norm: Maximum norm for gradient clipping
 
     Returns:
-        Tuple of (average_loss, average_mae)
+        Tuple of (average_loss, average_mae, average_mse, average_physics)
 
     Raises:
         RuntimeError: If no training samples are processed
@@ -49,8 +137,12 @@ def train_one_epoch(
     model.train()
     total_loss = 0.0
     total_mae = 0.0
+    total_mse = 0.0
+    total_physics = 0.0
     n_nodes = 0
-    for data in loader:
+    n_batches = 0
+
+    for batch_idx, data in enumerate(loader):
         data = data.to(next(model.parameters()).device)
         optimizer.zero_grad(set_to_none=True)
 
@@ -75,14 +167,27 @@ def train_one_epoch(
         # Temporarily restore original features for physics computation
         data.node_feat = x_orig
         phys = physics_residual(pred_orig, data)
-        if phys.dim() > 0:
-            phys = phys.sum()
+        phys_scalar = phys.sum() if phys.dim() > 0 else phys
 
         # Restore standardized features for next iteration
         data.node_feat = model.feature_scaler.transform(x_orig)
 
-        loss = mse + phys
+        loss = mse + phys_scalar
         loss.backward()
+
+        # Log gradient norms before clipping
+        if writer is not None and batch_idx == 0:  # Log only first batch to avoid clutter
+            total_grad_norm = 0.0
+            for name, param in model.named_parameters():
+                if param.grad is not None:
+                    param_grad_norm = param.grad.data.norm(2).item()
+                    total_grad_norm += param_grad_norm ** 2
+                    writer.add_scalar(f'Gradients/{name}', param_grad_norm,
+                                    epoch * len(loader) + batch_idx)
+
+            total_grad_norm = total_grad_norm ** 0.5
+            writer.add_scalar('Gradients/total_norm', total_grad_norm,
+                            epoch * len(loader) + batch_idx)
 
         nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_grad_norm)
         optimizer.step()
@@ -94,39 +199,61 @@ def train_one_epoch(
             else:
                 pred_un = pred
 
-
             mae = (pred_un - y).abs().sum() # (pred_un - y): per-node errors, shape [N, 1]
             total_mae += mae.item() # accumulates the sum of absolute errors across batches
-            total_loss += loss.item()
+            total_mse += mse.item()
+            total_physics += phys_scalar
+            total_loss += (mse.item() + phys_scalar)
             n_nodes += y.size(0)
+            n_batches += 1
+
+            # Log batch-level metrics to TensorBoard (every 10 batches to avoid clutter)
+            if writer is not None and batch_idx % 10 == 0:
+                step = epoch * len(loader) + batch_idx
+                writer.add_scalar('Training/Batch_Loss', (mse.item() + phys_scalar) / y.size(0), step)
+                writer.add_scalar('Training/Batch_MSE', mse.item() / y.size(0), step)
+                writer.add_scalar('Training/Batch_MAE', mae.item() / y.size(0), step)
+                writer.add_scalar('Training/Batch_Physics', phys_scalar / y.size(0), step)
 
     if n_nodes == 0:
         raise RuntimeError("No training samples this epoch.")
 
     avg_loss = total_loss / n_nodes
     avg_mae = total_mae / n_nodes
+    avg_mse = total_mse / n_nodes
+    avg_physics = total_physics / n_nodes
 
-    return avg_loss, avg_mae
+    return avg_loss, avg_mae, avg_mse, avg_physics
 
 def evaluate(
         model: nn.Module,
         loader: DataLoader,
-    ) -> Tuple[float, float]:
+        writer: Optional[SummaryWriter] = None,
+        epoch: int = 0,
+        phase: str = 'val'
+    ) -> Tuple[float, float, float, float]:
     """Evaluate model on a dataset.
 
     Args:
         model: The neural network model
         loader: DataLoader containing evaluation data
+        writer: TensorBoard writer for logging
+        epoch: Current epoch number
+        phase: Phase name ('val' or 'test')
 
     Returns:
-        Tuple of (average_mse, average_mae)
+        Tuple of (average_loss, average_mse, average_mae, average_physics)
     """
     model.eval()
+    total_loss = 0.0
     total_mse = 0.0
     total_mae = 0.0
+    total_physics = 0.0
     n_nodes = 0
+    n_batches = 0
+
     with torch.no_grad():
-        for data in loader:
+        for batch_idx, data in enumerate(loader):
             data = data.to(next(model.parameters()).device)
 
             # Keep original features
@@ -147,18 +274,95 @@ def evaluate(
 
             # Restore original features for consistent state
             data.node_feat = x_orig
+
+            # Compute physics residual for validation/test
+            phys_val = 0.0  # Default to zero for evaluation
+            try:
+                # Temporarily enable gradients for physics computation during evaluation
+                if hasattr(data, 'time_node') and data.time_node is not None:
+                    # Create a copy of predictions that requires gradients
+                    with torch.enable_grad():
+                        # Enable gradients on time_node for physics computation
+                        time_node_grad = data.time_node.clone().requires_grad_(True)
+                        data_with_grad = data.clone() if hasattr(data, 'clone') else data
+                        data_with_grad.time_node = time_node_grad
+
+                        # Re-run model prediction with gradient tracking for physics
+                        data_with_grad.node_feat = model.feature_scaler.transform(x_orig)
+                        pred_for_physics = model(data_with_grad)
+                        pred_orig_for_physics = model.target_scaler.inv_transform(pred_for_physics)
+
+                        # Restore original features and compute physics
+                        data_with_grad.node_feat = x_orig
+                        phys_components = compute_physics_components(model, data_with_grad, pred_orig_for_physics)
+                        phys_val = phys_components['physics_total']
+            except Exception as e:
+                phys_val = 0.0  # Silently continue with zero physics
+
             mae = (pred_un - y).abs().sum()
             total_mse += mse.item()
             total_mae += mae.item()
             n_nodes += y.size(0)
 
-    metrics = (total_mse / max(n_nodes, 1), total_mae / max(n_nodes, 1))
+            # Compute physics residual for validation/test
+            phys_val = 0.0  # Default to zero for evaluation
+            try:
+                # Temporarily enable gradients for physics computation during evaluation
+                if hasattr(data, 'time_node') and data.time_node is not None:
+                    # Create a copy of predictions that requires gradients
+                    with torch.enable_grad():
+                        # Enable gradients on time_node for physics computation
+                        time_node_grad = data.time_node.clone().requires_grad_(True)
+                        data_with_grad = data.clone() if hasattr(data, 'clone') else data
+                        data_with_grad.time_node = time_node_grad
+
+                        # Re-run model prediction with gradient tracking for physics
+                        data_with_grad.node_feat = model.feature_scaler.transform(x_orig)
+                        pred_for_physics = model(data_with_grad)
+                        pred_orig_for_physics = model.target_scaler.inv_transform(pred_for_physics)
+
+                        # Restore original features and compute physics
+                        data_with_grad.node_feat = x_orig
+                        phys_components = compute_physics_components(model, data_with_grad, pred_orig_for_physics)
+                        phys_val = phys_components['physics_total']
+            except Exception as e:
+                phys_val = 0.0  # Silently continue with zero physics
+
+            mae = (pred_un - y).abs().sum()
+
+            # Ensure phys_val is scalar
+            phys_val_scalar = phys_val.item() if hasattr(phys_val, 'item') else phys_val
+
+            loss = mse + phys_val_scalar
+
+            total_loss += loss
+            total_mse += mse.item()
+            total_mae += mae.item()
+            total_physics += phys_val_scalar
+            n_nodes += y.size(0)
+            n_batches += 1
+
+            # Log distribution of predictions and targets (first batch only)
+            if writer is not None and batch_idx == 0 and epoch % 5 == 0:
+                writer.add_histogram(f'{phase}/Predictions', pred_un.cpu(), epoch)
+                writer.add_histogram(f'{phase}/Targets', y.cpu(), epoch)
+                writer.add_histogram(f'{phase}/Residuals', (pred_un - y).cpu(), epoch)
+
+                # Log loss values for debugging
+                writer.add_scalar(f'{phase}/MSE', mse / y.size(0), epoch)
+                writer.add_scalar(f'{phase}/Physics', phys_val_scalar / y.size(0), epoch)
+                writer.add_scalar(f'{phase}/Loss', loss / y.size(0), epoch)
+
+    avg_loss = total_loss / max(n_nodes, 1)
+    avg_mse = total_mse / max(n_nodes, 1)
+    avg_mae = total_mae / max(n_nodes, 1)
+    avg_physics = total_physics / max(n_nodes, 1)
 
     # Clear GPU memory after evaluation
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    return metrics
+    return avg_loss, avg_mse, avg_mae, avg_physics
 
 def validate_split_ratios(train_ratio: float, val_ratio: float) -> None:
     """Validate that dataset split ratios are valid.
@@ -238,8 +442,8 @@ def get_dataloaders(dataset_type: DatasetType, args: argparse.Namespace) -> Tupl
 
     return train_loader, val_loader, test_loader
 
-def print_model_summary(model: nn.Module):
-    """Print model architecture summary."""
+def print_model_summary(model: nn.Module, writer: Optional[SummaryWriter] = None):
+    """Print model architecture summary and log to TensorBoard."""
     print("\nModel Architecture:")
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -249,6 +453,13 @@ def print_model_summary(model: nn.Module):
     print("\nLayer Overview:")
     for name, module in model.named_children():
         print(f"{name}: {module.__class__.__name__}")
+
+    # Log model parameters to TensorBoard
+    if writer is not None:
+        writer.add_text('Model/Architecture',
+                       f"Total: {total_params:,}, Trainable: {trainable_params:,}")
+        writer.add_scalar('Model/Total_Parameters', total_params, 0)
+        writer.add_scalar('Model/Trainable_Parameters', trainable_params, 0)
 
 def log_experiment_config(args: argparse.Namespace):
     """Log experiment configuration."""
@@ -304,11 +515,17 @@ def main():
     # Log experiment configuration
     log_experiment_config(args)
 
+    # Create TensorBoard writer
+    writer = create_tensorboard_writer(args)
+
     model_cfg = ModelConfig()
     model = PhloemNNConv(model_cfg).to(device)
 
+    # Log hyperparameters to TensorBoard
+    log_hyperparameters(writer, args, model_cfg)
+
     # Print detailed model summary
-    print_model_summary(model)
+    print_model_summary(model, writer)
 
     # Get data loaders
     dataset_type = DatasetType[args.dataset.upper()]
@@ -369,25 +586,61 @@ def main():
     print("\nStarting training...")
     for epoch in range(1, args.epochs + 1):
         # Training
-        tr_loss, tr_mae = train_one_epoch(model, train_loader, optimizer)
+        tr_loss, tr_mae, tr_mse, tr_physics = train_one_epoch(
+            model, train_loader, optimizer, writer, epoch)
 
         # Validation
-        val_mse, val_mae = evaluate(model, val_loader)
+        val_loss, val_mse, val_mae, val_physics = evaluate(
+            model, val_loader, writer, epoch, phase='val')
 
-        # Learning rate scheduling
-        scheduler.step(val_mse)
+        # Learning rate scheduling (use combined validation loss)
+        scheduler.step(val_loss)
+        current_lr = optimizer.param_groups[0]['lr']
+
+        # Log metrics to TensorBoard
+        writer.add_scalar('Loss/Train_Total', tr_loss, epoch)
+        writer.add_scalar('Loss/Train_MSE', tr_mse, epoch)
+        writer.add_scalar('Loss/Train_Physics', tr_physics, epoch)
+
+        writer.add_scalar('Metrics/Val_Total', val_loss, epoch)
+        writer.add_scalar('Metrics/Val_MSE', val_mse, epoch)
+        writer.add_scalar('Metrics/Val_Physics', val_physics, epoch)
+
+        writer.add_scalar('Learning_Rate', current_lr, epoch)
+
+        # Log combined metrics for easy comparison
+        writer.add_scalars('MAE_Comparison', {
+            'Train': tr_mae,
+            'Validation': val_mae
+        }, epoch)
+
+        writer.add_scalars('Loss_Comparison', {
+            'Train_Total': tr_loss,
+            'Val_Total': val_loss
+        }, epoch)
+
+        writer.add_scalars('Loss_Components', {
+            'MSE': tr_mse,
+            'Physics': tr_physics,
+            'Total': tr_loss
+        }, epoch)
 
         # Logging
         print(f"Epoch {epoch:03d} | "
-              f"train_loss={tr_loss:.4f} train_MAE={tr_mae:.4f} | "
-              f"val_MSE={val_mse:.4f} val_MAE={val_mae:.4f} | "
-              f"lr={optimizer.param_groups[0]['lr']:.2e}")
+              f"train_loss={tr_loss:.4f} train_MSE={tr_mse:.4f} train_physics={tr_physics:.4f} | "
+              f"val_loss={val_loss:.4f} val_MSE={val_mse:.4f} val_physics={val_physics:.4f} | "
+              f"lr={current_lr:.2e}")
 
-        # Model saving and early stopping
-        if val_mse < best_val:
-            best_val = val_mse
+        # Model saving and early stopping (use combined validation loss)
+        if val_loss < best_val:
+            best_val = val_loss
             best_epoch = epoch
             patience_counter = 0
+
+            # Log best model achievement
+            writer.add_scalar('Best_Model/Epoch', epoch, epoch)
+            writer.add_scalar('Best_Model/Val_Loss', val_loss, epoch)
+            writer.add_scalar('Best_Model/Val_MSE', val_mse, epoch)
 
             # Save model and scalers
             feature_scaler_state = {
@@ -413,6 +666,7 @@ def main():
                 'device': device.type,  # Save source device info
                 'optimizer': optimizer.state_dict(),
                 'scheduler': scheduler.state_dict(),
+                'val_loss': val_loss,
                 'val_mse': val_mse,
                 'feature_scaler': feature_scaler_state,
                 'target_scaler': target_scaler_state,
@@ -422,11 +676,19 @@ def main():
             patience_counter += 1
             if patience_counter >= args.patience:
                 print(f"\nEarly stopping at epoch {epoch}. "
-                      f"Best validation MSE: {best_val:.4f} "
+                      f"Best validation loss: {best_val:.4f} "
                       f"at epoch {best_epoch}")
+
+                # Log early stopping
+                writer.add_text('Training/Early_Stopping',
+                                f"Stopped at epoch {epoch}, best at {best_epoch}")
                 break
 
     print("\nTraining completed!")
+
+    # Log final training summary
+    writer.add_text('Training/Summary',
+                    f"Training completed. Best validation loss: {best_val:.4f} at epoch {best_epoch}")
 
     # Load the best model for testing
     try:
@@ -457,14 +719,37 @@ def main():
         model.time_scaler   = time_scaler
 
         print(f"Loaded best model from epoch {best_checkpoint['epoch']} "
-              f"with validation MSE {best_checkpoint['val_mse']:.4f}")
+              f"with validation loss {best_checkpoint['val_loss']:.4f} "
+              f"(MSE: {best_checkpoint['val_mse']:.4f})")
     except Exception as e:
         print(f"Error loading best model: {str(e)}")
         print("Using current model state for evaluation")
 
-    test_mse, test_mae = evaluate(model, test_loader)
+    # Final evaluation on test set
+    test_loss, test_mse, test_mae, test_physics = evaluate(model, test_loader, writer,
+                                                           best_epoch, phase='test')
 
-    print(f"\nFinal test metrics - MSE: {test_mse:.4f}, MAE: {test_mae:.4f}")
+    # Log final test metrics
+    writer.add_scalar('Final/Test_Loss', test_loss, best_epoch)
+    writer.add_scalar('Final/Test_MSE', test_mse, best_epoch)
+    writer.add_scalar('Final/Test_MAE', test_mae, best_epoch)
+    writer.add_scalar('Final/Test_Physics', test_physics, best_epoch)
+
+    # Create final summary
+    final_summary = (f"Final Results:\n"
+                    f"Test Loss: {test_loss:.4f}\n"
+                    f"Test MSE: {test_mse:.4f}\n"
+                    f"Test MAE: {test_mae:.4f}\n"
+                    f"Test Physics: {test_physics:.4f}\n"
+                    f"Best epoch: {best_epoch}")
+
+    writer.add_text('Final/Results', final_summary)
+
+    print(f"\nFinal test metrics - Loss: {test_loss:.4f}, MSE: {test_mse:.4f}, Physics: {test_physics:.4f}")
+
+    # Close TensorBoard writer
+    writer.close()
+    print(f"\nTensorBoard logs saved. To view: tensorboard --logdir=tensorboard_logs")
 
 
 if __name__ == '__main__':

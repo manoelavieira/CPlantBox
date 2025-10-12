@@ -2,6 +2,7 @@
 /dev/data/
 /dev/model/
 /dev/plot/
+/dev/tensorboard_logs/
 
 # build system clutter
 build-*

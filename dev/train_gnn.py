@@ -78,9 +78,6 @@ def log_hyperparameters(writer: SummaryWriter, args: argparse.Namespace, model_c
 
     writer.add_hparams(hparams, metrics)
 
-
-
-
 def train_one_epoch(
         model: nn.Module,
         loader: DataLoader,
@@ -137,13 +134,13 @@ def train_one_epoch(
         # Temporarily restore original features for physics computation
         data.node_feat = x_orig
         phys = physics_residual(pred_orig, data)  # already a mean over nodes/graphs
-        phys_scalar = float(phys if phys.dim() == 0 else phys.mean())
+        phys_tensor = phys if phys.dim() == 0 else phys.mean()
 
         # Restore standardized features for next iteration
         data.node_feat = model.feature_scaler.transform(x_orig)
 
         # Combine with explicit physics weight
-        loss = mse + getattr(model, "lambda_phys", 1.0) * phys_scalar
+        loss = mse + getattr(model, "lambda_phys", 1.0) * phys_tensor
         loss.backward()
 
         # Log gradient norms before clipping
@@ -167,18 +164,21 @@ def train_one_epoch(
             # Report MAE in original units using model's scaler
             pred_un = model.target_scaler.inv_transform(pred) if hasattr(model, 'target_scaler') and model.target_scaler is not None else pred
 
+            # Convert physics tensor to scalar for logging only
+            phys_scalar = float(phys_tensor)
+
             # Track means per batch; we'll average by number of batches
             mae = (pred_un - y).abs().mean()
             total_mae += mae.item()
             total_mse += mse.item()
             total_physics += phys_scalar
-            total_loss += (mse + getattr(model, "lambda_phys", 1.0) * phys_scalar).item()
+            total_loss += (mse + getattr(model, "lambda_phys", 1.0) * phys_tensor).item()
             n_batches += 1
 
             # Log batch-level metrics to TensorBoard (every 10 batches to avoid clutter)
             if writer is not None and batch_idx % 10 == 0:
                 step = epoch * len(loader) + batch_idx
-                writer.add_scalar('Training/Batch_Loss', (mse + getattr(model, "lambda_phys", 1.0)*phys_scalar).item(), step)
+                writer.add_scalar('Training/Batch_Loss', (mse + getattr(model, "lambda_phys", 1.0)*phys_tensor).item(), step)
                 writer.add_scalar('Training/Batch_MSE', mse.item(), step)
                 writer.add_scalar('Training/Batch_MAE', mae.item(), step)
                 writer.add_scalar('Training/Batch_Physics', phys_scalar, step)

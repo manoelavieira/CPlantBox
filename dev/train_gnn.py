@@ -79,36 +79,7 @@ def log_hyperparameters(writer: SummaryWriter, args: argparse.Namespace, model_c
     writer.add_hparams(hparams, metrics)
 
 
-def compute_physics_components(model: nn.Module, data, pred_orig) -> dict:
-    """Compute individual physics components for detailed logging."""
-    try:
-        if not torch.is_grad_enabled() or not data.time_node.requires_grad:
-            return {'physics_total': 0.0}
 
-        if not hasattr(data, 'time_node') or data.time_node is None:
-            return {'physics_total': 0.0}
-
-        x_orig = data.node_feat.clone() if hasattr(data, 'node_feat') else None
-
-        if hasattr(model, 'feature_scaler') and hasattr(data, 'node_feat'):
-            # Get original features if we have the inverse scaler
-            if hasattr(model.feature_scaler, 'inv_transform'):
-                data.node_feat = model.feature_scaler.inv_transform(data.node_feat)
-
-        phys_total = physics_residual(pred_orig, data)
-
-        if x_orig is not None:
-            if hasattr(model, 'feature_scaler'):
-                data.node_feat = model.feature_scaler.transform(x_orig)
-            else:
-                data.node_feat = x_orig
-
-        return {
-            'physics_total': phys_total.item() if phys_total.dim() > 0 else phys_total,
-        }
-    except Exception as e:
-        # Silently return zero for physics during evaluation phases
-        return {'physics_total': 0.0}
 
 def train_one_epoch(
         model: nn.Module,
@@ -139,7 +110,6 @@ def train_one_epoch(
     total_mae = 0.0
     total_mse = 0.0
     total_physics = 0.0
-    n_nodes = 0
     n_batches = 0
 
     for batch_idx, data in enumerate(loader):
@@ -167,7 +137,7 @@ def train_one_epoch(
         # Temporarily restore original features for physics computation
         data.node_feat = x_orig
         phys = physics_residual(pred_orig, data)  # already a mean over nodes/graphs
-        phys_scalar = phys if phys.dim() == 0 else phys.mean()
+        phys_scalar = float(phys if phys.dim() == 0 else phys.mean())
 
         # Restore standardized features for next iteration
         data.node_feat = model.feature_scaler.transform(x_orig)
@@ -194,17 +164,14 @@ def train_one_epoch(
         optimizer.step()
 
         with torch.no_grad():
-            # Report MAE in original units (use model's saved scaler)
-            if hasattr(model, 'target_scaler') and model.target_scaler is not None:
-                pred_un = model.target_scaler.inv_transform(pred)
-            else:
-                pred_un = pred
+            # Report MAE in original units using model's scaler
+            pred_un = model.target_scaler.inv_transform(pred) if hasattr(model, 'target_scaler') and model.target_scaler is not None else pred
 
             # Track means per batch; we'll average by number of batches
             mae = (pred_un - y).abs().mean()
             total_mae += mae.item()
             total_mse += mse.item()
-            total_physics += phys_scalar.item() if hasattr(phys_scalar, "item") else float(phys_scalar)
+            total_physics += phys_scalar
             total_loss += (mse + getattr(model, "lambda_phys", 1.0) * phys_scalar).item()
             n_batches += 1
 
@@ -214,7 +181,7 @@ def train_one_epoch(
                 writer.add_scalar('Training/Batch_Loss', (mse + getattr(model, "lambda_phys", 1.0)*phys_scalar).item(), step)
                 writer.add_scalar('Training/Batch_MSE', mse.item(), step)
                 writer.add_scalar('Training/Batch_MAE', mae.item(), step)
-                writer.add_scalar('Training/Batch_Physics', phys_scalar.item() if hasattr(phys_scalar,'item') else float(phys_scalar), step)
+                writer.add_scalar('Training/Batch_Physics', phys_scalar, step)
 
     if n_batches == 0:
         raise RuntimeError("No training samples this epoch.")
@@ -250,7 +217,6 @@ def evaluate(
     total_mse = 0.0
     total_mae = 0.0
     total_physics = 0.0
-    n_nodes = 0
     n_batches = 0
 
     with torch.no_grad():
@@ -273,11 +239,8 @@ def evaluate(
             # Transform predictions back for MAE in original space
             pred_un = model.target_scaler.inv_transform(pred)
 
-            # Restore original features for consistent state
-            data.node_feat = x_orig
-
-            # Compute physics residual for validation/test (mean)
-            phys_val = 0.0
+            # Compute physics residual for validation/test
+            phys_val_scalar = 0.0
             try:
                 if hasattr(data, 'time_node') and data.time_node is not None:
                     with torch.enable_grad():
@@ -289,19 +252,17 @@ def evaluate(
                         pred_orig_for_physics = model.target_scaler.inv_transform(pred_for_physics)
                         data_with_grad.node_feat = x_orig
                         phys_val = physics_residual(pred_orig_for_physics, data_with_grad)
-                        phys_val = phys_val if phys_val.dim() == 0 else phys_val.mean()
+                        phys_val_scalar = float(phys_val if phys_val.dim() == 0 else phys_val.mean())
             except Exception:
-                phys_val = 0.0
+                phys_val_scalar = 0.0
 
             mae = (pred_un - y).abs().mean()
-            phys_val_scalar = phys_val.item() if hasattr(phys_val, 'item') else phys_val
             loss = mse + getattr(model, "lambda_phys", 1.0) * phys_val_scalar
 
             total_loss += float(loss)
             total_mse += float(mse)
             total_mae += float(mae)
-            total_physics += float(phys_val_scalar)
-            n_nodes += y.size(0)
+            total_physics += phys_val_scalar
             n_batches += 1
 
             # Log distribution of predictions and targets (first batch only)
@@ -312,7 +273,7 @@ def evaluate(
 
                 # Log loss values for debugging
                 writer.add_scalar(f'{phase}/MSE', float(mse), epoch)
-                writer.add_scalar(f'{phase}/Physics', float(phys_val_scalar), epoch)
+                writer.add_scalar(f'{phase}/Physics', phys_val_scalar, epoch)
                 writer.add_scalar(f'{phase}/Loss', float(loss), epoch)
 
     # Compute averages per batch

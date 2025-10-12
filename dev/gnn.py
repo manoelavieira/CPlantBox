@@ -284,21 +284,24 @@ class PhloemNNConv(nn.Module):
         # Standardize time if scaler available
         if self.time_scaler is not None and getattr(self.time_scaler, "mean", None) is not None:
             t_scaled = self.time_scaler.transform(t.view(-1, 1)).view(-1)
+            t_std_scalar = self.time_scaler.std.view(-1)[0]  # capture the std used for scaling so we can convert d/dτ -> d/dt later
         else:
             t_scaled = t
+            t_std_scalar = torch.tensor(1.0, device=device)
 
         # Create per-node time with requires_grad=True
         if hasattr(data, 'batch') and data.batch is not None:
-            # For batched graphs
             t_node = t_scaled[data.batch].clone()
+            t_std_node = t_std_scalar.expand(t_node.size(0))
         else:
-            # Single graph
             t_node = t_scaled.expand(node_feat.size(0)).clone()
+            t_std_node = t_std_scalar.expand(t_node.size(0))
 
         # Ensure time has gradients and reshape
-        t_node = t_node.view(-1, 1)     # [N, 1]
-        t_node.requires_grad_(True)     # make time differentiable per node
-        data.time_node = t_node         # store time in data for physics computation
+        t_node = t_node.view(-1, 1)                     # [N, 1]
+        t_node.requires_grad_(True)                     # make time differentiable per node
+        data.time_node = t_node                         # scaled time (τ)
+        data.time_std_node = t_std_node.view(-1, 1)     # σ_t per node (for ∂/∂t conversion)
 
         # Concatenate as extra channel
         node_feat = torch.cat([node_feat, t_node], dim=1)  # [N, 3]
@@ -583,8 +586,8 @@ def physics_residual(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
     if data.time_node is None or not data.time_node.requires_grad:
         raise ValueError("data.time_node must have requires_grad=True for physics residual computation.")
 
-    # Compute gradient of predictions w.r.t. time_node [N,1]
-    # This represents ds/dt - the time derivative of sucrose content
+    # Compute gradient of predictions w.r.t. **scaled** time_node τ [N,1]
+    # We'll convert to real time derivative via  ∂/∂t = (1/σ_t) ∂/∂τ
     try:
         ds_dt = torch.autograd.grad(
             y_pred.sum(),        # sum to get scalar for gradient computation. trick to avoid building the full Jacobian
@@ -604,6 +607,11 @@ def physics_residual(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
             ) from e
         else:
             raise  # re-raise other runtime errors
+
+    # Convert ∂/∂τ to ∂/∂t using stored σ_t (τ = (t - μ_t)/σ_t)
+    if not hasattr(data, "time_std_node") or data.time_std_node is None:
+        raise ValueError("data.time_std_node missing; ensure model.forward() sets it.")
+    ds_dt = ds_dt / data.time_std_node.squeeze()  # now ds_dt is in real time units
 
     # CSTi is the sucrose concentration in sieve tube
     CSTi = y_pred.squeeze(-1) / vol_ST

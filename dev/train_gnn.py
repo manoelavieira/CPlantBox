@@ -165,7 +165,7 @@ def train_one_epoch(
             pred_un = model.target_scaler.inv_transform(pred) if hasattr(model, 'target_scaler') and model.target_scaler is not None else pred
 
             # Convert physics tensor to scalar for logging only
-            phys_scalar = float(phys_tensor)
+            phys_scalar = float(phys_tensor.detach())
 
             # Track means per batch; we'll average by number of batches
             mae = (pred_un - y).abs().mean()
@@ -252,7 +252,7 @@ def evaluate(
                         pred_orig_for_physics = model.target_scaler.inv_transform(pred_for_physics)
                         data_with_grad.node_feat = x_orig
                         phys_val = physics_residual(pred_orig_for_physics, data_with_grad)
-                        phys_val_scalar = float(phys_val if phys_val.dim() == 0 else phys_val.mean())
+                        phys_val_scalar = float((phys_val if phys_val.dim() == 0 else phys_val.mean()).detach())
             except Exception:
                 phys_val_scalar = 0.0
 

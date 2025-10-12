@@ -24,21 +24,12 @@ from dataset_dummy import DummyTemporalDataset
 from gnn import PhloemNNConv, ModelConfig, Standardizer, physics_residual
 
 
-class DatasetType(Enum):
-    DUMMY = 'dummy'
-    SIMULATED = 'simulated'
-
 def collate_graphs(batch):
     return Batch.from_data_list(batch)
 
 def create_tensorboard_writer(args: argparse.Namespace) -> SummaryWriter:
     """Create TensorBoard writer with organized logging directory."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-    dataset_name = args.dataset
-
-    # Create descriptive experiment name
-    # exp_name = (f"{dataset_name}_lr{args.lr}_bs{args.batch_size}_"
-    #             f"wd{args.weight_decay}_seed{args.seed}_{timestamp}")
     exp_name = timestamp
 
     log_dir = Path("tensorboard_logs") / exp_name
@@ -309,11 +300,10 @@ def validate_split_ratios(train_ratio: float, val_ratio: float) -> None:
             f"must be less than 1 to leave data for testing"
         )
 
-def get_dataloaders(dataset_type: DatasetType, args: argparse.Namespace) -> Tuple[DataLoader, DataLoader, DataLoader]:
-    """Get train, validation, and test dataloaders based on dataset type.
+def get_dataloaders(args: argparse.Namespace) -> Tuple[DataLoader, DataLoader, DataLoader]:
+    """Get train, validation, and test dataloaders.
 
     Args:
-        dataset_type: Type of dataset to load
         args: Command line arguments containing dataset parameters
 
     Returns:
@@ -324,46 +314,15 @@ def get_dataloaders(dataset_type: DatasetType, args: argparse.Namespace) -> Tupl
     """
     # Validate split ratios
     validate_split_ratios(args.train_ratio, args.val_ratio)
-    if dataset_type == DatasetType.DUMMY:
-        # Create dummy dataset
-        # ds = DummyTemporalDataset(n_graphs=args.n_graphs)
-        ds = DummyTemporalDataset()
-        print(f"\nCreated dummy dataset with {len(ds)} graphs")
 
-        # Split dataset
-        n_train = int(args.train_ratio * len(ds))
-        n_val = int(args.val_ratio * len(ds))
-        n_test = len(ds) - n_train - n_val
-
-        generator = torch.Generator().manual_seed(args.seed)
-        train_set, val_set, test_set = torch.utils.data.random_split(
-            ds, [n_train, n_val, n_test], generator=generator)
-
-        # Create dataloaders
-        train_loader = DataLoader(
-            train_set, batch_size=args.batch_size,
-            shuffle=True, collate_fn=collate_graphs
-        )
-        val_loader = DataLoader(
-            val_set, batch_size=args.batch_size,
-            shuffle=False, collate_fn=collate_graphs
-        )
-        test_loader = DataLoader(
-            test_set, batch_size=args.batch_size,
-            shuffle=False, collate_fn=collate_graphs
-        )
-
-    elif dataset_type == DatasetType.SIMULATED:
-        # Load simulation data
-        train_loader, val_loader, test_loader = load_phloem_data(
-            h5_path=args.data_path,
-            batch_size=args.batch_size,
-            train_ratio=args.train_ratio,
-            val_ratio=args.val_ratio,
-            random_seed=args.seed
-        )
-    else:
-        raise ValueError(f"Unknown dataset type: {dataset_type}")
+    # Load simulation data
+    train_loader, val_loader, test_loader = load_phloem_data(
+        h5_path=args.data_path,
+        batch_size=args.batch_size,
+        train_ratio=args.train_ratio,
+        val_ratio=args.val_ratio,
+        random_seed=args.seed
+    )
 
     return train_loader, val_loader, test_loader
 
@@ -396,12 +355,8 @@ def main():
     # Parse arguments
     parser = argparse.ArgumentParser(description="Train phloem GNN model")
 
-    parser.add_argument('--dataset', type=str, choices=['dummy', 'simulated'],
-                       default='dummy', help='Dataset type to use')
     parser.add_argument('--data-path', type=str,
                        help='Path to H5 file for simulated data')
-    parser.add_argument('--n-graphs', type=int, default=80,
-                       help='Number of graphs for dummy dataset')
     parser.add_argument('--batch-size', type=int, default=8,
                        help='Batch size for training')
     parser.add_argument('--train-ratio', type=float, default=0.8,
@@ -423,8 +378,8 @@ def main():
     args = parser.parse_args()
 
     # Validate arguments
-    if args.dataset == 'simulated' and args.data_path is None:
-        parser.error("--data-path is required when using --dataset simulated")
+    if args.data_path is None:
+        parser.error("--data-path is required to load simulated data")
 
     # Set random seeds for full reproducibility
     random.seed(args.seed) # Python's random
@@ -457,8 +412,7 @@ def main():
     print_model_summary(model, writer)
 
     # Get data loaders
-    dataset_type = DatasetType[args.dataset.upper()]
-    train_loader, val_loader, test_loader = get_dataloaders(dataset_type, args)
+    train_loader, val_loader, test_loader = get_dataloaders(args)
     print(f"Train batches: {len(train_loader)}, "
           f"Validation batches: {len(val_loader)}, "
           f"Test batches: {len(test_loader)}")

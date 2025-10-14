@@ -18,7 +18,25 @@ import os
 from pathlib import Path
 
 def collate_graphs(batch):
-    return Batch.from_data_list(batch)
+    """Custom collate function that handles parameter names properly."""
+    batched_data = Batch.from_data_list(batch)
+
+    # Fix parameter names: they should be the same across all graphs in a batch
+    # So we just take the first one instead of creating nested lists
+    if hasattr(batched_data, 'sim_params_names') and isinstance(batched_data.sim_params_names, list):
+        if len(batched_data.sim_params_names) > 0 and isinstance(batched_data.sim_params_names[0], list):
+            batched_data.sim_params_names = batched_data.sim_params_names[0]
+
+    if hasattr(batched_data, 'step_params_names') and isinstance(batched_data.step_params_names, list):
+        if len(batched_data.step_params_names) > 0 and isinstance(batched_data.step_params_names[0], list):
+            batched_data.step_params_names = batched_data.step_params_names[0]
+
+    if hasattr(batched_data, 'node_fields_names') and isinstance(batched_data.node_fields_names, list):
+        if len(batched_data.node_fields_names) > 0 and isinstance(batched_data.node_fields_names[0], list):
+            batched_data.node_fields_names = batched_data.node_fields_names[0]
+
+    return batched_data
+
 
 def get_edge_index_from_topology(I_Upflow: np.ndarray, I_Downflow: np.ndarray, connectivity: np.ndarray = None) -> torch.Tensor:
     """

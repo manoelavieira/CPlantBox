@@ -504,6 +504,100 @@ def run_training_loop(
     return training_state
 
 
+def parse_arguments() -> TrainingConfig:
+    """Parse command line arguments and create training configuration.
+
+    Returns:
+        TrainingConfig: Validated training configuration
+    """
+    parser = argparse.ArgumentParser(description="Train phloem GNN model")
+
+    parser.add_argument('--data-path', type=str,
+                       help='Path to H5 file for simulated data')
+    parser.add_argument('--batch-size', type=int, default=8,
+                       help='Batch size for training')
+    parser.add_argument('--train-ratio', type=float, default=0.8,
+                       help='Ratio of data to use for training')
+    parser.add_argument('--val-ratio', type=float, default=0.1,
+                       help='Ratio of data to use for validation')
+    parser.add_argument('--lr', type=float, default=3e-3,
+                       help='Initial learning rate')
+    parser.add_argument('--weight-decay', type=float, default=1e-5,
+                       help='Weight decay for optimizer')
+    parser.add_argument('--patience', type=int, default=10,
+                       help='Patience for early stopping')
+    parser.add_argument('--epochs', type=int, default=100,
+                       help='Maximum number of epochs to train')
+    parser.add_argument('--seed', type=int, default=42,
+                       help='Random seed for reproducibility')
+    parser.add_argument('--lambda-phys', type=float, default=1.0,
+                        help='Weight for physics loss term (L = MSE + lambda_phys * Physics)')
+    args = parser.parse_args()
+
+    # Create training configuration
+    config = TrainingConfig(
+        data_path=args.data_path,
+        batch_size=args.batch_size,
+        train_ratio=args.train_ratio,
+        val_ratio=args.val_ratio,
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        patience=args.patience,
+        epochs=args.epochs,
+        seed=args.seed,
+        lambda_phys=args.lambda_phys
+    )
+
+    # Validate configuration
+    config.validate()
+
+    return config
+
+
+def run_final_evaluation(
+    model_setup: ModelSetup,
+    test_loader: DataLoader,
+    writer: SummaryWriter,
+    training_state: TrainingState,
+    config: TrainingConfig
+) -> None:
+    """Run final evaluation and log results.
+
+    Args:
+        model_setup: Model setup with trained model
+        test_loader: Test data loader
+        writer: TensorBoard writer
+        training_state: Training state with best epoch info
+        config: Training configuration
+    """
+    # Load the best model for testing
+    load_best_model(model_setup, config.model_save_path, model_setup.device)
+
+    # Final evaluation on test set
+    test_loss, test_mse, test_mae, test_physics = evaluate(
+        model_setup.model, test_loader, writer,
+        training_state.best_epoch, phase='test'
+    )
+
+    # Log final test metrics
+    writer.add_scalar('Final/Test_Loss', test_loss, training_state.best_epoch)
+    writer.add_scalar('Final/Test_MSE', test_mse, training_state.best_epoch)
+    writer.add_scalar('Final/Test_MAE', test_mae, training_state.best_epoch)
+    writer.add_scalar('Final/Test_Physics', test_physics, training_state.best_epoch)
+
+    # Create final summary
+    final_summary = (f"Final Results:\n"
+                    f"Test Loss: {test_loss:.4f}\n"
+                    f"Test MSE: {test_mse:.4f}\n"
+                    f"Test MAE: {test_mae:.4f}\n"
+                    f"Test Physics: {test_physics:.4f}\n"
+                    f"Best epoch: {training_state.best_epoch}")
+
+    writer.add_text('Final/Results', final_summary)
+
+    print(f"\nFinal test metrics - Loss: {test_loss:.4f}, MSE: {test_mse:.4f}, Physics: {test_physics:.4f}")
+
+
 def train_one_epoch(
         model: nn.Module,
         loader: DataLoader,
@@ -718,52 +812,27 @@ def evaluate(
 
 
 def main():
-    # Parse arguments
-    parser = argparse.ArgumentParser(description="Train phloem GNN model")
-
-    parser.add_argument('--data-path', type=str,
-                       help='Path to H5 file for simulated data')
-    parser.add_argument('--batch-size', type=int, default=8,
-                       help='Batch size for training')
-    parser.add_argument('--train-ratio', type=float, default=0.8,
-                       help='Ratio of data to use for training')
-    parser.add_argument('--val-ratio', type=float, default=0.1,
-                       help='Ratio of data to use for validation')
-    parser.add_argument('--lr', type=float, default=3e-3,
-                       help='Initial learning rate')
-    parser.add_argument('--weight-decay', type=float, default=1e-5,
-                       help='Weight decay for optimizer')
-    parser.add_argument('--patience', type=int, default=10,
-                       help='Patience for early stopping')
-    parser.add_argument('--epochs', type=int, default=100,
-                       help='Maximum number of epochs to train')
-    parser.add_argument('--seed', type=int, default=42,
-                       help='Random seed for reproducibility')
-    parser.add_argument('--lambda-phys', type=float, default=1.0,
-                        help='Weight for physics loss term (L = MSE + lambda_phys * Physics)')
-    args = parser.parse_args()
-
-    # Create training configuration
-    config = TrainingConfig(
-        data_path=args.data_path,
-        batch_size=args.batch_size,
-        train_ratio=args.train_ratio,
-        val_ratio=args.val_ratio,
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-        patience=args.patience,
-        epochs=args.epochs,
-        seed=args.seed,
-        lambda_phys=args.lambda_phys
-    )
-
-    # Validate configuration
-    config.validate()
+    """Main training function."""
+    # Parse arguments and create configuration
+    config = parse_arguments()
 
     # Setup environment
     device = setup_environment(config)
-
     print(f"Using torch {torch.__version__}, torch_geometric {torch_geometric.__version__}")
+
+    # For compatibility with existing logging functions
+    args = argparse.Namespace(
+        data_path=config.data_path,
+        batch_size=config.batch_size,
+        train_ratio=config.train_ratio,
+        val_ratio=config.val_ratio,
+        lr=config.lr,
+        weight_decay=config.weight_decay,
+        patience=config.patience,
+        epochs=config.epochs,
+        seed=config.seed,
+        lambda_phys=config.lambda_phys
+    )
 
     # Log experiment configuration
     log_experiment_config(args)
@@ -779,19 +848,18 @@ def main():
 
     # Setup model and scalers
     model_setup = setup_model_and_scalers(config, train_loader, device)
-    model = model_setup.model
 
-    # Create model config for logging (temporary until we refactor further)
+    # Create model config for logging
     model_cfg = ModelConfig()
 
     # Log hyperparameters to TensorBoard
     log_hyperparameters(writer, args, model_cfg)
 
     # Print detailed model summary
-    print_model_summary(model, writer)
+    print_model_summary(model_setup.model, writer)
 
     # Setup training components
-    optimizer, scheduler = setup_training_components(model, config)
+    optimizer, scheduler = setup_training_components(model_setup.model, config)
 
     # Run training loop
     training_state = run_training_loop(
@@ -799,34 +867,8 @@ def main():
         writer, config, model_cfg
     )
 
-    # Load the best model for testing
-    load_best_model(model_setup, config.model_save_path, device)
-
-    # Final evaluation on test set
-    test_loss, test_mse, test_mae, test_physics = evaluate(model,
-                                                           test_loader,
-                                                           writer,
-                                                           training_state.best_epoch,
-                                                           phase='test')
-
-    # Log final test metrics
-    writer.add_scalar('Final/Test_Loss', test_loss, training_state.best_epoch)
-    writer.add_scalar('Final/Test_MSE', test_mse, training_state.best_epoch)
-    writer.add_scalar('Final/Test_MAE', test_mae, training_state.best_epoch)
-    writer.add_scalar('Final/Test_Physics', test_physics, training_state.best_epoch)
-
-
-    # Create final summary
-    final_summary = (f"Final Results:\n"
-                    f"Test Loss: {test_loss:.4f}\n"
-                    f"Test MSE: {test_mse:.4f}\n"
-                    f"Test MAE: {test_mae:.4f}\n"
-                    f"Test Physics: {test_physics:.4f}\n"
-                    f"Best epoch: {training_state.best_epoch}")
-
-    writer.add_text('Final/Results', final_summary)
-
-    print(f"\nFinal test metrics - Loss: {test_loss:.4f}, MSE: {test_mse:.4f}, Physics: {test_physics:.4f}")
+    # Run final evaluation and reporting
+    run_final_evaluation(model_setup, test_loader, writer, training_state, config)
 
     # Close TensorBoard writer
     writer.close()

@@ -168,6 +168,71 @@ def setup_environment(config: TrainingConfig) -> torch.device:
     return device
 
 
+def setup_model_and_scalers(
+    config: TrainingConfig,
+    train_loader: DataLoader,
+    device: torch.device
+) -> ModelSetup:
+    """Setup model and scalers.
+
+    Args:
+        config: Training configuration
+        train_loader: Training data loader for fitting scalers
+        device: Device to place model and scalers on
+
+    Returns:
+        ModelSetup: Configured model with fitted scalers
+    """
+    # Create model
+    model_cfg = ModelConfig()
+    model = PhloemNNConv(model_cfg).to(device)
+    model.lambda_phys = config.lambda_phys
+
+    # Setup standardization on training data
+    feature_scaler = Standardizer()  # for input node features (psi, vol)
+    target_scaler = Standardizer()   # for targets (y)
+    time_scaler = Standardizer()     # for graph-level time (scalar)
+
+    # Fit scalers on training data
+    with torch.no_grad():
+        x_list, y_list, t_list = [], [], []
+
+        for batch in train_loader:
+            x_list.append(batch.node_feat[:, :model_cfg.node_feat_dim])
+            y_list.append(batch.y)
+            if hasattr(batch, 'time'):
+                t_list.append(batch.time.view(-1, 1))  # collect per-graph scalars
+            else:
+                raise ValueError("Each Data must carry a graph-level `time` tensor.")
+
+        Xs = torch.cat(x_list, dim=0)  # [sum_N, 2]
+        Ys = torch.cat(y_list, dim=0)  # [sum_N, 1]
+        Ts = torch.cat(t_list, dim=0)  # [sum_B, 1], one per graph
+
+        feature_scaler.fit(Xs)
+        target_scaler.fit(Ys)
+        time_scaler.fit(Ts)
+
+    # Create model setup
+    model_setup = ModelSetup(
+        device=device,
+        model=model,
+        feature_scaler=feature_scaler,
+        target_scaler=target_scaler,
+        time_scaler=time_scaler
+    )
+
+    # Add scalers to the model for backward compatibility
+    model.feature_scaler = feature_scaler
+    model.target_scaler = target_scaler
+    model.time_scaler = time_scaler
+
+    # Ensure everything is on the correct device
+    model_setup.to_device()
+
+    return model_setup
+
+
 def train_one_epoch(
         model: nn.Module,
         loader: DataLoader,
@@ -435,55 +500,24 @@ def main():
     # Create TensorBoard writer
     writer = create_tensorboard_writer(args)
 
-    model_cfg = ModelConfig()
-    model = PhloemNNConv(model_cfg).to(device)
-    # Expose physics weight on the model for easy access in training/eval
-    model.lambda_phys = config.lambda_phys
-
-    # Log hyperparameters to TensorBoard
-    log_hyperparameters(writer, args, model_cfg)
-
-    # Print detailed model summary
-    print_model_summary(model, writer)
-
     # Get data loaders
     train_loader, val_loader, test_loader = get_dataloaders(args)
     print(f"Train batches: {len(train_loader)}, "
           f"Validation batches: {len(val_loader)}, "
           f"Test batches: {len(test_loader)}")
 
-    # Setup standardization on training data
-    feature_scaler = Standardizer() # for input node features (psi, vol)
-    target_scaler = Standardizer() # for targets (y)
-    time_scaler = Standardizer() # for graph-level time (scalar)
+    # Setup model and scalers
+    model_setup = setup_model_and_scalers(config, train_loader, device)
+    model = model_setup.model
 
-    # Fit scalers on training data
-    with torch.no_grad():
-        x_list, y_list, t_list = [], [], []
+    # Create model config for logging (temporary until we refactor further)
+    model_cfg = ModelConfig()
 
-        for batch in train_loader:
-            x_list.append(batch.node_feat[:, :model_cfg.node_feat_dim])
-            y_list.append(batch.y)
-            if hasattr(batch, 'time'):
-                t_list.append(batch.time.view(-1, 1)) # collect per-graph scalars
-            else:
-                raise ValueError("Each Data must carry a graph-level `time` tensor.")
+    # Log hyperparameters to TensorBoard
+    log_hyperparameters(writer, args, model_cfg)
 
-        Xs = torch.cat(x_list, dim=0) # [sum_N, 2]
-        Ys = torch.cat(y_list, dim=0) # [sum_N, 1]
-        Ts = torch.cat(t_list, dim=0) # [sum_B, 1], one per graph
-
-        feature_scaler.fit(Xs)
-        target_scaler.fit(Ys)
-        time_scaler.fit(Ts)
-
-    # Add scalers to the model
-    model.feature_scaler = feature_scaler
-    model.target_scaler = target_scaler
-    model.time_scaler = time_scaler
-
-    # Ensure scalers live on the same device as model (explicit)
-    model.to(device)
+    # Print detailed model summary
+    print_model_summary(model, writer)
 
     # Training setup
     optimizer = torch.optim.AdamW(
@@ -562,19 +596,19 @@ def main():
 
             # Save model and scalers
             feature_scaler_state = {
-                'mean': feature_scaler.mean,
-                'std': feature_scaler.std,
-                'device': str(feature_scaler.device)
+                'mean': model_setup.feature_scaler.mean,
+                'std': model_setup.feature_scaler.std,
+                'device': str(model_setup.feature_scaler.device)
             }
             target_scaler_state = {
-                'mean': target_scaler.mean,
-                'std': target_scaler.std,
-                'device': str(target_scaler.device)
+                'mean': model_setup.target_scaler.mean,
+                'std': model_setup.target_scaler.std,
+                'device': str(model_setup.target_scaler.device)
             }
             time_scaler_state = {
-                'mean': time_scaler.mean,
-                'std': time_scaler.std,
-                'device': str(time_scaler.device)
+                'mean': model_setup.time_scaler.mean,
+                'std': model_setup.time_scaler.std,
+                'device': str(model_setup.time_scaler.device)
             }
 
             torch.save({
@@ -616,25 +650,25 @@ def main():
         model.load_state_dict(best_checkpoint['state_dict'])
 
         # Reconstruct scalers from saved state
-        feature_scaler = Standardizer()
-        feature_scaler.mean = best_checkpoint['feature_scaler']['mean']
-        feature_scaler.std = best_checkpoint['feature_scaler']['std']
-        feature_scaler.device = device
+        model_setup.feature_scaler = Standardizer()
+        model_setup.feature_scaler.mean = best_checkpoint['feature_scaler']['mean']
+        model_setup.feature_scaler.std = best_checkpoint['feature_scaler']['std']
+        model_setup.feature_scaler.device = device
 
-        target_scaler = Standardizer()
-        target_scaler.mean = best_checkpoint['target_scaler']['mean']
-        target_scaler.std = best_checkpoint['target_scaler']['std']
-        target_scaler.device = device
+        model_setup.target_scaler = Standardizer()
+        model_setup.target_scaler.mean = best_checkpoint['target_scaler']['mean']
+        model_setup.target_scaler.std = best_checkpoint['target_scaler']['std']
+        model_setup.target_scaler.device = device
 
-        time_scaler = Standardizer()
-        time_scaler.mean = best_checkpoint['time_scaler']['mean']
-        time_scaler.std  = best_checkpoint['time_scaler']['std']
-        time_scaler.device = device
+        model_setup.time_scaler = Standardizer()
+        model_setup.time_scaler.mean = best_checkpoint['time_scaler']['mean']
+        model_setup.time_scaler.std = best_checkpoint['time_scaler']['std']
+        model_setup.time_scaler.device = device
 
-        # Assign scalers to model
-        model.feature_scaler = feature_scaler
-        model.target_scaler = target_scaler
-        model.time_scaler   = time_scaler
+        # Assign scalers to model for backward compatibility
+        model.feature_scaler = model_setup.feature_scaler
+        model.target_scaler = model_setup.target_scaler
+        model.time_scaler = model_setup.time_scaler
 
         print(f"Loaded best model from epoch {best_checkpoint['epoch']} "
               f"with validation loss {best_checkpoint['val_loss']:.4f} "

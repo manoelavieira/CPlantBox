@@ -233,6 +233,35 @@ def setup_model_and_scalers(
     return model_setup
 
 
+def setup_training_components(
+    model: nn.Module,
+    config: TrainingConfig
+) -> Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler]:
+    """Setup optimizer and learning rate scheduler.
+
+    Args:
+        model: The neural network model
+        config: Training configuration
+
+    Returns:
+        Tuple of (optimizer, scheduler)
+    """
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=config.lr,
+        weight_decay=config.weight_decay
+    )
+
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode='min',
+        factor=config.scheduler_factor,
+        patience=config.scheduler_patience
+    )
+
+    return optimizer, scheduler
+
+
 def train_one_epoch(
         model: nn.Module,
         loader: DataLoader,
@@ -519,16 +548,8 @@ def main():
     # Print detailed model summary
     print_model_summary(model, writer)
 
-    # Training setup
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=config.lr,
-        weight_decay=config.weight_decay
-    )
-
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=config.scheduler_factor, patience=config.scheduler_patience
-    )
+    # Setup training components
+    optimizer, scheduler = setup_training_components(model, config)
 
     # Training loop with early stopping
     best_val = float('inf')

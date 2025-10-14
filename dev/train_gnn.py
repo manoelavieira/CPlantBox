@@ -370,6 +370,51 @@ def load_best_model(
         return False
 
 
+def log_epoch_metrics(
+    writer: SummaryWriter,
+    epoch: int,
+    train_metrics: TrainingMetrics,
+    val_metrics: TrainingMetrics,
+    current_lr: float
+) -> None:
+    """Log epoch metrics to TensorBoard.
+
+    Args:
+        writer: TensorBoard writer
+        epoch: Current epoch number
+        train_metrics: Training metrics for this epoch
+        val_metrics: Validation metrics for this epoch
+        current_lr: Current learning rate
+    """
+    # Log individual metrics
+    writer.add_scalar('Loss/Train_Total', train_metrics.loss, epoch)
+    writer.add_scalar('Loss/Train_MSE', train_metrics.mse, epoch)
+    writer.add_scalar('Loss/Train_Physics', train_metrics.physics, epoch)
+
+    writer.add_scalar('Metrics/Val_Total', val_metrics.loss, epoch)
+    writer.add_scalar('Metrics/Val_MSE', val_metrics.mse, epoch)
+    writer.add_scalar('Metrics/Val_Physics', val_metrics.physics, epoch)
+
+    writer.add_scalar('Learning_Rate', current_lr, epoch)
+
+    # Log combined metrics for easy comparison
+    writer.add_scalars('MAE_Comparison', {
+        'Train': train_metrics.mae,
+        'Validation': val_metrics.mae
+    }, epoch)
+
+    writer.add_scalars('Loss_Comparison', {
+        'Train_Total': train_metrics.loss,
+        'Val_Total': val_metrics.loss
+    }, epoch)
+
+    writer.add_scalars('Loss_Components', {
+        'MSE': train_metrics.mse,
+        'Physics': train_metrics.physics,
+        'Total': train_metrics.loss
+    }, epoch)
+
+
 def train_one_epoch(
         model: nn.Module,
         loader: DataLoader,
@@ -678,35 +723,14 @@ def main():
         scheduler.step(val_loss)
         current_lr = optimizer.param_groups[0]['lr']
 
+        # Create metrics objects
+        train_metrics = TrainingMetrics(tr_loss, tr_mse, tr_mae, tr_physics)
+        val_metrics = TrainingMetrics(val_loss, val_mse, val_mae, val_physics)
+
         # Log metrics to TensorBoard
-        writer.add_scalar('Loss/Train_Total', tr_loss, epoch)
-        writer.add_scalar('Loss/Train_MSE', tr_mse, epoch)
-        writer.add_scalar('Loss/Train_Physics', tr_physics, epoch)
+        log_epoch_metrics(writer, epoch, train_metrics, val_metrics, current_lr)
 
-        writer.add_scalar('Metrics/Val_Total', val_loss, epoch)
-        writer.add_scalar('Metrics/Val_MSE', val_mse, epoch)
-        writer.add_scalar('Metrics/Val_Physics', val_physics, epoch)
-
-        writer.add_scalar('Learning_Rate', current_lr, epoch)
-
-        # Log combined metrics for easy comparison
-        writer.add_scalars('MAE_Comparison', {
-            'Train': tr_mae,
-            'Validation': val_mae
-        }, epoch)
-
-        writer.add_scalars('Loss_Comparison', {
-            'Train_Total': tr_loss,
-            'Val_Total': val_loss
-        }, epoch)
-
-        writer.add_scalars('Loss_Components', {
-            'MSE': tr_mse,
-            'Physics': tr_physics,
-            'Total': tr_loss
-        }, epoch)
-
-        # Logging
+        # Console logging
         print(f"Epoch {epoch:03d} | "
               f"train_loss={tr_loss:.4f} train_MSE={tr_mse:.4f} train_physics={tr_physics:.4f} | "
               f"val_loss={val_loss:.4f} val_MSE={val_mse:.4f} val_physics={val_physics:.4f} | "

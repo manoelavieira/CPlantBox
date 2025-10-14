@@ -262,6 +262,114 @@ def setup_training_components(
     return optimizer, scheduler
 
 
+def save_checkpoint(
+    model_setup: ModelSetup,
+    model_cfg: ModelConfig,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler._LRScheduler,
+    epoch: int,
+    val_loss: float,
+    val_mse: float,
+    filepath: str
+) -> None:
+    """Save model checkpoint with all necessary state.
+
+    Args:
+        model_setup: Model setup containing model and scalers
+        model_cfg: Model configuration
+        optimizer: Optimizer state
+        scheduler: Scheduler state
+        epoch: Current epoch number
+        val_loss: Validation loss
+        val_mse: Validation MSE
+        filepath: Path to save checkpoint
+    """
+    # Prepare scaler states
+    feature_scaler_state = {
+        'mean': model_setup.feature_scaler.mean,
+        'std': model_setup.feature_scaler.std,
+        'device': str(model_setup.feature_scaler.device)
+    }
+    target_scaler_state = {
+        'mean': model_setup.target_scaler.mean,
+        'std': model_setup.target_scaler.std,
+        'device': str(model_setup.target_scaler.device)
+    }
+    time_scaler_state = {
+        'mean': model_setup.time_scaler.mean,
+        'std': model_setup.time_scaler.std,
+        'device': str(model_setup.time_scaler.device)
+    }
+
+    # Save checkpoint
+    torch.save({
+        'epoch': epoch,
+        'cfg': model_cfg.__dict__,
+        'state_dict': model_setup.model.state_dict(),
+        'device': model_setup.device.type,
+        'optimizer': optimizer.state_dict(),
+        'scheduler': scheduler.state_dict(),
+        'val_loss': val_loss,
+        'val_mse': val_mse,
+        'feature_scaler': feature_scaler_state,
+        'target_scaler': target_scaler_state,
+        'time_scaler': time_scaler_state,
+    }, filepath)
+
+
+def load_best_model(
+    model_setup: ModelSetup,
+    filepath: str,
+    device: torch.device
+) -> bool:
+    """Load the best model from checkpoint.
+
+    Args:
+        model_setup: Model setup to update with loaded state
+        filepath: Path to checkpoint file
+        device: Device to load model on
+
+    Returns:
+        bool: True if loading was successful, False otherwise
+    """
+    try:
+        best_checkpoint = torch.load(filepath, map_location=device)
+
+        # Load model state
+        model_setup.model.load_state_dict(best_checkpoint['state_dict'])
+
+        # Reconstruct scalers from saved state
+        model_setup.feature_scaler = Standardizer()
+        model_setup.feature_scaler.mean = best_checkpoint['feature_scaler']['mean']
+        model_setup.feature_scaler.std = best_checkpoint['feature_scaler']['std']
+        model_setup.feature_scaler.device = device
+
+        model_setup.target_scaler = Standardizer()
+        model_setup.target_scaler.mean = best_checkpoint['target_scaler']['mean']
+        model_setup.target_scaler.std = best_checkpoint['target_scaler']['std']
+        model_setup.target_scaler.device = device
+
+        model_setup.time_scaler = Standardizer()
+        model_setup.time_scaler.mean = best_checkpoint['time_scaler']['mean']
+        model_setup.time_scaler.std = best_checkpoint['time_scaler']['std']
+        model_setup.time_scaler.device = device
+
+        # Assign scalers to model for backward compatibility
+        model_setup.model.feature_scaler = model_setup.feature_scaler
+        model_setup.model.target_scaler = model_setup.target_scaler
+        model_setup.model.time_scaler = model_setup.time_scaler
+
+        print(f"Loaded best model from epoch {best_checkpoint['epoch']} "
+              f"with validation loss {best_checkpoint['val_loss']:.4f} "
+              f"(MSE: {best_checkpoint['val_mse']:.4f})")
+        return True
+
+    except Exception as e:
+        print(f"Error loading best model: {str(e)}")
+        print("Using current model state for evaluation")
+        return False
+
+
 def train_one_epoch(
         model: nn.Module,
         loader: DataLoader,
@@ -615,36 +723,11 @@ def main():
             writer.add_scalar('Best_Model/Val_Loss', val_loss, epoch)
             writer.add_scalar('Best_Model/Val_MSE', val_mse, epoch)
 
-            # Save model and scalers
-            feature_scaler_state = {
-                'mean': model_setup.feature_scaler.mean,
-                'std': model_setup.feature_scaler.std,
-                'device': str(model_setup.feature_scaler.device)
-            }
-            target_scaler_state = {
-                'mean': model_setup.target_scaler.mean,
-                'std': model_setup.target_scaler.std,
-                'device': str(model_setup.target_scaler.device)
-            }
-            time_scaler_state = {
-                'mean': model_setup.time_scaler.mean,
-                'std': model_setup.time_scaler.std,
-                'device': str(model_setup.time_scaler.device)
-            }
-
-            torch.save({
-                'epoch': epoch,
-                'cfg': model_cfg.__dict__,
-                'state_dict': model.state_dict(),
-                'device': device.type,  # Save source device info
-                'optimizer': optimizer.state_dict(),
-                'scheduler': scheduler.state_dict(),
-                'val_loss': val_loss,
-                'val_mse': val_mse,
-                'feature_scaler': feature_scaler_state,
-                'target_scaler': target_scaler_state,
-                'time_scaler': time_scaler_state,
-            }, config.model_save_path)
+            # Save model checkpoint
+            save_checkpoint(
+                model_setup, model_cfg, optimizer, scheduler,
+                epoch, val_loss, val_mse, config.model_save_path
+            )
         else:
             patience_counter += 1
             if patience_counter >= config.patience:
@@ -664,39 +747,7 @@ def main():
                     f"Training completed. Best validation loss: {best_val:.4f} at epoch {best_epoch}")
 
     # Load the best model for testing
-    try:
-        best_checkpoint = torch.load(config.model_save_path, map_location=device)
-
-        # Load model state
-        model.load_state_dict(best_checkpoint['state_dict'])
-
-        # Reconstruct scalers from saved state
-        model_setup.feature_scaler = Standardizer()
-        model_setup.feature_scaler.mean = best_checkpoint['feature_scaler']['mean']
-        model_setup.feature_scaler.std = best_checkpoint['feature_scaler']['std']
-        model_setup.feature_scaler.device = device
-
-        model_setup.target_scaler = Standardizer()
-        model_setup.target_scaler.mean = best_checkpoint['target_scaler']['mean']
-        model_setup.target_scaler.std = best_checkpoint['target_scaler']['std']
-        model_setup.target_scaler.device = device
-
-        model_setup.time_scaler = Standardizer()
-        model_setup.time_scaler.mean = best_checkpoint['time_scaler']['mean']
-        model_setup.time_scaler.std = best_checkpoint['time_scaler']['std']
-        model_setup.time_scaler.device = device
-
-        # Assign scalers to model for backward compatibility
-        model.feature_scaler = model_setup.feature_scaler
-        model.target_scaler = model_setup.target_scaler
-        model.time_scaler = model_setup.time_scaler
-
-        print(f"Loaded best model from epoch {best_checkpoint['epoch']} "
-              f"with validation loss {best_checkpoint['val_loss']:.4f} "
-              f"(MSE: {best_checkpoint['val_mse']:.4f})")
-    except Exception as e:
-        print(f"Error loading best model: {str(e)}")
-        print("Using current model state for evaluation")
+    load_best_model(model_setup, config.model_save_path, device)
 
     # Final evaluation on test set
     test_loss, test_mse, test_mae, test_physics = evaluate(model, test_loader, writer,

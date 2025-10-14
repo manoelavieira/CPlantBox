@@ -17,9 +17,9 @@ Expected `Data` fields per graph (per timestep)
 - Optional: data.batch for mini-batching multiple graphs
 """
 
+from __future__ import annotations
 from typing import Optional
 from dataclasses import dataclass
-from __future__ import annotations
 
 import torch
 import torch.nn as nn
@@ -30,6 +30,67 @@ from torch_geometric.data import Data
 from torch_geometric.nn import NNConv
 from torch_geometric.nn.norm import GraphNorm  # per-graph normalization
 from debug_utils import create_delta2  # only import for debugging
+
+# Global constants
+R = 83.14  # universal gas constant
+
+
+def extract_parameters(data, device, batch_vec=None, y_pred_size=None):
+    """Extract and broadcast simulation and step parameters to per-node tensors.
+
+    Args:
+        data: Data object containing sim_params and step_params
+        device: Target device for tensors
+        batch_vec: Batch vector for batched graphs (optional)
+        y_pred_size: Size of predictions for single graph case
+
+    Returns:
+        dict: Parameter name -> per-node tensor mapping
+    """
+    # Use parameter names stored in the data object (from dataset_loader.py)
+    sim_params_names = data.sim_params_names
+    step_params_names = data.step_params_names
+
+    sim_params = data.sim_params.to(device)
+    step_params = data.step_params.to(device)
+
+    params = {}
+
+    if batch_vec is not None:
+        # Batched case: map parameters to nodes via batch vector
+        for i, name in enumerate(sim_params_names):
+            params[f"{name}"] = sim_params[batch_vec, i]
+        for i, name in enumerate(step_params_names):
+            params[f"{name}"] = step_params[batch_vec, i]
+    else:
+        # Single graph case: broadcast to all nodes
+        N = y_pred_size
+        for i, name in enumerate(sim_params_names):
+            params[f"{name}"] = sim_params[0, i].expand(N)
+        for i, name in enumerate(step_params_names):
+            params[f"{name}"] = step_params[0, i].expand(N)
+
+    return params
+
+
+def extract_node_fields(data, device):
+    """Extract node fields into a dictionary using names from data object.
+
+    Args:
+        data: Data object containing node_fields and node_fields_names
+        device: Target device for tensors
+
+    Returns:
+        dict: Field name -> tensor mapping
+    """
+    node_fields_names = data.node_fields_names
+    node_fields = data.node_fields.to(device)  # [N, num_fields]
+
+    fields = {}
+    for i, name in enumerate(node_fields_names):
+        fields[f"{name}"] = node_fields[:, i]
+
+    return fields
 
 
 class Standardizer:
@@ -50,7 +111,6 @@ class Standardizer:
     def transform(self, X: torch.Tensor) -> torch.Tensor:
         if self.mean is None or self.std is None:
             return X
-        # Ensure mean/std are on the same device as X
         if X.device != self.device:
             self.to(X.device)
         return (X - self.mean) / self.std
@@ -58,7 +118,6 @@ class Standardizer:
     def inv_transform(self, X: torch.Tensor) -> torch.Tensor:
         if self.mean is None or self.std is None:
             return X
-        # Ensure mean/std are on the same device as X
         if X.device != self.device:
             self.to(X.device)
         return X * self.std + self.mean
@@ -72,7 +131,6 @@ class Standardizer:
         Returns:
             self: The Standardizer instance for method chaining
         """
-        # Convert to torch.device for consistency
         device = torch.device(device)
 
         if self.mean is not None:
@@ -82,9 +140,7 @@ class Standardizer:
         self.device = device
         return self
 
-# -----------------------------
-# Model
-# -----------------------------
+
 @dataclass
 class ModelConfig:
     """Configuration for PhloemNNConv model.
@@ -99,10 +155,10 @@ class ModelConfig:
         aggr: NNConv aggregator type ("add", "mean", or "max")
         dropout: Dropout probability
     """
-    node_feat_dim: int = 3 # [psi, vol_st, len_leaf]
-    edge_feat_dim: int = 1 # [r_st]
+    node_feat_dim: int = 3  # [psi, vol_st, len_leaf]
+    edge_feat_dim: int = 1  # [r_st]
     num_org_types: int = 3
-    org_emb_size: int = 8 # embedding dimension for categorical organ type
+    org_emb_size: int = 8  # embedding dimension for categorical organ type
     hidden_size: int = 64
     num_layers: int = 3
     aggr: str = "add"
@@ -115,19 +171,19 @@ class ModelConfig:
             raise ValueError(f"Number of layers must be positive, got {self.num_layers}")
         if self.aggr not in ["add", "mean", "max"]:
             raise ValueError(f"Aggregator must be one of ['add', 'mean', 'max'], got {self.aggr}")
-        if any(d < 1 for d in [self.node_feat_dim, self.num_org_types, self.org_emb_size,
-                               self.hidden_size, self.edge_feat_dim]):
+        if any(d < 1 for d in [self.node_feat_dim, self.edge_feat_dim, self.num_org_types,
+                               self.org_emb_size, self.hidden_size]):
             raise ValueError("All dimensions must be positive integers")
 
 
 class EdgeNet(nn.Module):
     """Edge MLP producing weight matrices for NNConv.
 
-    Maps edge features (continuous + organ type) -> [E, out_channels * in_channels].
+    Maps edge features (continuous + categorical) -> [E, out_channels * in_channels].
     MLP that turns per-edge features into a per-edge weight matrix W_e that NNConv
     will use to transform neighbor node features.
     """
-    def __init__(self, edge_feat_dim: int, num_org_types: int, org_emb_size: int,
+    def __init__(self, edge_feat_cont_dim: int, num_org_types: int, org_emb_size: int,
                  in_node_dim: int, out_node_dim: int, hidden_size: int = 64):
         super().__init__()
 
@@ -135,26 +191,26 @@ class EdgeNet(nn.Module):
         self.out_node_dim = out_node_dim
 
         self.org_emb = nn.Embedding(num_org_types, org_emb_size)
-        edge_input_dim = edge_feat_dim + org_emb_size
+        edge_input_dim = edge_feat_cont_dim + org_emb_size
 
-        # Combined MLP for both continuous and embedded features
+        # Combined MLP for both continuous and categorical features
         # It outputs a flattened weight matrix of size [out_channels * in_channels] per edge
         self.mlp = nn.Sequential(
             nn.Linear(edge_input_dim, hidden_size), nn.ReLU(),
             nn.Linear(hidden_size, hidden_size), nn.ReLU(),
             # Final linear layer has no activation
             # We want raw learned weights, not squashed by ReLU/sigmoid
-            nn.Linear(hidden_size, out_node_dim * in_node_dim)
+            nn.Linear(hidden_size, in_node_dim * out_node_dim)
         )
 
     def forward(self, edge_features: torch.Tensor) -> torch.Tensor:
-        # edge_features: [E, D+1] where D is edge_feat_dim and last column is organ type
-        edge_feat = edge_features[:, :-1]  # continuous features
-        edge_org = edge_features[:, -1].long()  # organ type as long tensor (int64)
+        # edge_features: [E, D+1] where D is edge_feat_cont_dim and last column is organ type
+        edge_feat_cont = edge_features[:, :-1]  # continuous features
+        edge_feat_cat = edge_features[:, -1].long()  # organ type as long tensor (int64)
 
         # Combine continuous edge features with organ embeddings
-        edge_emb = self.org_emb(edge_org)
-        edge_inputs = torch.cat([edge_feat, edge_emb], dim=-1)
+        edge_emb = self.org_emb(edge_feat_cat)
+        edge_inputs = torch.cat([edge_feat_cont, edge_emb], dim=-1)
 
         return self.mlp(edge_inputs)
 
@@ -162,39 +218,39 @@ class EdgeNet(nn.Module):
 class PhloemNNConv(nn.Module):
     """Neural network model for phloem flow prediction using NNConv layers.
 
-    Combines node features (continuous and organ type) with edge features
-    through multiple NNConv layers to predict sucrose concentration.
+    Combines node features with edge features through multiple NNConv
+    layers to predict sucrose concentration.
     """
 
     def __init__(self, cfg: ModelConfig):
         super().__init__()
-        self.cfg = cfg
-        # Initialize all scalers as None
-        self.feature_scaler = None  # for node features
-        self.target_scaler = None   # for output values
-        self.time_scaler = None     # for time normalization
-        self._validated_input = False  # Track if input has been validated
 
-        # Node input = continuous node features + (scaled) time
+        self.cfg = cfg
+        self.feature_scaler = None      # for node features
+        self.target_scaler = None       # for output values
+        self.time_scaler = None         # for time normalization
+        self._validated_input = False   # Track if input has been validated
+
+        # Node input = continuous node features + time
         in_node_dim = cfg.node_feat_dim + 1
         current_dim = in_node_dim
 
         conv_layers = []
         norm_layers = []
         for _ in range(cfg.num_layers):
-            edge_mlp = EdgeNet(edge_feat_dim=cfg.edge_feat_dim,
-                               num_org_types=cfg.num_org_types,
-                               org_emb_size=cfg.org_emb_size,
-                               in_node_dim=current_dim,
-                               out_node_dim=cfg.hidden_size,
-                               hidden_size=cfg.hidden_size)
+            edge_mlp = EdgeNet(edge_feat_cont_dim = cfg.edge_feat_dim,
+                               num_org_types = cfg.num_org_types,
+                               org_emb_size = cfg.org_emb_size,
+                               in_node_dim = current_dim,
+                               out_node_dim = cfg.hidden_size,
+                               hidden_size = cfg.hidden_size)
 
-            # EdgeNet returns [E, c_in * hidden_size]
-            # NNConv reshapes to [E, c_in, hidden_size]
-            conv = NNConv(in_channels=current_dim,
-                          out_channels=cfg.hidden_size,
-                          nn=edge_mlp,
-                          aggr=cfg.aggr)
+            # EdgeNet returns [E, in_channels * hidden_size]
+            # NNConv reshapes to [E, in_channels, hidden_size]
+            conv = NNConv(in_channels = current_dim,
+                          out_channels = cfg.hidden_size,
+                          nn = edge_mlp,
+                          aggr = cfg.aggr)
             conv_layers.append(conv)
             norm_layers.append(GraphNorm(cfg.hidden_size))  # per-graph stats
             current_dim = cfg.hidden_size
@@ -216,25 +272,42 @@ class PhloemNNConv(nn.Module):
                 nn.init.kaiming_normal_(m.weight)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.BatchNorm1d):
-                nn.init.ones_(m.weight)
-                nn.init.zeros_(m.bias)
 
     def _validate_input(self, data: Data) -> None:
         """Validate input data dimensions and types. Only runs once on first forward pass."""
         if self._validated_input:
             return
 
-        if not hasattr(data, 'node_feat'):
-            raise ValueError("Data must have node_feat attribute")
+        must_have = ["node_feat", "edge_feat", "edge_index", "edge_org",
+                     "time", "node_fields", "sim_params", "step_params"]
+
+        for k in must_have:
+            if not hasattr(data, k):
+                raise ValueError(f"Data must have {k} attribute")
+
+        # Shapes & dtypes
+        if not (isinstance(data.edge_index, torch.Tensor) and data.edge_index.ndim == 2 and data.edge_index.size(0) == 2):
+            raise ValueError(f"edge_index must be [2, E], got {getattr(data.edge_index, 'shape', None)}")
+        if data.edge_index.dtype != torch.long:
+            raise ValueError(f"edge_index must be torch.long, got {data.edge_index.dtype}")
+
         if data.node_feat.size(1) != self.cfg.node_feat_dim:
             raise ValueError(f"Expected node_feat dim {self.cfg.node_feat_dim}, got {data.node_feat.size(1)}")
         if data.edge_feat.size(1) != self.cfg.edge_feat_dim:
             raise ValueError(f"Expected edge_feat dim {self.cfg.edge_feat_dim}, got {data.edge_feat.size(1)}")
-        if not hasattr(data, 'edge_org'):
-            raise ValueError("Data must have edge_org attribute")
+
+        if data.edge_org.numel() == 0:
+            raise ValueError("edge_org is empty")
+        if data.edge_org.dtype != torch.long:
+            raise ValueError(f"edge_org must be torch.long, got {data.edge_org.dtype}")
         if data.edge_org.max() >= self.cfg.num_org_types:
             raise ValueError(f"Edge organ type index {data.edge_org.max()} >= num_org_types {self.cfg.num_org_types}")
+
+        # time must be scalar or 1D
+        if not isinstance(data.time, torch.Tensor):
+            raise ValueError("time must be a Tensor")
+        if data.time.ndim > 1:
+            raise ValueError(f"time must be scalar or 1D, got shape {tuple(data.time.shape)}")
 
         self._validated_input = True
         print("Input validation successful: data format matches model configuration.")
@@ -265,73 +338,84 @@ class PhloemNNConv(nn.Module):
         self._validate_input(data)
         device = next(self.parameters()).device
 
-        node_feat: torch.Tensor = data.node_feat.to(device)
-        edge_index: torch.Tensor = data.edge_index.to(device) # [2, E] graph connectivity (sources, targets indices)
-        edge_feat: torch.Tensor = data.edge_feat.to(device)  # [E, De] continuous edge features
-        edge_org: torch.Tensor = data.edge_org.to(device)  # [E] categorical organ type per edge
-
-        # Graph-level time handling
+        # Assert critical fields
         if not hasattr(data, 'time'):
             raise ValueError("Missing graph-level time. data.time is required.")
-        t = data.time.to(device)
 
-        # Create differentiable per-node time feature
-        if t.dim() == 0:
-            t = t.unsqueeze(0)
+        node_feat: torch.Tensor = data.node_feat.to(device)
+        edge_index: torch.Tensor = data.edge_index.to(device)
+        edge_feat: torch.Tensor = data.edge_feat.to(device)
+        edge_org: torch.Tensor = data.edge_org.to(device)
+        time = data.time.to(device)
 
-        # Standardize time if scaler available
-        if self.time_scaler is not None and getattr(self.time_scaler, "mean", None) is not None:
-            t_scaled = self.time_scaler.transform(t.view(-1, 1)).view(-1)
-            t_std_scalar = self.time_scaler.std.view(-1)[0]  # capture the std used for scaling so we can convert d/dτ -> d/dt later
-        else:
-            t_scaled = t
-            t_std_scalar = torch.tensor(1.0, device=device)
+        if time.dim() == 0:
+            time = time.unsqueeze(0)
 
-        # Create per-node time with requires_grad=True
+        if self.time_scaler is None or getattr(self.time_scaler, "mean", None) is None:
+            raise RuntimeError(
+                "Missing or unfitted time_scaler. "
+                "A fitted Standardizer is required for consistent d/dt computation."
+            )
+
+        # Capture the std used for scaling so we can convert d/dτ -> d/dt later
+        time_scaled = self.time_scaler.transform(time.view(-1, 1)).view(-1)
+        time_std_scalar = self.time_scaler.std.view(-1)[0]
+
+        # Create per-node time
         if hasattr(data, 'batch') and data.batch is not None:
-            t_node = t_scaled[data.batch].clone()
-            t_std_node = t_std_scalar.expand(t_node.size(0))
+            time_node = time_scaled[data.batch].clone()
+            time_std_node = time_std_scalar.expand(time_node.size(0))
         else:
-            t_node = t_scaled.expand(node_feat.size(0)).clone()
-            t_std_node = t_std_scalar.expand(t_node.size(0))
+            time_node = time_scaled.expand(node_feat.size(0)).clone()
+            time_std_node = time_std_scalar.expand(time_node.size(0))
 
         # Ensure time has gradients and reshape
-        t_node = t_node.view(-1, 1)                     # [N, 1]
-        t_node.requires_grad_(True)                     # make time differentiable per node
-        data.time_node = t_node                         # scaled time (τ)
-        data.time_std_node = t_std_node.view(-1, 1)     # σ_t per node (for ∂/∂t conversion)
+        time_node = time_node.view(-1, 1)                  # [N, 1]
+        time_node.requires_grad_(True)                     # make time differentiable per node
+        data.time_node = time_node                         # scaled time (τ)
+        data.time_std_node = time_std_node.view(-1, 1)     # σ_t per node (for ∂/∂t conversion)
 
         # Concatenate as extra channel
-        node_feat = torch.cat([node_feat, t_node], dim=1)  # [N, 3]
+        node_feat = torch.cat([node_feat, time_node], dim=1)
 
         # Pre-allocate tensor for edge features
-        edge_features = torch.empty(edge_feat.size(0), edge_feat.size(1) + 1,
-                                    device=device, dtype=torch.float32)
-        edge_features[:, :-1] = edge_feat
-        edge_features[:, -1] = edge_org.float()
+        edge_features = torch.empty(
+            edge_feat.size(0), edge_feat.size(1) + 1,
+            device=device, dtype=torch.float32
+        )  # [E, D + 1] where D = number of continuous edge features
 
-        # Stack NNConv layers with residual connections
-        # GraphNorm needs a batch vector; synthesize one if missing
+        edge_features[:, :-1] = edge_feat
+        edge_features[:, -1] = edge_org.to(torch.long)
+
         batch_vec = getattr(data, "batch", None)
+
+        # Iterate over all convolutional blocks (NNConv + GraphNorm)
         for conv, bn in zip(self.convs, self.norms):
-            # Process combined edge features through NNConv
+            # Apply edge-conditioned convolution (message passing step)
             h = conv(node_feat, edge_index, edge_features)
+
+            # Apply per-graph normalization
             if batch_vec is None:
-                # single-graph case: put all nodes in graph 0
+                # Single-graph case: create a fake batch (all nodes belong to graph 0)
                 fake_batch = torch.zeros(h.size(0), dtype=torch.long, device=h.device)
                 h = bn(h, fake_batch)
             else:
+                # Batched case: use actual graph assignments
                 h = bn(h, batch_vec)
+
             h = F.relu(h)
             h = self.dropout(h)
 
-            # residual if dimensions match (for layers after first)
+            # Residual connection: if input and output dims match (after first layer),
+            # add skip connection
             if h.shape == node_feat.shape:
                 node_feat = node_feat + h
             else:
                 node_feat = h
 
-        out = self.head(node_feat) # [N, 1]
+        # Final MLP head to produce scalar output per node
+        out = self.head(node_feat)
+
         return out
 
 
@@ -360,88 +444,30 @@ def physics_residual(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
     Raises:
         ValueError: If y_pred is not connected to data.time_node in the computation graph
     """
-    # Constants
-    R = 83.14  # gas constant [cm3 bar K-1 mol-1]
-
     device = y_pred.device
 
     # Get edge topology and features
     edge_index = data.edge_index.to(device)  # [2, E]
 
     src, dst = edge_index[0], edge_index[1]
-    r_st = data.edge_feat.to(device).squeeze(-1)  # [E, 1] resistance terms (K_ax/L)
+    r_ST = data.edge_feat.to(device).squeeze(-1)  # [E, 1] -> [E]
 
-    # Node features (already in original space)
+    # Node features already in original space
     node_feat = data.node_feat.to(device)
     psi = node_feat[:, 0]
     len_leaf = node_feat[:, 2]
 
-    # Get physics constants from data (loaded from H5 file)
-    # Handle both single graphs and batched graphs with potentially different constants
     batch_vec = getattr(data, "batch", None)
 
-    # Get simulation and step parameters
-    # Extract simulation and step parameters: order matches sim_params_names and step_params_names in dataset_loader.py
-    # ["CSTimin", "C_targ", "KMfu", "Mloading", "Q10", "TrefQ10", "beta_loading", "Vmaxloading", "krm2v"]
-    # ["PAR", "RH", "Tair", "co2", "iteration", "plant_age"]
-    sim_params = data.sim_params.to(device)  # [1, K] or [B, K] for batched data
-    step_params = data.step_params.to(device)  # [1, P] or [B, P] for batched data
+    # Extract sim_parms and step_params (see parameters list in dataset_loader.py)
+    params = extract_parameters(data, device, batch_vec, y_pred.size(0))
 
-    if batch_vec is not None:
-        # Batched case: parameters per graph, map to nodes
-        CSTimin_per_node = sim_params[batch_vec, 0]
-        C_targ_per_node = sim_params[batch_vec, 1]
-        KMfu_per_node = sim_params[batch_vec, 2]
-        Mloading_per_node = sim_params[batch_vec, 3]
-        Q10_per_node = sim_params[batch_vec, 4]
-        TrefQ10_per_node = sim_params[batch_vec, 5]
-        beta_loading_per_node = sim_params[batch_vec, 6]
-        Vmaxloading_per_node = sim_params[batch_vec, 7]
-        krm2v_per_node = sim_params[batch_vec, 8]
+    # Extract node fields (see node_fields_names in dataset_loader.py)
+    node_fields = extract_node_fields(data, device)
 
-        PAR_per_node = step_params[batch_vec, 0]
-        RH_per_node = step_params[batch_vec, 1]
-        TairC_per_node = step_params[batch_vec, 2]
-        co2_per_node = step_params[batch_vec, 3]
-    else:
-        # Single graph case: broadcast parameters to all nodes
-        N = y_pred.size(0)
-        CSTimin_per_node = sim_params[0, 0].expand(N)
-        C_targ_per_node = sim_params[0, 1].expand(N)
-        KMfu_per_node = sim_params[0, 2].expand(N)
-        Mloading_per_node = sim_params[0, 3].expand(N)
-        Q10_per_node = sim_params[0, 4].expand(N)
-        TrefQ10_per_node = sim_params[0, 5].expand(N)
-        beta_loading_per_node = sim_params[0, 6].expand(N)
-        Vmaxloading_per_node = sim_params[0, 7].expand(N)
-        krm2v_per_node = sim_params[0, 8].expand(N)
+    RT = R * (params["Tair"] + 273.15)
 
-        PAR_per_node = step_params[0, 0].expand(N)
-        RH_per_node = step_params[0, 1].expand(N)
-        TairC_per_node = step_params[0, 2].expand(N)
-        co2_per_node = step_params[0, 3].expand(N)
-
-    # Get node fields: order matches node_fields_names in dataset_loader.py
-    # ["C_ST_np", "C_meso", "Csoil_node", "Q_Exud", "Q_Exudmax", "Q_Gr", "Q_Grmax",
-    # "Q_Rm", "Q_Rmmax", "Q_meso", "vol_Meso", "vol_ST"]
-    node_fields = data.node_fields.to(device)  # [N, num_fields]
-
-    C_ST_np = node_fields[:, 0]      # Previous sucrose concentration
-    C_meso = node_fields[:, 1]       # Mesophyll sucrose concentration
-    Csoil_node = node_fields[:, 2]   # Soil concentration per node
-    Q_Exud = node_fields[:, 3]       # Current exudation
-    Q_Exudmax = node_fields[:, 4]    # Maximum exudation rate
-    Q_Gr = node_fields[:, 5]         # Current growth rate
-    Q_Grmax = node_fields[:, 6]      # Maximum growth rate
-    Q_Rm = node_fields[:, 7]         # Current respiration rate
-    Q_Rmmax = node_fields[:, 8]      # Maximum respiration rate
-    Q_meso = node_fields[:, 9]       # Mesophyll sucrose amount
-    vol_Meso = node_fields[:, 10]    # Mesophyll volume
-    vol_ST = node_fields[:, 11]      # Sieve tube volume
-
-    RT = R * (TairC_per_node + 273.15)  # [cm3 bar mol-1]
-
-    # Sucrose at endpoints (original units)
+    # Sucrose at endpoints
     s_i = y_pred[src, 0]
     s_j = y_pred[dst, 0]
 
@@ -466,7 +492,7 @@ def physics_residual(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
     # Jax < 0: Flow opposite to edge direction (dst → src)
     # If psi_i > psi_j (and/or s_i > s_j), driving > 0, giving J_ax > 0 (src -> dst).
     RT_i = RT[src]
-    J_ax = s_ij * r_st * (RT_i * (s_i - s_j) + (psi_i - psi_j))
+    J_ax = (1 / r_ST) * s_ij * (RT_i * (s_i - s_j) + (psi_i - psi_j))
 
     # Divergence of flux -> net inflow per node
     # This computes the sum of incoming/outgoing fluxes for each node
@@ -478,20 +504,20 @@ def physics_residual(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
     dS_dt_from_flux.scatter_add_(0, src, -J_ax)  # Subtract outgoing fluxes
 
     # We need ds/dt from the model with respect to a differentiable time feature
-    # Here data.time_node is assumed to be [N,1] and part of the computation graph
-    # This is ESSENTIAL for physics-informed learning - without it, the physics constraint is meaningless.
-    if not hasattr(data, 'time_node'):
+    # This is ESSENTIAL for physics-informed learning: without it, the physics constraint is meaningless
+    if not hasattr(data, 'time_node') or data.time_node is None:
         raise ValueError("data.time_node not found. data.time_node is required for physics residual computation.")
-
-    if data.time_node is None or not data.time_node.requires_grad:
+    if not data.time_node.requires_grad:
         raise ValueError("data.time_node must have requires_grad=True for physics residual computation.")
+    if not hasattr(data, "time_std_node") or data.time_std_node is None:
+        raise ValueError("data.time_std_node missing; ensure model.forward() sets it.")
 
     # Compute gradient of predictions w.r.t. **scaled** time_node τ [N,1]
     # We'll convert to real time derivative via  ∂/∂t = (1/σ_t) ∂/∂τ
     try:
         ds_dt = torch.autograd.grad(
             y_pred.sum(),        # sum to get scalar for gradient computation. trick to avoid building the full Jacobian
-            data.time_node,      # [N,1] per-node time features
+            data.time_node,      # [N, 1] per-node time features
             create_graph=True,   # needed for second backward pass
             retain_graph=True,   # keep graph for subsequent loss computation
             allow_unused=False   # ERROR if time_node is not connected - this is required for physics
@@ -506,37 +532,35 @@ def physics_residual(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
                 "or that the model architecture properly utilizes the time feature."
             ) from e
         else:
-            raise  # re-raise other runtime errors
+            raise
 
     # Convert ∂/∂τ to ∂/∂t using stored σ_t (τ = (t - μ_t)/σ_t)
-    if not hasattr(data, "time_std_node") or data.time_std_node is None:
-        raise ValueError("data.time_std_node missing; ensure model.forward() sets it.")
-    ds_dt = ds_dt / data.time_std_node.squeeze()  # now ds_dt is in real time units
+    ds_dt /= data.time_std_node.squeeze()  # now ds_dt is in real time units
 
     # CSTi is the sucrose concentration in sieve tube
-    CSTi = y_pred.squeeze(-1) / vol_ST
+    CSTi = y_pred.squeeze(-1) / node_fields["vol_ST"]
     CSTi_positive = torch.clamp(CSTi, min=0.0)  # ensure non-negative concentrations
 
     # F_in: phloem loading term per node
     # IMPORTANT: Uses original CSTi_positive (before CSTimin threshold) as per original code
-    F_in = (Vmaxloading_per_node * len_leaf) * C_meso / (Mloading_per_node + C_meso) * torch.exp(-CSTi_positive * beta_loading_per_node)
+    F_in = (params["Vmaxloading"] * len_leaf) * node_fields["C_meso"] / (params["Mloading"] + node_fields["C_meso"]) * torch.exp(-CSTi_positive * params["beta_loading"])
 
     # F_out: sucrose outflow from sieve tubes (uses CSTi_thresholded for usage)
     # F_out = F_out_MM + Exud
     # where F_out_MM = (R_mmax + Q_Grmax) * (CSTi / (CSTi + KMfu))
     # Apply CSTimin threshold: if CSTi < CSTimin, no sucrose usage
-    CSTi_effective = torch.clamp(CSTi_positive - CSTimin_per_node, min=0.0)
-    CSTi_delta = torch.clamp(CSTi_effective - Csoil_node, min=0.0)
+    CSTi_effective = torch.clamp(CSTi_positive - params["CSTimin"], min=0.0)
+    CSTi_delta = torch.clamp(CSTi_effective - node_fields["Csoil_node"], min=0.0)
 
     # R_mmax = Q_Rmmax_ (PiafMunch2.cpp)
-    R_mmax = (Q_Rmmax + krm2v_per_node * CSTi_effective) * torch.pow(Q10_per_node, (TairC_per_node - TrefQ10_per_node) / 10.0)
+    R_mmax = (node_fields["Q_Rmmax"] + params["krm2v"] * CSTi_effective) * torch.pow(params["Q10"], (params["Tair"] - params["TrefQ10"]) / 10.0)
 
     # Sucrose usage rate for growth + maintenance
     # F_out_MM = Fu_lim (PiafMunch2.cpp)
-    F_out_MM = (R_mmax + Q_Grmax) * (CSTi_effective / (CSTi_effective + KMfu_per_node))
+    F_out_MM = (R_mmax + node_fields["Q_Grmax"]) * (CSTi_effective / (CSTi_effective + params["KMfu"]))
 
     # Root exudation rate (passive transport based on concentration gradient)
-    Exud = CSTi_delta * Q_Exudmax
+    Exud = CSTi_delta * node_fields["Q_Exudmax"]
 
     # Total outflow
     F_out = F_out_MM + Exud
@@ -549,9 +573,7 @@ def physics_residual(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
 
     # Average per graph first (so each graph contributes equally),
     # then average across graphs. Fall back to simple mean if no batch.
-    batch_vec = getattr(data, "batch", None)
     if batch_vec is not None:
-        # [G] mean per graph
         residual_per_graph = scatter_mean(residual_node, batch_vec, dim=0)
         loss = residual_per_graph.mean()
     else:

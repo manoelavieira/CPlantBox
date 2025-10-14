@@ -20,12 +20,9 @@ from pathlib import Path
 from datetime import datetime
 
 from dataset_loader import load_phloem_data
-from dataset_dummy import DummyTemporalDataset
 from gnn import PhloemNNConv, ModelConfig, Standardizer, physics_residual
+from config import TrainingConfig, TrainingState, TrainingMetrics, ModelSetup
 
-
-def collate_graphs(batch):
-    return Batch.from_data_list(batch)
 
 def create_tensorboard_writer(args: argparse.Namespace) -> SummaryWriter:
     """Create TensorBoard writer with organized logging directory."""
@@ -40,6 +37,7 @@ def create_tensorboard_writer(args: argparse.Namespace) -> SummaryWriter:
     print(f"To view logs, run: tensorboard --logdir={log_dir.parent}")
 
     return writer
+
 
 def log_hyperparameters(writer: SummaryWriter, args: argparse.Namespace, model_cfg: ModelConfig):
     """Log hyperparameters to TensorBoard."""
@@ -68,6 +66,107 @@ def log_hyperparameters(writer: SummaryWriter, args: argparse.Namespace, model_c
     metrics = {}
 
     writer.add_hparams(hparams, metrics)
+
+
+def validate_split_ratios(train_ratio: float, val_ratio: float) -> None:
+    """Validate that dataset split ratios are valid.
+
+    Args:
+        train_ratio: Ratio of data to use for training
+        val_ratio: Ratio of data to use for validation
+
+    Raises:
+        ValueError: If ratios are invalid
+    """
+    if not (0 < train_ratio < 1):
+        raise ValueError(f"train_ratio must be between 0 and 1, got {train_ratio}")
+    if not (0 < val_ratio < 1):
+        raise ValueError(f"val_ratio must be between 0 and 1, got {val_ratio}")
+    if train_ratio + val_ratio >= 1:
+        raise ValueError(
+            f"Sum of train_ratio ({train_ratio}) and val_ratio ({val_ratio}) "
+            f"must be less than 1 to leave data for testing"
+        )
+
+
+def get_dataloaders(args: argparse.Namespace) -> Tuple[DataLoader, DataLoader, DataLoader]:
+    """Get train, validation, and test dataloaders.
+
+    Args:
+        args: Command line arguments containing dataset parameters
+
+    Returns:
+        Tuple of (train_loader, val_loader, test_loader)
+
+    Raises:
+        ValueError: If dataset parameters are invalid
+    """
+    # Validate split ratios
+    validate_split_ratios(args.train_ratio, args.val_ratio)
+
+    # Load simulation data
+    train_loader, val_loader, test_loader = load_phloem_data(
+        h5_path=args.data_path,
+        batch_size=args.batch_size,
+        train_ratio=args.train_ratio,
+        val_ratio=args.val_ratio,
+        random_seed=args.seed
+    )
+
+    return train_loader, val_loader, test_loader
+
+
+def print_model_summary(model: nn.Module, writer: Optional[SummaryWriter] = None):
+    """Print model architecture summary and log to TensorBoard."""
+    print("\nModel Architecture:")
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total parameters: {total_params:,}")
+    print(f"Trainable parameters: {trainable_params:,}")
+    print(f"Non-trainable parameters: {total_params - trainable_params:,}")
+    print("\nLayer Overview:")
+    for name, module in model.named_children():
+        print(f"{name}: {module.__class__.__name__}")
+
+    # Log model parameters to TensorBoard
+    if writer is not None:
+        writer.add_text('Model/Architecture',
+                       f"Total: {total_params:,}, Trainable: {trainable_params:,}")
+        writer.add_scalar('Model/Total_Parameters', total_params, 0)
+        writer.add_scalar('Model/Trainable_Parameters', trainable_params, 0)
+
+def log_experiment_config(args: argparse.Namespace):
+    """Log experiment configuration."""
+    print("\nExperiment Configuration:")
+    for arg, value in vars(args).items():
+        print(f"{arg}: {value}")
+
+
+def setup_environment(config: TrainingConfig) -> torch.device:
+    """Setup training environment including seeding and device configuration.
+
+    Args:
+        config: Training configuration
+
+    Returns:
+        torch.device: Configured device for training
+    """
+    # Set random seeds for full reproducibility
+    random.seed(config.seed)  # Python's random
+    np.random.seed(config.seed)  # NumPy
+    torch.manual_seed(config.seed)  # PyTorch on CPU
+    torch.cuda.manual_seed(config.seed)  # PyTorch on Current GPU
+    torch.cuda.manual_seed_all(config.seed)  # PyTorch on All GPUs
+
+    # Setup device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+
+    # Create model save directory
+    Path(config.model_save_dir).mkdir(parents=True, exist_ok=True)
+
+    return device
+
 
 def train_one_epoch(
         model: nn.Module,
@@ -184,6 +283,7 @@ def train_one_epoch(
 
     return avg_loss, avg_mae, avg_mse, avg_physics
 
+
 def evaluate(
         model: nn.Module,
         loader: DataLoader,
@@ -280,76 +380,6 @@ def evaluate(
 
     return avg_loss, avg_mse, avg_mae, avg_physics
 
-def validate_split_ratios(train_ratio: float, val_ratio: float) -> None:
-    """Validate that dataset split ratios are valid.
-
-    Args:
-        train_ratio: Ratio of data to use for training
-        val_ratio: Ratio of data to use for validation
-
-    Raises:
-        ValueError: If ratios are invalid
-    """
-    if not (0 < train_ratio < 1):
-        raise ValueError(f"train_ratio must be between 0 and 1, got {train_ratio}")
-    if not (0 < val_ratio < 1):
-        raise ValueError(f"val_ratio must be between 0 and 1, got {val_ratio}")
-    if train_ratio + val_ratio >= 1:
-        raise ValueError(
-            f"Sum of train_ratio ({train_ratio}) and val_ratio ({val_ratio}) "
-            f"must be less than 1 to leave data for testing"
-        )
-
-def get_dataloaders(args: argparse.Namespace) -> Tuple[DataLoader, DataLoader, DataLoader]:
-    """Get train, validation, and test dataloaders.
-
-    Args:
-        args: Command line arguments containing dataset parameters
-
-    Returns:
-        Tuple of (train_loader, val_loader, test_loader)
-
-    Raises:
-        ValueError: If dataset parameters are invalid
-    """
-    # Validate split ratios
-    validate_split_ratios(args.train_ratio, args.val_ratio)
-
-    # Load simulation data
-    train_loader, val_loader, test_loader = load_phloem_data(
-        h5_path=args.data_path,
-        batch_size=args.batch_size,
-        train_ratio=args.train_ratio,
-        val_ratio=args.val_ratio,
-        random_seed=args.seed
-    )
-
-    return train_loader, val_loader, test_loader
-
-def print_model_summary(model: nn.Module, writer: Optional[SummaryWriter] = None):
-    """Print model architecture summary and log to TensorBoard."""
-    print("\nModel Architecture:")
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Total parameters: {total_params:,}")
-    print(f"Trainable parameters: {trainable_params:,}")
-    print(f"Non-trainable parameters: {total_params - trainable_params:,}")
-    print("\nLayer Overview:")
-    for name, module in model.named_children():
-        print(f"{name}: {module.__class__.__name__}")
-
-    # Log model parameters to TensorBoard
-    if writer is not None:
-        writer.add_text('Model/Architecture',
-                       f"Total: {total_params:,}, Trainable: {trainable_params:,}")
-        writer.add_scalar('Model/Total_Parameters', total_params, 0)
-        writer.add_scalar('Model/Trainable_Parameters', trainable_params, 0)
-
-def log_experiment_config(args: argparse.Namespace):
-    """Log experiment configuration."""
-    print("\nExperiment Configuration:")
-    for arg, value in vars(args).items():
-        print(f"{arg}: {value}")
 
 def main():
     # Parse arguments
@@ -377,22 +407,27 @@ def main():
                         help='Weight for physics loss term (L = MSE + lambda_phys * Physics)')
     args = parser.parse_args()
 
-    # Validate arguments
-    if args.data_path is None:
-        parser.error("--data-path is required to load simulated data")
+    # Create training configuration
+    config = TrainingConfig(
+        data_path=args.data_path,
+        batch_size=args.batch_size,
+        train_ratio=args.train_ratio,
+        val_ratio=args.val_ratio,
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        patience=args.patience,
+        epochs=args.epochs,
+        seed=args.seed,
+        lambda_phys=args.lambda_phys
+    )
 
-    # Set random seeds for full reproducibility
-    random.seed(args.seed) # Python's random
-    np.random.seed(args.seed) # NumPy
-    torch.manual_seed(args.seed) # PyTorch on CPU
-    torch.cuda.manual_seed(args.seed) # PyTorch on Current GPU
-    torch.cuda.manual_seed_all(args.seed) # PyTorch on All GPUs
+    # Validate configuration
+    config.validate()
+
+    # Setup environment
+    device = setup_environment(config)
 
     print(f"Using torch {torch.__version__}, torch_geometric {torch_geometric.__version__}")
-
-    # Setup device and model
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
 
     # Log experiment configuration
     log_experiment_config(args)
@@ -403,7 +438,7 @@ def main():
     model_cfg = ModelConfig()
     model = PhloemNNConv(model_cfg).to(device)
     # Expose physics weight on the model for easy access in training/eval
-    model.lambda_phys = args.lambda_phys
+    model.lambda_phys = config.lambda_phys
 
     # Log hyperparameters to TensorBoard
     log_hyperparameters(writer, args, model_cfg)
@@ -453,12 +488,12 @@ def main():
     # Training setup
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=args.lr,
-        weight_decay=args.weight_decay
+        lr=config.lr,
+        weight_decay=config.weight_decay
     )
 
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=5
+        optimizer, mode='min', factor=config.scheduler_factor, patience=config.scheduler_patience
     )
 
     # Training loop with early stopping
@@ -467,7 +502,7 @@ def main():
     best_epoch = 0
 
     print("\nStarting training...")
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(1, config.epochs + 1):
         # Training
         tr_loss, tr_mae, tr_mse, tr_physics = train_one_epoch(
             model, train_loader, optimizer, writer, epoch)
@@ -554,10 +589,10 @@ def main():
                 'feature_scaler': feature_scaler_state,
                 'target_scaler': target_scaler_state,
                 'time_scaler': time_scaler_state,
-            }, 'model/best_model.pt')
+            }, config.model_save_path)
         else:
             patience_counter += 1
-            if patience_counter >= args.patience:
+            if patience_counter >= config.patience:
                 print(f"\nEarly stopping at epoch {epoch}. "
                       f"Best validation loss: {best_val:.4f} "
                       f"at epoch {best_epoch}")
@@ -575,7 +610,7 @@ def main():
 
     # Load the best model for testing
     try:
-        best_checkpoint = torch.load('model/best_model.pt', map_location=device)
+        best_checkpoint = torch.load(config.model_save_path, map_location=device)
 
         # Load model state
         model.load_state_dict(best_checkpoint['state_dict'])

@@ -415,6 +415,95 @@ def log_epoch_metrics(
     }, epoch)
 
 
+def run_training_loop(
+    model_setup: ModelSetup,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler._LRScheduler,
+    writer: SummaryWriter,
+    config: TrainingConfig,
+    model_cfg: ModelConfig
+) -> TrainingState:
+    """Run the main training loop with early stopping.
+
+    Args:
+        model_setup: Model setup containing model and scalers
+        train_loader: Training data loader
+        val_loader: Validation data loader
+        optimizer: Optimizer for training
+        scheduler: Learning rate scheduler
+        writer: TensorBoard writer for logging
+        config: Training configuration
+        model_cfg: Model configuration for checkpointing
+
+    Returns:
+        TrainingState: Final training state with best metrics
+    """
+    # Initialize training state
+    training_state = TrainingState()
+
+    print("\nStarting training...")
+    for epoch in range(1, config.epochs + 1):
+        training_state.current_epoch = epoch
+
+        # Training
+        tr_loss, tr_mae, tr_mse, tr_physics = train_one_epoch(
+            model_setup.model, train_loader, optimizer, writer, epoch)
+
+        # Validation
+        val_loss, val_mse, val_mae, val_physics = evaluate(
+            model_setup.model, val_loader, writer, epoch, phase='val')
+
+        # Learning rate scheduling (use combined validation loss)
+        scheduler.step(val_loss)
+        current_lr = optimizer.param_groups[0]['lr']
+
+        # Create metrics objects
+        train_metrics = TrainingMetrics(tr_loss, tr_mse, tr_mae, tr_physics)
+        val_metrics = TrainingMetrics(val_loss, val_mse, val_mae, val_physics)
+
+        # Log metrics to TensorBoard
+        log_epoch_metrics(writer, epoch, train_metrics, val_metrics, current_lr)
+
+        # Console logging
+        print(f"Epoch {epoch:03d} | "
+              f"train_loss={tr_loss:.4f} train_MSE={tr_mse:.4f} train_physics={tr_physics:.4f} | "
+              f"val_loss={val_loss:.4f} val_MSE={val_mse:.4f} val_physics={val_physics:.4f} | "
+              f"lr={current_lr:.2e}")
+
+        # Model saving and early stopping (use combined validation loss)
+        if training_state.update_best(val_loss, epoch):
+            # Log best model achievement
+            writer.add_scalar('Best_Model/Epoch', epoch, epoch)
+            writer.add_scalar('Best_Model/Val_Loss', val_loss, epoch)
+            writer.add_scalar('Best_Model/Val_MSE', val_mse, epoch)
+
+            # Save model checkpoint
+            save_checkpoint(
+                model_setup, model_cfg, optimizer, scheduler,
+                epoch, val_loss, val_mse, config.model_save_path
+            )
+        else:
+            if training_state.should_stop(config.patience):
+                print(f"\nEarly stopping at epoch {epoch}. "
+                      f"Best validation loss: {training_state.best_val_loss:.4f} "
+                      f"at epoch {training_state.best_epoch}")
+
+                # Log early stopping
+                writer.add_text('Training/Early_Stopping',
+                                f"Stopped at epoch {epoch}, best at {training_state.best_epoch}")
+                break
+
+    print("\nTraining completed!")
+
+    # Log final training summary
+    writer.add_text('Training/Summary',
+                    f"Training completed. Best validation loss: {training_state.best_val_loss:.4f} at epoch {training_state.best_epoch}")
+
+    return training_state
+
+
 def train_one_epoch(
         model: nn.Module,
         loader: DataLoader,
@@ -704,84 +793,28 @@ def main():
     # Setup training components
     optimizer, scheduler = setup_training_components(model, config)
 
-    # Training loop with early stopping
-    best_val = float('inf')
-    patience_counter = 0
-    best_epoch = 0
-
-    print("\nStarting training...")
-    for epoch in range(1, config.epochs + 1):
-        # Training
-        tr_loss, tr_mae, tr_mse, tr_physics = train_one_epoch(
-            model, train_loader, optimizer, writer, epoch)
-
-        # Validation
-        val_loss, val_mse, val_mae, val_physics = evaluate(
-            model, val_loader, writer, epoch, phase='val')
-
-        # Learning rate scheduling (use combined validation loss)
-        scheduler.step(val_loss)
-        current_lr = optimizer.param_groups[0]['lr']
-
-        # Create metrics objects
-        train_metrics = TrainingMetrics(tr_loss, tr_mse, tr_mae, tr_physics)
-        val_metrics = TrainingMetrics(val_loss, val_mse, val_mae, val_physics)
-
-        # Log metrics to TensorBoard
-        log_epoch_metrics(writer, epoch, train_metrics, val_metrics, current_lr)
-
-        # Console logging
-        print(f"Epoch {epoch:03d} | "
-              f"train_loss={tr_loss:.4f} train_MSE={tr_mse:.4f} train_physics={tr_physics:.4f} | "
-              f"val_loss={val_loss:.4f} val_MSE={val_mse:.4f} val_physics={val_physics:.4f} | "
-              f"lr={current_lr:.2e}")
-
-        # Model saving and early stopping (use combined validation loss)
-        if val_loss < best_val:
-            best_val = val_loss
-            best_epoch = epoch
-            patience_counter = 0
-
-            # Log best model achievement
-            writer.add_scalar('Best_Model/Epoch', epoch, epoch)
-            writer.add_scalar('Best_Model/Val_Loss', val_loss, epoch)
-            writer.add_scalar('Best_Model/Val_MSE', val_mse, epoch)
-
-            # Save model checkpoint
-            save_checkpoint(
-                model_setup, model_cfg, optimizer, scheduler,
-                epoch, val_loss, val_mse, config.model_save_path
-            )
-        else:
-            patience_counter += 1
-            if patience_counter >= config.patience:
-                print(f"\nEarly stopping at epoch {epoch}. "
-                      f"Best validation loss: {best_val:.4f} "
-                      f"at epoch {best_epoch}")
-
-                # Log early stopping
-                writer.add_text('Training/Early_Stopping',
-                                f"Stopped at epoch {epoch}, best at {best_epoch}")
-                break
-
-    print("\nTraining completed!")
-
-    # Log final training summary
-    writer.add_text('Training/Summary',
-                    f"Training completed. Best validation loss: {best_val:.4f} at epoch {best_epoch}")
+    # Run training loop
+    training_state = run_training_loop(
+        model_setup, train_loader, val_loader, optimizer, scheduler,
+        writer, config, model_cfg
+    )
 
     # Load the best model for testing
     load_best_model(model_setup, config.model_save_path, device)
 
     # Final evaluation on test set
-    test_loss, test_mse, test_mae, test_physics = evaluate(model, test_loader, writer,
-                                                           best_epoch, phase='test')
+    test_loss, test_mse, test_mae, test_physics = evaluate(model,
+                                                           test_loader,
+                                                           writer,
+                                                           training_state.best_epoch,
+                                                           phase='test')
 
     # Log final test metrics
-    writer.add_scalar('Final/Test_Loss', test_loss, best_epoch)
-    writer.add_scalar('Final/Test_MSE', test_mse, best_epoch)
-    writer.add_scalar('Final/Test_MAE', test_mae, best_epoch)
-    writer.add_scalar('Final/Test_Physics', test_physics, best_epoch)
+    writer.add_scalar('Final/Test_Loss', test_loss, training_state.best_epoch)
+    writer.add_scalar('Final/Test_MSE', test_mse, training_state.best_epoch)
+    writer.add_scalar('Final/Test_MAE', test_mae, training_state.best_epoch)
+    writer.add_scalar('Final/Test_Physics', test_physics, training_state.best_epoch)
+
 
     # Create final summary
     final_summary = (f"Final Results:\n"
@@ -789,7 +822,7 @@ def main():
                     f"Test MSE: {test_mse:.4f}\n"
                     f"Test MAE: {test_mae:.4f}\n"
                     f"Test Physics: {test_physics:.4f}\n"
-                    f"Best epoch: {best_epoch}")
+                    f"Best epoch: {training_state.best_epoch}")
 
     writer.add_text('Final/Results', final_summary)
 

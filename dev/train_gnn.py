@@ -19,7 +19,7 @@ from typing import Tuple, Optional
 from pathlib import Path
 from datetime import datetime
 
-from dataset_loader import load_phloem_data
+from utils.dataset_loader import load_phloem_data
 from models.gnn import PhloemNNConv, ModelConfig, Standardizer, physics_residual
 from config import TrainingConfig, TrainingState, TrainingMetrics, ModelSetup
 

@@ -6,7 +6,6 @@ data for training the PhloemNNConv GNN model. Supports loading from both
 single HDF5 files and batch loading from directories containing multiple
 HDF5 files.
 """
-
 import h5py
 import numpy as np
 import torch
@@ -16,6 +15,7 @@ from torch.utils.data import DataLoader
 import warnings
 import os
 from pathlib import Path
+
 
 def collate_graphs(batch):
     """Custom collate function that handles parameter names properly."""
@@ -133,7 +133,7 @@ def load_graph_data(h5_file: h5py.File, timestep: int) -> Data:
     node_pos_np = h5_file[f"{step_key}/nodes/positions"][:]  # [N, 3]
     node_pos = torch.from_numpy(node_pos_np.astype(np.float32, copy=False))
 
-    print(f"\nStep {timestep}: Number of nodes = {num_nodes}")
+    # print(f"\nStep {timestep}: Number of nodes = {num_nodes}")
     # print(f"node_feat_shape: {node_feat.shape}, node_feat_dtype: {node_feat.dtype}")
 
     # Get graph structure from both methods for comparison

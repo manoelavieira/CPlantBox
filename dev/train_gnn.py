@@ -135,8 +135,9 @@ def print_model_summary(model: nn.Module, writer: Optional[SummaryWriter] = None
         writer.add_scalar('Model/Total_Parameters', total_params, 0)
         writer.add_scalar('Model/Trainable_Parameters', trainable_params, 0)
 
-def log_experiment_config(args: argparse.Namespace):
-    """Log experiment configuration."""
+
+def print_experiment_config(args: argparse.Namespace):
+    """Print experiment configuration."""
     print("\nExperiment Configuration:")
     for arg, value in vars(args).items():
         print(f"{arg}: {value}")
@@ -834,8 +835,8 @@ def main():
         lambda_phys=config.lambda_phys
     )
 
-    # Log experiment configuration
-    log_experiment_config(args)
+    # Print experiment configuration
+    # print_experiment_config(args)
 
     # Create TensorBoard writer
     writer = create_tensorboard_writer(args)
@@ -856,7 +857,7 @@ def main():
     log_hyperparameters(writer, args, model_cfg)
 
     # Print detailed model summary
-    print_model_summary(model_setup.model, writer)
+    # print_model_summary(model_setup.model, writer)
 
     # Setup training components
     optimizer, scheduler = setup_training_components(model_setup.model, config)

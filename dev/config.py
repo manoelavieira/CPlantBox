@@ -34,7 +34,7 @@ class TrainingConfig:
     clip_grad_norm: float = 1.0
 
     # Paths
-    model_save_dir: str = "model"
+    model_save_dir: str = "models"
     model_filename: str = "best_model.pt"
 
     @property

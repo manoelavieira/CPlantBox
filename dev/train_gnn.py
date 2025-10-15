@@ -20,7 +20,7 @@ from pathlib import Path
 from datetime import datetime
 
 from dataset_loader import load_phloem_data
-from gnn import PhloemNNConv, ModelConfig, Standardizer, physics_residual
+from models.gnn import PhloemNNConv, ModelConfig, Standardizer, physics_residual
 from config import TrainingConfig, TrainingState, TrainingMetrics, ModelSetup
 
 

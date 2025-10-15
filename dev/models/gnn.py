@@ -29,7 +29,6 @@ from torch_scatter import scatter_mean
 from torch_geometric.data import Data
 from torch_geometric.nn import NNConv
 from torch_geometric.nn.norm import GraphNorm  # per-graph normalization
-from debug_utils import create_delta2  # only import for debugging
 
 # Global constants
 R = 83.14  # universal gas constant

@@ -24,7 +24,7 @@ from gnn import PhloemNNConv, ModelConfig, Standardizer, physics_residual
 from config import TrainingConfig, TrainingState, TrainingMetrics, ModelSetup
 
 
-def create_tensorboard_writer(args: argparse.Namespace) -> SummaryWriter:
+def create_tensorboard_writer(config: TrainingConfig) -> SummaryWriter:
     """Create TensorBoard writer with organized logging directory."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     exp_name = timestamp
@@ -39,18 +39,18 @@ def create_tensorboard_writer(args: argparse.Namespace) -> SummaryWriter:
     return writer
 
 
-def log_hyperparameters(writer: SummaryWriter, args: argparse.Namespace, model_cfg: ModelConfig):
+def log_hyperparameters(writer: SummaryWriter, config: TrainingConfig, model_cfg: ModelConfig):
     """Log hyperparameters to TensorBoard."""
     hparams = {
         # Training hyperparameters
-        'learning_rate': args.lr,
-        'batch_size': args.batch_size,
-        'weight_decay': args.weight_decay,
-        'epochs': args.epochs,
-        'patience': args.patience,
-        'seed': args.seed,
-        'train_ratio': args.train_ratio,
-        'val_ratio': args.val_ratio,
+        'learning_rate': config.lr,
+        'batch_size': config.batch_size,
+        'weight_decay': config.weight_decay,
+        'epochs': config.epochs,
+        'patience': config.patience,
+        'seed': config.seed,
+        'train_ratio': config.train_ratio,
+        'val_ratio': config.val_ratio,
 
         # Model architecture
         'hidden_size': model_cfg.hidden_size,
@@ -60,8 +60,8 @@ def log_hyperparameters(writer: SummaryWriter, args: argparse.Namespace, model_c
         'dropout': model_cfg.dropout,
     }
 
-    if hasattr(args, 'data_path') and args.data_path:
-        hparams['data_path'] = args.data_path
+    if config.data_path:
+        hparams['data_path'] = config.data_path
 
     metrics = {}
 
@@ -89,11 +89,11 @@ def validate_split_ratios(train_ratio: float, val_ratio: float) -> None:
         )
 
 
-def get_dataloaders(args: argparse.Namespace) -> Tuple[DataLoader, DataLoader, DataLoader]:
+def get_dataloaders(config: TrainingConfig) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """Get train, validation, and test dataloaders.
 
     Args:
-        args: Command line arguments containing dataset parameters
+        config: Training configuration containing dataset parameters
 
     Returns:
         Tuple of (train_loader, val_loader, test_loader)
@@ -102,15 +102,15 @@ def get_dataloaders(args: argparse.Namespace) -> Tuple[DataLoader, DataLoader, D
         ValueError: If dataset parameters are invalid
     """
     # Validate split ratios
-    validate_split_ratios(args.train_ratio, args.val_ratio)
+    validate_split_ratios(config.train_ratio, config.val_ratio)
 
     # Load simulation data
     train_loader, val_loader, test_loader = load_phloem_data(
-        h5_path=args.data_path,
-        batch_size=args.batch_size,
-        train_ratio=args.train_ratio,
-        val_ratio=args.val_ratio,
-        random_seed=args.seed
+        h5_path=config.data_path,
+        batch_size=config.batch_size,
+        train_ratio=config.train_ratio,
+        val_ratio=config.val_ratio,
+        random_seed=config.seed
     )
 
     return train_loader, val_loader, test_loader
@@ -136,11 +136,11 @@ def print_model_summary(model: nn.Module, writer: Optional[SummaryWriter] = None
         writer.add_scalar('Model/Trainable_Parameters', trainable_params, 0)
 
 
-def print_experiment_config(args: argparse.Namespace):
+def print_experiment_config(config: TrainingConfig):
     """Print experiment configuration."""
     print("\nExperiment Configuration:")
-    for arg, value in vars(args).items():
-        print(f"{arg}: {value}")
+    for field_name, field_value in config.__dict__.items():
+        print(f"{field_name}: {field_value}")
 
 
 def setup_environment(config: TrainingConfig) -> torch.device:
@@ -821,28 +821,14 @@ def main():
     device = setup_environment(config)
     print(f"Using torch {torch.__version__}, torch_geometric {torch_geometric.__version__}")
 
-    # For compatibility with existing logging functions
-    args = argparse.Namespace(
-        data_path=config.data_path,
-        batch_size=config.batch_size,
-        train_ratio=config.train_ratio,
-        val_ratio=config.val_ratio,
-        lr=config.lr,
-        weight_decay=config.weight_decay,
-        patience=config.patience,
-        epochs=config.epochs,
-        seed=config.seed,
-        lambda_phys=config.lambda_phys
-    )
-
     # Print experiment configuration
-    # print_experiment_config(args)
+    # print_experiment_config(config)
 
     # Create TensorBoard writer
-    writer = create_tensorboard_writer(args)
+    writer = create_tensorboard_writer(config)
 
     # Get data loaders
-    train_loader, val_loader, test_loader = get_dataloaders(args)
+    train_loader, val_loader, test_loader = get_dataloaders(config)
     print(f"Train batches: {len(train_loader)}, "
           f"Validation batches: {len(val_loader)}, "
           f"Test batches: {len(test_loader)}")
@@ -854,7 +840,7 @@ def main():
     model_cfg = ModelConfig()
 
     # Log hyperparameters to TensorBoard
-    log_hyperparameters(writer, args, model_cfg)
+    log_hyperparameters(writer, config, model_cfg)
 
     # Print detailed model summary
     # print_model_summary(model_setup.model, writer)

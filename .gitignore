@@ -1,7 +1,7 @@
 # ignore data, plots and models generated during development
-/dev/data/
+/dev/simulation/data/
+/dev/simulation/plot/
 /dev/model/
-/dev/plot/
 /dev/tensorboard_logs/
 
 # build system clutter

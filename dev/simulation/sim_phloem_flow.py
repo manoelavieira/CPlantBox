@@ -1,9 +1,9 @@
 import os
 import sys
 
-sys.path.append("../")
-sys.path.append("../src/")
-sys.path.append("../modelparameter/")
+sys.path.append("../../")
+sys.path.append("../../src/")
+sys.path.append("../../modelparameter/")
 
 import plantbox as pb
 import numpy as np
@@ -28,19 +28,19 @@ def getWeatherData(sim_time):
 """ Parameters and variables """
 plant_age = 7.3 # [day] init simtime
 sim_time = 0.5 # [day]
-dt = 4./24.
+dt = 1./24.
 N = int(sim_time/dt)
 depth = 60
 p_mean = -600 # mean soil water potential [cm]
 
 """ Weather data """
-path = "../modelparameter/functional/climate/"
+path = "../../modelparameter/functional/climate/"
 weatherData = pd.read_csv(path + 'Selhausen_weather_data.txt', delimiter="\t")
 
 """ Plant """
 plant = pb.MappedPlant(seednum=2)
 # plant.disableExtraNode()
-path = "../modelparameter/structural/plant/"
+path = "../../modelparameter/structural/plant/"
 name = "Triticum_aestivum_test_2021" # "Triticum_aestivum_adapted_2023"
 plant.readParameters(path + name + ".xml")
 
@@ -60,25 +60,22 @@ plant.setSoilGrid(picker)
 
 """ Plant functional properties """
 params = PlantHydraulicParameters()
-params.read_parameters("../modelparameter/functional/plant_hydraulics/wheat_Giraud2023adapted")
+params.read_parameters("../../modelparameter/functional/plant_hydraulics/wheat_Giraud2023adapted")
 
 hm = PhloemFluxPython(plant, params, psiXylInit=min(sx), ciInit=weatherData['co2'][0]*0.5)
 hm.wilting_point = -10000
 
-path = '../modelparameter/functional/'
+path = '../../modelparameter/functional/'
 hm.read_photosynthesis_parameters(filename=path+"plant_photosynthesis/photosynthesis_parameters2025")
 hm.read_phloem_parameters(filename=path+"plant_sucrose/phloem_parameters2025")
 # list_data = hm.get_phloem_data_list() # option of data that can be obtained from the phloem model
 # hm.write_phloem_parameters(filename='phloem_parameters')
-
-phloem_flow_dir = "data/sim_00"
 
 time = []
 cumulAssimilation = 0.
 cumulTranspiration = 0.
 Q_Rm_is, Q_Gr_is, Q_Exud_is, Q_Water_is = [], [], [], []
 
-print("Entering simulation loop...")
 """ Simulation loop """
 for i in range(N):
     """ Weather variables """
@@ -93,38 +90,16 @@ for i in range(N):
     es = hm.get_es(weatherData_i['Tair'])
     ea = es * weatherData_i['RH']
 
-    print("Solve: Plant transpiration and photosynthesis...")
     hm.solve(sim_time=plant_age, rsx=sx, cells=True,
-            ea=ea, es=es,
-            PAR=weatherData_i['PAR']*(24*3600)/1e4,
-            TairC=weatherData_i['Tair'],
-            verbose=0)
-
-    # print(f"get_nodes = {hm.get_nodes()}")
-    # print(f"len(nodes) = {hm.get_nodes().shape[0]}")
-    # print(f"get_segments = {hm.get_segments()}")
-    # print(f"len(segments) = {hm.get_segments().shape[0]}")
+             ea=ea, es=es,
+             PAR=weatherData_i['PAR']*(24*3600)/1e4,
+             TairC=weatherData_i['Tair'],
+             verbose=0)
 
     """ Plant inner carbon balance """
-    print("Solve: Phloem flow...")
-    os.makedirs(phloem_flow_dir, exist_ok=True)
-    phloem_flow_file = f"{phloem_flow_dir}/phloem_{i:02d}.txt"
-
-    hm.solve_phloem_flow(plant_age, dt, weatherData_i['Tair'], unit=1, outputfile=phloem_flow_file)
-
-    # Save all simulation data in HDF5 format
-    hm.save_simulation_data(
-        step=i,
-        sim_time=sim_time,
-        plant_age=plant_age,
-        dt=dt,
-        weather_data=weatherData_i,
-        outdir=phloem_flow_dir,
-        save_params=(i==0)  # Only save parameters on first step
-    )
+    hm.solve_phloem_flow(plant_age, dt,  weatherData_i['Tair'])
 
     """ Post processing """
-    print("Post processing...")
     cumulAssimilation  += np.sum(hm.get_net_assimilation())  * dt
     cumulTranspiration += np.sum(hm.get_transpiration()) * dt
 
@@ -156,26 +131,6 @@ for i in range(N):
     Q_Gr_is.append(Q_Gr_i/dt)
     Q_Water_is.append(np.sum(hm.get_transpiration()))
 
-    # print(" --------------------------------------------------- ")
-    # print("len_leaf:", " ".join(f"{v:5.2f}" for v in hm.len_leaf))
-    # print(" --------------------------------------------------- ")
-    # print("Delta_JS_ST:", " ".join(f"{v:5.2}" for v in hm.Delta_JS_ST))
-    # print(" --------------------------------------------------- ")
-    # print("C_amont:", " ".join(f"{v:5.2}" for v in hm.C_amont))
-    # print(" --------------------------------------------------- ")
-    # print("Delta:", " ".join(f"{v:5.2}" for v in hm.Delta))
-    # print(" --------------------------------------------------- ")
-    # print("Delta2:", " ".join(f"{v:5.2}" for v in hm.Delta2))
-
-    # print("\nCooDelta.row:", hm.CooDelta.row)
-    # print("\nCooDelta.col:", hm.CooDelta.col)
-    # print("\nCooDelta.val:", " ".join(f"{v:5.2f}" for v in hm.CooDelta.val))
-    # print("\nCooDelta.m:", hm.CooDelta.m)
-    # print("CooDelta.n:", hm.CooDelta.n)
-    # print("CooDelta.nnz:", hm.CooDelta.nnz)
-
-    # print("\nI_Upflow:", hm.I_Upflow)
-    # print("\nI_Downflow:", hm.I_Downflow)
 
 """ Plot results """
 fig, axs = plt.subplots(2,2)

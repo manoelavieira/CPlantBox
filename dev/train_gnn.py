@@ -21,7 +21,29 @@ from datetime import datetime
 
 from utils.dataset_loader import load_phloem_data
 from models.gnn import PhloemNNConv, ModelConfig, Standardizer, physics_residual
-from config import TrainingConfig, TrainingState, TrainingMetrics, ModelSetup
+from config import TrainingConfig, TrainingState, TrainingMetrics, ModelSetup, LossType
+
+
+def compute_loss(mse: torch.Tensor, physics: torch.Tensor, loss_type: LossType, lambda_phys: float = 1.0) -> torch.Tensor:
+    """Compute loss based on the specified loss type configuration.
+
+    Args:
+        mse: Mean squared error term
+        physics: Physics residual term
+        loss_type: Type of loss to compute
+        lambda_phys: Physics term weight (only used for COMBINED loss)
+
+    Returns:
+        Computed loss tensor
+    """
+    if loss_type == LossType.DATA_ONLY:
+        return mse
+    elif loss_type == LossType.PHYSICS_ONLY:
+        return physics
+    elif loss_type == LossType.COMBINED:
+        return mse + lambda_phys * physics
+    else:
+        raise ValueError(f"Unknown loss type: {loss_type}")
 
 
 def create_tensorboard_writer(config: TrainingConfig) -> SummaryWriter:
@@ -51,6 +73,8 @@ def log_hyperparameters(writer: SummaryWriter, config: TrainingConfig, model_cfg
         'seed': config.seed,
         'train_ratio': config.train_ratio,
         'val_ratio': config.val_ratio,
+        'lambda_phys': config.lambda_phys,
+        'loss_type': config.loss_type.value,
 
         # Model architecture
         'hidden_size': model_cfg.hidden_size,
@@ -444,17 +468,21 @@ def run_training_loop(
     # Initialize training state
     training_state = TrainingState()
 
-    print("\nStarting training...")
+    print(f"\nStarting training with loss type: {config.loss_type.value}")
     for epoch in range(1, config.epochs + 1):
         training_state.current_epoch = epoch
 
         # Training
         tr_loss, tr_mae, tr_mse, tr_physics = train_one_epoch(
-            model_setup.model, train_loader, optimizer, writer, epoch)
+            model_setup.model, train_loader, optimizer, writer, epoch,
+            clip_grad_norm=config.clip_grad_norm,
+            loss_type=config.loss_type,
+            lambda_phys=config.lambda_phys)
 
         # Validation
         val_loss, val_mse, val_mae, val_physics = evaluate(
-            model_setup.model, val_loader, writer, epoch, phase='val')
+            model_setup.model, val_loader, writer, epoch, phase='val',
+            loss_type=config.loss_type, lambda_phys=config.lambda_phys)
 
         # Learning rate scheduling (use combined validation loss)
         scheduler.step(val_loss)
@@ -532,7 +560,10 @@ def parse_arguments() -> TrainingConfig:
     parser.add_argument('--seed', type=int, default=42,
                        help='Random seed for reproducibility')
     parser.add_argument('--lambda-phys', type=float, default=1.0,
-                        help='Weight for physics loss term (L = MSE + lambda_phys * Physics)')
+                        help='Weight for physics loss term (only used with combined loss)')
+    parser.add_argument('--loss-type', type=str, default='physics_only',
+                        choices=['data_only', 'physics_only', 'combined'],
+                        help='Type of loss to use: data_only (MSE), physics_only, or combined (MSE + lambda_phys * physics)')
     parser.add_argument('--tensorboard-log-dir', type=str, default='results/tensorboard_logs',
                         help='Directory for TensorBoard logs')
     args = parser.parse_args()
@@ -549,6 +580,7 @@ def parse_arguments() -> TrainingConfig:
         epochs=args.epochs,
         seed=args.seed,
         lambda_phys=args.lambda_phys,
+        loss_type=LossType(args.loss_type),
         tensorboard_log_dir=args.tensorboard_log_dir
     )
 
@@ -580,7 +612,8 @@ def run_final_evaluation(
     # Final evaluation on test set
     test_loss, test_mse, test_mae, test_physics = evaluate(
         model_setup.model, test_loader, writer,
-        training_state.best_epoch, phase='test'
+        training_state.best_epoch, phase='test',
+        loss_type=config.loss_type, lambda_phys=config.lambda_phys
     )
 
     # Log final test metrics
@@ -608,7 +641,9 @@ def train_one_epoch(
         optimizer: torch.optim.Optimizer,
         writer: Optional[SummaryWriter] = None,
         epoch: int = 0,
-        clip_grad_norm: float = 1.0
+        clip_grad_norm: float = 1.0,
+        loss_type: LossType = LossType.COMBINED,
+        lambda_phys: float = 1.0
     ) -> Tuple[float, float, float, float]:
     """Train model for one epoch.
 
@@ -619,6 +654,8 @@ def train_one_epoch(
         writer: TensorBoard writer for logging
         epoch: Current epoch number
         clip_grad_norm: Maximum norm for gradient clipping
+        loss_type: Type of loss to compute (data_only, physics_only, or combined)
+        lambda_phys: Weight for physics term (only used with combined loss)
 
     Returns:
         Tuple of (average_loss, average_mae, average_mse, average_physics)
@@ -663,8 +700,8 @@ def train_one_epoch(
         # Restore standardized features for next iteration
         data.node_feat = model.feature_scaler.transform(x_orig)
 
-        # Combine with explicit physics weight
-        loss = mse + getattr(model, "lambda_phys", 1.0) * phys_tensor
+        # Compute loss based on configuration
+        loss = compute_loss(mse, phys_tensor, loss_type, lambda_phys)
         loss.backward()
 
         # Log gradient norms before clipping
@@ -696,7 +733,7 @@ def train_one_epoch(
             total_mae += mae.item()
             total_mse += mse.item()
             total_physics += phys_scalar
-            total_loss += (mse + getattr(model, "lambda_phys", 1.0) * phys_tensor).item()
+            total_loss += loss.item()
             n_batches += 1
 
             # Log batch-level metrics to TensorBoard (every 10 batches to avoid clutter)
@@ -723,7 +760,9 @@ def evaluate(
         loader: DataLoader,
         writer: Optional[SummaryWriter] = None,
         epoch: int = 0,
-        phase: str = 'val'
+        phase: str = 'val',
+        loss_type: LossType = LossType.COMBINED,
+        lambda_phys: float = 1.0
     ) -> Tuple[float, float, float, float]:
     """Evaluate model on a dataset.
 
@@ -733,6 +772,8 @@ def evaluate(
         writer: TensorBoard writer for logging
         epoch: Current epoch number
         phase: Phase name ('val' or 'test')
+        loss_type: Type of loss to compute (data_only, physics_only, or combined)
+        lambda_phys: Weight for physics term (only used with combined loss)
 
     Returns:
         Tuple of (average_loss, average_mse, average_mae, average_physics)
@@ -782,7 +823,7 @@ def evaluate(
                 phys_val_scalar = 0.0
 
             mae = (pred_un - y).abs().mean()
-            loss = mse + getattr(model, "lambda_phys", 1.0) * phys_val_scalar
+            loss = compute_loss(mse, torch.tensor(phys_val_scalar), loss_type, lambda_phys)
 
             total_loss += float(loss)
             total_mse += float(mse)

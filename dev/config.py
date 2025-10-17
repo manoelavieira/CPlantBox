@@ -4,7 +4,15 @@ Configuration classes for GNN training
 from dataclasses import dataclass
 from typing import Optional
 from pathlib import Path
+from enum import Enum
 import torch
+
+
+class LossType(Enum):
+    """Enumeration for different loss configurations."""
+    DATA_ONLY = "data_only"         # MSE only
+    PHYSICS_ONLY = "physics_only"   # Physics term only
+    COMBINED = "combined"           # Both MSE and physics terms
 
 
 @dataclass
@@ -22,6 +30,9 @@ class TrainingConfig:
     epochs: int = 100
     patience: int = 10
     lambda_phys: float = 1.0
+
+    # Loss configuration
+    loss_type: LossType = LossType.PHYSICS_ONLY
 
     # Reproducibility
     seed: int = 42

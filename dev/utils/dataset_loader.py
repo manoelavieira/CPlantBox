@@ -115,8 +115,12 @@ def load_graph_data(h5_file: h5py.File, timestep: int) -> Data:
     psi = torch.tensor(h5_file[f'{step_key}/nodes/psiXyl4Phloem'][:], dtype=torch.float32)
     vol = torch.tensor(h5_file[f'{step_key}/nodes/vol_ST'][:], dtype=torch.float32)
     len_leaf = torch.tensor(h5_file[f'{step_key}/nodes/len_leaf'][:], dtype=torch.float32)
+    Q_Rmmax = torch.tensor(h5_file[f'{step_key}/nodes/Q_Rmmax'][:], dtype=torch.float32)
+    Q_Grmax = torch.tensor(h5_file[f'{step_key}/nodes/Q_Grmax'][:], dtype=torch.float32)
+    Q_Exudmax = torch.tensor(h5_file[f'{step_key}/nodes/Q_Exudmax'][:], dtype=torch.float32)
+    Temp = step_params[0, step_params_names.index("Tair")].repeat(psi.shape[0])
 
-    node_feat = torch.stack([psi, vol, len_leaf], dim=1)  # [N, 3]
+    node_feat = torch.stack([psi, vol, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp], dim=1)  # [N, 7]
     num_nodes = psi.shape[0]  # get actual number of nodes
 
     # Load additional features needed physics residual calculation
@@ -344,7 +348,7 @@ def load_phloem_data(h5_path: str, batch_size: int = 32,
 
 def main():
     # Example 1: Load from single file (original behavior)
-    h5_path = 'data/sim_00/phloem_simulation.h5'
+    h5_path = '../simulation/data/sim_00/phloem_simulation.h5'
     print("====== Loading from single file ======")
     try:
         train_loader, val_loader, test_loader = load_phloem_data(h5_path)
@@ -353,7 +357,7 @@ def main():
         print(f"Single file loading failed: {e}")
 
     # Example 2: Load from directory (new batch loading functionality)
-    h5_dir = 'data/'  # Directory containing multiple .h5 files
+    h5_dir = '../simulation/data/'  # Directory containing multiple .h5 files
     print("\n====== Loading from directory ======")
     try:
         train_loader, val_loader, test_loader = load_phloem_data(h5_dir)

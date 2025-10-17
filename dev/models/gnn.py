@@ -145,7 +145,7 @@ class ModelConfig:
     """Configuration for PhloemNNConv model.
 
     Attributes:
-        node_feat_dim: Dimension of continuous node features [psi, vol_st, len_leaf]
+        node_feat_dim: Dimension of continuous node features
         num_org_types: Number of organ types [LEAF, STEM, ROOT]
         org_emb_size: Dimension of organ type embeddings
         hidden_size: Dimension of hidden layers in NNConv/MLPs
@@ -154,7 +154,7 @@ class ModelConfig:
         aggr: NNConv aggregator type ("add", "mean", or "max")
         dropout: Dropout probability
     """
-    node_feat_dim: int = 3  # [psi, vol_st, len_leaf]
+    node_feat_dim: int = 7  # [psi, vol_st, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp]
     edge_feat_dim: int = 1  # [r_st]
     num_org_types: int = 3
     org_emb_size: int = 8  # embedding dimension for categorical organ type
@@ -454,7 +454,12 @@ def physics_residual(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
     # Node features already in original space
     node_feat = data.node_feat.to(device)
     psi = node_feat[:, 0]
+    vol_ST = node_feat[:, 1]
     len_leaf = node_feat[:, 2]
+    Q_Rmmax = node_feat[:, 3]
+    Q_Grmax = node_feat[:, 4]
+    Q_Exudmax = node_feat[:, 5]
+    Temp = node_feat[:, 6]
 
     batch_vec = getattr(data, "batch", None)
 
@@ -463,8 +468,6 @@ def physics_residual(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
 
     # Extract node fields (see node_fields_names in dataset_loader.py)
     node_fields = extract_node_fields(data, device)
-
-    RT = R * (params["Tair"] + 273.15)
 
     # Sucrose at endpoints
     s_i = y_pred[src, 0]
@@ -490,7 +493,7 @@ def physics_residual(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
     # Jax > 0: Flow along edge direction (src → dst)
     # Jax < 0: Flow opposite to edge direction (dst → src)
     # If psi_i > psi_j (and/or s_i > s_j), driving > 0, giving J_ax > 0 (src -> dst).
-    RT_i = RT[src]
+    RT_i = R * (Temp[src] + 273.15)  # Use temperature at source nodes for each edge
     J_ax = (1 / r_ST) * s_ij * (RT_i * (s_i - s_j) + (psi_i - psi_j))
 
     # Divergence of flux -> net inflow per node
@@ -537,7 +540,7 @@ def physics_residual(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
     ds_dt /= data.time_std_node.squeeze()  # now ds_dt is in real time units
 
     # CSTi is the sucrose concentration in sieve tube
-    CSTi = y_pred.squeeze(-1) / node_fields["vol_ST"]
+    CSTi = y_pred.squeeze(-1) / vol_ST
     CSTi_positive = torch.clamp(CSTi, min=0.0)  # ensure non-negative concentrations
 
     # F_in: phloem loading term per node
@@ -552,14 +555,14 @@ def physics_residual(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
     CSTi_delta = torch.clamp(CSTi_effective - node_fields["Csoil_node"], min=0.0)
 
     # R_mmax = Q_Rmmax_ (PiafMunch2.cpp)
-    R_mmax = (node_fields["Q_Rmmax"] + params["krm2v"] * CSTi_effective) * torch.pow(params["Q10"], (params["Tair"] - params["TrefQ10"]) / 10.0)
+    R_mmax = (Q_Rmmax + params["krm2v"] * CSTi_effective) * torch.pow(params["Q10"], (Temp - params["TrefQ10"]) / 10.0)
 
     # Sucrose usage rate for growth + maintenance
     # F_out_MM = Fu_lim (PiafMunch2.cpp)
-    F_out_MM = (R_mmax + node_fields["Q_Grmax"]) * (CSTi_effective / (CSTi_effective + params["KMfu"]))
+    F_out_MM = (R_mmax + Q_Grmax) * (CSTi_effective / (CSTi_effective + params["KMfu"]))
 
     # Root exudation rate (passive transport based on concentration gradient)
-    Exud = CSTi_delta * node_fields["Q_Exudmax"]
+    Exud = CSTi_delta * Q_Exudmax
 
     # Total outflow
     F_out = F_out_MM + Exud

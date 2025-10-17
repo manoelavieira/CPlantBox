@@ -29,7 +29,7 @@ def create_tensorboard_writer(config: TrainingConfig) -> SummaryWriter:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     exp_name = timestamp
 
-    log_dir = Path("tensorboard_logs") / exp_name
+    log_dir = Path(config.tensorboard_log_dir) / exp_name
     log_dir.mkdir(parents=True, exist_ok=True)
 
     writer = SummaryWriter(log_dir=str(log_dir))
@@ -533,6 +533,8 @@ def parse_arguments() -> TrainingConfig:
                        help='Random seed for reproducibility')
     parser.add_argument('--lambda-phys', type=float, default=1.0,
                         help='Weight for physics loss term (L = MSE + lambda_phys * Physics)')
+    parser.add_argument('--tensorboard-log-dir', type=str, default='results/tensorboard_logs',
+                        help='Directory for TensorBoard logs')
     args = parser.parse_args()
 
     # Create training configuration
@@ -546,7 +548,8 @@ def parse_arguments() -> TrainingConfig:
         patience=args.patience,
         epochs=args.epochs,
         seed=args.seed,
-        lambda_phys=args.lambda_phys
+        lambda_phys=args.lambda_phys,
+        tensorboard_log_dir=args.tensorboard_log_dir
     )
 
     # Validate configuration
@@ -859,7 +862,7 @@ def main():
 
     # Close TensorBoard writer
     writer.close()
-    print(f"\nTensorBoard logs saved. To view: tensorboard --logdir=tensorboard_logs")
+    print(f"\nTensorBoard logs saved. To view: tensorboard --logdir={config.tensorboard_log_dir}")
 
 
 if __name__ == '__main__':

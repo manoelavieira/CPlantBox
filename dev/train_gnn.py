@@ -214,17 +214,19 @@ def setup_model_and_scalers(
     model.lambda_phys = config.lambda_phys
 
     # Setup standardization on training data
-    feature_scaler = Standardizer()  # for input node features (psi, vol)
+    feature_scaler = Standardizer()  # for input node features (psi, vol, len_leaf...)
     target_scaler = Standardizer()   # for targets (y)
     time_scaler = Standardizer()     # for graph-level time (scalar)
+    edge_scaler = Standardizer()     # for continuous edge features (e.g., r_ST)
 
     # Fit scalers on training data
     with torch.no_grad():
-        x_list, y_list, t_list = [], [], []
+        x_list, y_list, t_list, e_list = [], [], [], []
 
         for batch in train_loader:
             x_list.append(batch.node_feat[:, :model_cfg.node_feat_dim])
             y_list.append(batch.y)
+            e_list.append(batch.edge_feat[:, :model_cfg.edge_feat_dim])  # [E, D], typically D=1
             if hasattr(batch, 'time'):
                 t_list.append(batch.time.view(-1, 1))  # collect per-graph scalars
             else:
@@ -233,10 +235,12 @@ def setup_model_and_scalers(
         Xs = torch.cat(x_list, dim=0)  # [sum_N, 2]
         Ys = torch.cat(y_list, dim=0)  # [sum_N, 1]
         Ts = torch.cat(t_list, dim=0)  # [sum_B, 1], one per graph
+        Es = torch.cat(e_list, dim=0)  # [sum_E, edge_feat_dim]
 
         feature_scaler.fit(Xs)
         target_scaler.fit(Ys)
         time_scaler.fit(Ts)
+        edge_scaler.fit(Es)
 
     # Create model setup
     model_setup = ModelSetup(
@@ -244,13 +248,15 @@ def setup_model_and_scalers(
         model=model,
         feature_scaler=feature_scaler,
         target_scaler=target_scaler,
-        time_scaler=time_scaler
+        time_scaler=time_scaler,
+        edge_scaler=edge_scaler
     )
 
     # Add scalers to the model for backward compatibility
     model.feature_scaler = feature_scaler
     model.target_scaler = target_scaler
     model.time_scaler = time_scaler
+    model.edge_scaler = edge_scaler
 
     # Ensure everything is on the correct device
     model_setup.to_device()
@@ -325,6 +331,11 @@ def save_checkpoint(
         'std': model_setup.time_scaler.std,
         'device': str(model_setup.time_scaler.device)
     }
+    edge_scaler_state = {
+        'mean': model_setup.edge_scaler.mean,
+        'std': model_setup.edge_scaler.std,
+        'device': str(model_setup.edge_scaler.device)
+    }
 
     # Save checkpoint
     torch.save({
@@ -339,6 +350,7 @@ def save_checkpoint(
         'feature_scaler': feature_scaler_state,
         'target_scaler': target_scaler_state,
         'time_scaler': time_scaler_state,
+        'edge_scaler': edge_scaler_state,
     }, filepath)
 
 
@@ -379,10 +391,16 @@ def load_best_model(
         model_setup.time_scaler.std = best_checkpoint['time_scaler']['std']
         model_setup.time_scaler.device = device
 
+        model_setup.edge_scaler = Standardizer()
+        model_setup.edge_scaler.mean = best_checkpoint['edge_scaler']['mean']
+        model_setup.edge_scaler.std = best_checkpoint['edge_scaler']['std']
+        model_setup.edge_scaler.device = device
+
         # Assign scalers to model for backward compatibility
         model_setup.model.feature_scaler = model_setup.feature_scaler
         model_setup.model.target_scaler = model_setup.target_scaler
         model_setup.model.time_scaler = model_setup.time_scaler
+        model_setup.model.edge_scaler = model_setup.edge_scaler
 
         print(f"Loaded best model from epoch {best_checkpoint['epoch']} "
               f"with validation loss {best_checkpoint['val_loss']:.4f} "

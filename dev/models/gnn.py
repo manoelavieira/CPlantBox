@@ -228,6 +228,7 @@ class PhloemNNConv(nn.Module):
         self.feature_scaler = None      # for node features
         self.target_scaler = None       # for output values
         self.time_scaler = None         # for time normalization
+        self.edge_scaler = None         # for edge features
         self._validated_input = False   # Track if input has been validated
 
         # Node input = continuous node features + time
@@ -319,6 +320,8 @@ class PhloemNNConv(nn.Module):
             self.target_scaler.to(device)
         if hasattr(self, 'time_scaler') and self.time_scaler is not None:
             self.time_scaler.to(device)
+        if hasattr(self, 'edge_scaler') and self.edge_scaler is not None:
+            self.edge_scaler.to(device)
         return super().to(device)
 
     def forward(self, data: Data) -> torch.Tensor:
@@ -355,6 +358,11 @@ class PhloemNNConv(nn.Module):
                 "Missing or unfitted time_scaler. "
                 "A fitted Standardizer is required for consistent d/dt computation."
             )
+        if self.edge_scaler is None or getattr(self.edge_scaler, "mean", None) is None:
+            raise RuntimeError(
+                "Missing or unfitted edge_scaler. "
+                "A fitted Standardizer is required for consistent edge feature scaling."
+            )
 
         # Capture the std used for scaling so we can convert d/dτ -> d/dt later
         time_scaled = self.time_scaler.transform(time.view(-1, 1)).view(-1)
@@ -377,7 +385,10 @@ class PhloemNNConv(nn.Module):
         # Concatenate as extra channel
         node_feat = torch.cat([node_feat, time_node], dim=1)
 
-        # Pre-allocate tensor for edge features
+        # Optionally standardize continuous edge features (e.g., r_ST) before EdgeNet
+        edge_feat = self.edge_scaler.transform(edge_feat)
+
+        # Pre-allocate tensor for edge features (continuous + categorical)
         edge_features = torch.empty(
             edge_feat.size(0), edge_feat.size(1) + 1,
             device=device, dtype=torch.float32

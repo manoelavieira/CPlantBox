@@ -117,6 +117,7 @@ class ModelSetup:
     feature_scaler: Optional[object] = None
     target_scaler: Optional[object] = None
     time_scaler: Optional[object] = None
+    edge_scaler: Optional[object] = None  # scaler for continuous edge features (e.g., r_ST)
 
     def to_device(self) -> None:
         """Move model and scalers to the configured device."""
@@ -127,3 +128,5 @@ class ModelSetup:
             self.target_scaler.device = self.device
         if self.time_scaler is not None:
             self.time_scaler.device = self.device
+        if self.edge_scaler is not None:
+            self.edge_scaler.device = self.device

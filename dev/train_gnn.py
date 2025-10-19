@@ -495,7 +495,8 @@ def run_training_loop(
             model_setup.model, train_loader, optimizer, writer, epoch,
             clip_grad_norm=config.clip_grad_norm,
             loss_type=config.loss_type,
-            lambda_phys=config.lambda_phys)
+            lambda_phys=config.lambda_phys,
+            time_jitter_std=config.time_jitter_std)
 
         # Validation
         val_loss, val_mse, val_mae, val_physics = evaluate(
@@ -582,6 +583,8 @@ def parse_arguments() -> TrainingConfig:
     parser.add_argument('--loss-type', type=str, default='physics_only',
                         choices=['data_only', 'physics_only', 'combined'],
                         help='Type of loss to use: data_only (MSE), physics_only, or combined (MSE + lambda_phys * physics)')
+    parser.add_argument('--time-jitter-std', type=float, default=0.01,
+                        help='Standard deviation of time jitter applied during training')
     parser.add_argument('--tensorboard-log-dir', type=str, default='results/tensorboard_logs',
                         help='Directory for TensorBoard logs')
     args = parser.parse_args()
@@ -599,6 +602,7 @@ def parse_arguments() -> TrainingConfig:
         seed=args.seed,
         lambda_phys=args.lambda_phys,
         loss_type=LossType(args.loss_type),
+        time_jitter_std=args.time_jitter_std,
         tensorboard_log_dir=args.tensorboard_log_dir
     )
 
@@ -661,7 +665,8 @@ def train_one_epoch(
         epoch: int = 0,
         clip_grad_norm: float = 1.0,
         loss_type: LossType = LossType.COMBINED,
-        lambda_phys: float = 1.0
+        lambda_phys: float = 1.0,
+        time_jitter_std : float = 0.01
     ) -> Tuple[float, float, float, float]:
     """Train model for one epoch.
 
@@ -711,6 +716,11 @@ def train_one_epoch(
         # σ_t per node (for d/dτ -> d/dt)
         time_std_scalar = model.time_scaler.std.view(-1)[0].to(time_node.device)
         time_std_node = time_std_scalar.expand_as(time_node).clone()
+
+        # Add small random jitter to time to prevent model from ignoring it
+        if model.training and time_jitter_std > 0:
+            jitter = torch.randn_like(time_node) * time_jitter_std
+            time_node = time_node + jitter
 
         # Physics autograd needs time to require grad during training
         if not time_node.requires_grad:

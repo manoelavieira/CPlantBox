@@ -279,7 +279,7 @@ class PhloemNNConv(nn.Module):
             return
 
         must_have = ["node_feat", "edge_feat", "edge_index", "edge_org",
-                     "time", "node_fields", "sim_params", "step_params"]
+                     "time_node", "time_std_node", "node_fields", "sim_params", "step_params",]
 
         for k in must_have:
             if not hasattr(data, k):
@@ -303,11 +303,12 @@ class PhloemNNConv(nn.Module):
         if data.edge_org.max() >= self.cfg.num_org_types:
             raise ValueError(f"Edge organ type index {data.edge_org.max()} >= num_org_types {self.cfg.num_org_types}")
 
-        # time must be scalar or 1D
-        if not isinstance(data.time, torch.Tensor):
-            raise ValueError("time must be a Tensor")
-        if data.time.ndim > 1:
-            raise ValueError(f"time must be scalar or 1D, got shape {tuple(data.time.shape)}")
+        if data.time_node is None or data.time_std_node is None:
+            raise ValueError("time_node and time_std_node are required for physics-informed loss computation")
+        if data.time_node.ndim != 2 or data.time_node.size(1) != 1:
+            raise ValueError(f"time_node must be [N,1], got {tuple(data.time_node.shape)}")
+        if data.time_std_node.ndim != 2 or data.time_std_node.size(1) != 1:
+            raise ValueError(f"time_std_node must be [N,1], got {tuple(data.time_std_node.shape)}")
 
         self._validated_input = True
         print("Input validation successful: data format matches model configuration.")
@@ -327,7 +328,7 @@ class PhloemNNConv(nn.Module):
     def forward(self, data: Data) -> torch.Tensor:
         """Forward pass of the model.
 
-        IMPORTANT: This method modifies the input data object by adding data.time_node,
+        IMPORTANT: This method expects data.time_node / data.time_std_node to be present;
         which is essential for physics-informed loss computation. Always use the same
         data object for both model forward pass and physics_residual calculation.
 
@@ -340,47 +341,22 @@ class PhloemNNConv(nn.Module):
         self._validate_input(data)
         device = next(self.parameters()).device
 
-        # Assert critical fields
-        if not hasattr(data, 'time'):
-            raise ValueError("Missing graph-level time. data.time is required.")
-
         node_feat: torch.Tensor = data.node_feat.to(device)
         edge_index: torch.Tensor = data.edge_index.to(device)
         edge_feat: torch.Tensor = data.edge_feat.to(device)
         edge_org: torch.Tensor = data.edge_org.to(device)
-        time = data.time.to(device)
+        time_node: torch.Tensor = data.time_node.to(device)             # [N,1], standardized time τ
+        time_std_node: torch.Tensor = data.time_std_node.to(device)     # [N,1], σ_t for d/dt conversion
 
-        if time.dim() == 0:
-            time = time.unsqueeze(0)
+        # Shape checks
+        if time_node.size(0) != node_feat.size(0):
+            raise RuntimeError(f"`time_node` must be [N,1]; got {tuple(time_node.shape)} vs N={node_feat.size(0)}.")
+        if time_std_node.size(0) != node_feat.size(0):
+            raise RuntimeError(f"`time_std_node` must be [N,1]; got {tuple(time_std_node.shape)} vs N={node_feat.size(0)}.")
 
-        if self.time_scaler is None or getattr(self.time_scaler, "mean", None) is None:
-            raise RuntimeError(
-                "Missing or unfitted time_scaler. "
-                "A fitted Standardizer is required for consistent d/dt computation."
-            )
-        if self.edge_scaler is None or getattr(self.edge_scaler, "mean", None) is None:
-            raise RuntimeError(
-                "Missing or unfitted edge_scaler. "
-                "A fitted Standardizer is required for consistent edge feature scaling."
-            )
-
-        # Capture the std used for scaling so we can convert d/dτ -> d/dt later
-        time_scaled = self.time_scaler.transform(time.view(-1, 1)).view(-1)
-        time_std_scalar = self.time_scaler.std.view(-1)[0]
-
-        # Create per-node time
-        if hasattr(data, 'batch') and data.batch is not None:
-            time_node = time_scaled[data.batch].clone()
-            time_std_node = time_std_scalar.expand(time_node.size(0))
-        else:
-            time_node = time_scaled.expand(node_feat.size(0)).clone()
-            time_std_node = time_std_scalar.expand(time_node.size(0))
-
-        # Ensure time has gradients and reshape
-        time_node = time_node.view(-1, 1)                  # [N, 1]
-        time_node.requires_grad_(True)                     # make time differentiable per node
-        data.time_node = time_node                         # scaled time (τ)
-        data.time_std_node = time_std_node.view(-1, 1)     # σ_t per node (for ∂/∂t conversion)
+        # Keep them on data for physics_residual
+        data.time_node = time_node
+        data.time_std_node = time_std_node
 
         # Concatenate as extra channel
         node_feat = torch.cat([node_feat, time_node], dim=1)

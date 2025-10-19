@@ -692,6 +692,34 @@ def train_one_epoch(
         data = data.to(next(model.parameters()).device)
         optimizer.zero_grad(set_to_none=True)
 
+        # Build per-node time outside the model
+        if not hasattr(model, "time_scaler") or model.time_scaler is None:
+            raise RuntimeError("Missing model.time_scaler (fit during setup).")
+        if not hasattr(data, "time") or data.time is None:
+            raise ValueError("Each Data must carry a graph-level `time` tensor.")
+
+        # Standardize graph-level time and broadcast to nodes
+        time_scaled = model.time_scaler.transform(data.time.view(-1, 1)).view(-1)
+
+        if hasattr(data, "batch") and data.batch is not None:
+            time_node = time_scaled[data.batch]
+        else:
+            N = data.num_nodes
+            time_node = time_scaled.expand(N)
+        time_node = time_node.view(-1, 1).to(next(model.parameters()).device)
+
+        # σ_t per node (for d/dτ -> d/dt)
+        time_std_scalar = model.time_scaler.std.view(-1)[0].to(time_node.device)
+        time_std_node = time_std_scalar.expand_as(time_node).clone()
+
+        # Physics autograd needs time to require grad during training
+        if not time_node.requires_grad:
+            time_node.requires_grad_(True)
+
+        # Attach to data so the model (which requires them) can use it
+        data.time_node = time_node
+        data.time_std_node = time_std_node
+
         # Keep original features for physics computation
         x_orig = data.node_feat.clone()
 
@@ -717,6 +745,9 @@ def train_one_epoch(
 
         # Restore standardized features for next iteration
         data.node_feat = model.feature_scaler.transform(x_orig)
+
+        # print(f"y samples: {y[:10].squeeze().cpu().numpy()}")
+        # print(f"pred samples: {pred_orig[:10].squeeze().detach().cpu().numpy()}\n")
 
         # Compute loss based on configuration
         loss = compute_loss(mse, phys_tensor, loss_type, lambda_phys)
@@ -806,6 +837,27 @@ def evaluate(
     with torch.no_grad():
         for batch_idx, data in enumerate(loader):
             data = data.to(next(model.parameters()).device)
+
+            # Build per-node time outside the model
+            if not hasattr(model, "time_scaler") or model.time_scaler is None:
+                raise RuntimeError("Missing model.time_scaler (fit during setup).")
+            if not hasattr(data, "time") or data.time is None:
+                raise ValueError("Each Data must carry a graph-level `time` tensor.")
+
+            time_scaled = model.time_scaler.transform(data.time.view(-1, 1)).view(-1)
+            if hasattr(data, "batch") and data.batch is not None:
+                time_node = time_scaled[data.batch]
+            else:
+                N = data.num_nodes
+                time_node = time_scaled.expand(N)
+            time_node = time_node.view(-1, 1).to(next(model.parameters()).device)
+
+            time_std_scalar = model.time_scaler.std.view(-1)[0].to(time_node.device)
+            time_std_node = time_std_scalar.expand_as(time_node).clone()
+
+            # In evaluation we keep them detached (no autograd graph)
+            data.time_node = time_node.detach()
+            data.time_std_node = time_std_node.detach()
 
             # Keep original features
             x_orig = data.node_feat.clone()

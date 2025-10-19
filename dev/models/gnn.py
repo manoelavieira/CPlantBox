@@ -146,7 +146,7 @@ class ModelConfig:
 
     Attributes:
         node_feat_dim: Dimension of continuous node features
-        num_org_types: Number of organ types [LEAF, STEM, ROOT]
+        num_org_types: Number of organ types [ORGAN, SEED, ROOT, STEM, LEAF] following CPlantBox mapping
         org_emb_size: Dimension of organ type embeddings
         hidden_size: Dimension of hidden layers in NNConv/MLPs
         num_layers: Number of NNConv layers
@@ -156,8 +156,8 @@ class ModelConfig:
     """
     node_feat_dim: int = 7  # [psi, vol_st, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp]
     edge_feat_dim: int = 1  # [r_st]
-    num_org_types: int = 3
-    org_emb_size: int = 8  # embedding dimension for categorical organ type
+    num_org_types: int = 5  # ot_organ=0, ot_seed=1, ot_root=2, ot_stem=3, ot_leaf=4
+    org_emb_size: int = 8   # embedding dimension for categorical organ type
     hidden_size: int = 64
     num_layers: int = 3
     aggr: str = "add"

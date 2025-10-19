@@ -127,9 +127,9 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
         return list(members.values())
 
 
-    def _node_types_from_enum(self, Nc: int):
+    def _segment_types_from_enum(self, Nc: int):
         """
-        Build a vector of edge-type labels (length Nc) using get_segments_index(enum).
+        Build a vector of segment-type labels (length Nc) using get_segments_index(enum).
         """
         types = ["unknown"] * Nc
         organ_types = self._enum_organ_types()
@@ -207,7 +207,7 @@ class PhloemFluxPython(PhloemFlux, PhotosynthesisPython):
                 if hasattr(self, attr):
                     segments_group.create_dataset(attr, data=getattr(self, attr))
 
-            segments_types = self._node_types_from_enum(len(segments))
+            segments_types = self._segment_types_from_enum(len(segments))
             organ_types = self.get_organ_types()
 
             segments_group.create_dataset('types', data=segments_types)

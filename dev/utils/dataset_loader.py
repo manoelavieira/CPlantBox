@@ -17,6 +17,16 @@ import os
 from pathlib import Path
 
 
+# CPlantBox organ type constants for reference
+CPLANTBOX_ORGAN_TYPES = {
+    0: "organ",
+    1: "seed",
+    2: "root",
+    3: "stem",
+    4: "leaf"
+}
+
+
 def collate_graphs(batch):
     """Custom collate function that handles parameter names properly."""
     batched_data = Batch.from_data_list(batch)
@@ -161,17 +171,26 @@ def load_graph_data(h5_file: h5py.File, timestep: int) -> Data:
     # so each edge has an explicit single feature column (required by PyG)
     r_st = torch.tensor(h5_file[f'{step_key}/segments/r_ST'][:], dtype=torch.float32)
     edge_feat = r_st.view(-1, 1)  # [E, 1]
-    # print(f"edge_feat_shape: {edge_feat.shape}, edge_feat_dtype: {edge_feat.dtype}")
 
+    # Use CPlantBox organ type mapping directly: ot_organ=0, ot_seed=1, ot_root=2, ot_stem=3, ot_leaf=4
     org_types = torch.tensor(h5_file[f'{step_key}/segments/organ_types'][:], dtype=torch.long)
-    # Map organ types: 2->0 (root), 3->1 (stem), 4->2 (leaf) for embedding lookup
-    org_type_map = {2: 0, 3: 1, 4: 2}
-    edge_org = torch.tensor([org_type_map[int(t)] for t in org_types], dtype=torch.long)
-    # print(f"edge_org_shape: {edge_org.shape}, edge_org_dtype: {edge_org.dtype}")
+    edge_org = org_types
+
+    # Validate organ types are within expected range [0, 4]
+    if edge_org.numel() > 0:
+        min_org_type, max_org_type = edge_org.min().item(), edge_org.max().item()
+        if min_org_type < 0 or max_org_type > 4:
+            print(f"[WARN] Step {timestep}: Found organ types outside range [0,4]: min={min_org_type}, max={max_org_type}")
+
+        # Print organ type distribution for debugging (only first timestep)
+        if timestep == 0:
+            unique_types, counts = torch.unique(edge_org, return_counts=True)
+            type_dist = {CPLANTBOX_ORGAN_TYPES.get(t.item(), f"unknown_{t.item()}"): c.item()
+                        for t, c in zip(unique_types, counts)}
+            print(f"Organ type distribution: {type_dist}")
 
     # Load target values (sucrose concentration)
     y = torch.tensor(h5_file[f'{step_key}/nodes/Q_ST'][:], dtype=torch.float32).view(-1, 1)
-    # print(f"y_shape: {y.shape}, y_dtype: {y.dtype}")
 
     # Use timestep as time feature
     time = torch.tensor(timestep, dtype=torch.float32)

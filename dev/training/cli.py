@@ -1,6 +1,6 @@
 import argparse
 
-from config import TrainingConfig, LossType
+from .config import TrainingConfig, LossType
 
 
 def parse_arguments() -> TrainingConfig:

@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch_geometric
 
-from models.gnn import ModelConfig
+from model.config import ModelConfig
 
 import training.cli as cli
 import training.logging as logging

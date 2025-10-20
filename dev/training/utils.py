@@ -6,8 +6,9 @@ from torch.utils.data import DataLoader
 from typing import Tuple
 
 from data.dataset_loader import load_phloem_data
-from models.gnn import ModelConfig, Standardizer
-from config import TrainingConfig, ModelSetup
+from model.config import ModelConfig
+from model.utils import Standardizer
+from .config import TrainingConfig, ModelSetup
 
 
 def validate_split_ratios(train_ratio: float, val_ratio: float) -> None:

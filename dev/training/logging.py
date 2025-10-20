@@ -7,8 +7,8 @@ from typing import Optional
 from pathlib import Path
 from datetime import datetime
 
-from models.gnn import ModelConfig
-from config import TrainingConfig, TrainingMetrics
+from model.config import ModelConfig
+from .config import TrainingConfig, TrainingMetrics
 
 
 def create_tensorboard_writer(config: TrainingConfig) -> SummaryWriter:

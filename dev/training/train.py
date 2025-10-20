@@ -7,8 +7,9 @@ from torch.utils.tensorboard import SummaryWriter
 
 from typing import Tuple, Optional
 
-from models.gnn import ModelConfig, physics_residual
-from config import TrainingConfig, TrainingState, TrainingMetrics, ModelSetup, LossType
+from model.config import ModelConfig
+from model.physics import physics_residual
+from .config import TrainingConfig, TrainingState, TrainingMetrics, ModelSetup, LossType
 
 import training.utils as utils
 import training.logging as logging
@@ -70,8 +71,10 @@ def compute_physics_residual(
         return phys_tensor
 
     except Exception as e:
-        # Fallback to zero if physics computation fails
-        return torch.tensor(0.0, device=pred_standardized.device)
+        # Fallback to zero if physics computation fails - ensure it requires grad
+        zero_tensor = torch.zeros(1, device=pred_standardized.device, requires_grad=True)
+        # Connect to the predictions to maintain gradient flow
+        return zero_tensor + 0.0 * pred_standardized.sum()
 
 
 def compute_loss_and_metrics(

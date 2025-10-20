@@ -211,7 +211,6 @@ def setup_model_and_scalers(
     # Create model
     model_cfg = ModelConfig()
     model = PhloemNNConv(model_cfg).to(device)
-    model.lambda_phys = config.lambda_phys
 
     # Setup standardization on training data
     feature_scaler = Standardizer()  # for input node features (psi, vol, len_leaf...)
@@ -227,15 +226,12 @@ def setup_model_and_scalers(
             x_list.append(batch.node_feat[:, :model_cfg.node_feat_dim])
             y_list.append(batch.y)
             e_list.append(batch.edge_feat[:, :model_cfg.edge_feat_dim])  # [E, D], typically D=1
-            if hasattr(batch, 'time'):
-                t_list.append(batch.time.view(-1, 1))  # collect per-graph scalars
-            else:
-                raise ValueError("Each Data must carry a graph-level `time` tensor.")
+            t_list.append(batch.time.view(-1, 1))  # collect per-graph scalars
 
         Xs = torch.cat(x_list, dim=0)  # [sum_N, 2]
         Ys = torch.cat(y_list, dim=0)  # [sum_N, 1]
-        Ts = torch.cat(t_list, dim=0)  # [sum_B, 1], one per graph
         Es = torch.cat(e_list, dim=0)  # [sum_E, edge_feat_dim]
+        Ts = torch.cat(t_list, dim=0)  # [sum_B, 1], one per graph
 
         feature_scaler.fit(Xs)
         target_scaler.fit(Ys)
@@ -440,12 +436,6 @@ def log_epoch_metrics(
 
     writer.add_scalar('Learning_Rate', current_lr, epoch)
 
-    # Log combined metrics for easy comparison
-    writer.add_scalars('MAE_Comparison', {
-        'Train': train_metrics.mae,
-        'Validation': val_metrics.mae
-    }, epoch)
-
     writer.add_scalars('Loss_Comparison', {
         'Train_Total': train_metrics.loss,
         'Val_Total': val_metrics.loss
@@ -612,6 +602,144 @@ def parse_arguments() -> TrainingConfig:
     return config
 
 
+def prepare_data_for_forward_pass(
+    data,
+    model: nn.Module,
+    is_training: bool = False,
+    time_jitter_std: float = 0.01
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Prepare data for forward pass by handling time and feature standardization.
+
+    Args:
+        data: Input batch data
+        model: The neural network model with fitted scalers
+        is_training: Whether this is for training (enables time jitter)
+        time_jitter_std: Standard deviation for time jitter during training
+
+    Returns:
+        Tuple of (original_features, standardized_data_ready_for_model)
+    """
+    # Ensure data is on correct device
+    data = data.to(next(model.parameters()).device)
+
+    # Validate required components
+    if not hasattr(model, "time_scaler") or model.time_scaler is None:
+        raise RuntimeError("Missing model.time_scaler (fit during setup).")
+    if not hasattr(data, "time") or data.time is None:
+        raise ValueError("Each Data must carry a graph-level `time` tensor.")
+
+    # Standardize graph-level time and broadcast to nodes
+    time_scaled = model.time_scaler.transform(data.time.view(-1, 1)).view(-1)
+
+    if hasattr(data, "batch") and data.batch is not None:
+        time_node = time_scaled[data.batch]
+    else:
+        N = data.num_nodes
+        time_node = time_scaled.expand(N)
+    time_node = time_node.view(-1, 1).to(next(model.parameters()).device)
+
+    # σ_t per node (for d/dτ -> d/dt)
+    time_std_scalar = model.time_scaler.std.view(-1)[0].to(time_node.device)
+    time_std_node = time_std_scalar.expand_as(time_node).clone()
+
+    # Add small random jitter to time during training
+    if is_training and time_jitter_std > 0:
+        jitter = torch.randn_like(time_node) * time_jitter_std
+        time_node = time_node + jitter
+
+    # Physics autograd needs time to require grad during training
+    if is_training and not time_node.requires_grad:
+        time_node.requires_grad_(True)
+
+    # Store original features before standardization
+    x_orig = data.node_feat.clone()
+
+    # Attach time information to data
+    data.time_node = time_node if is_training else time_node.detach()
+    data.time_std_node = time_std_node if is_training else time_std_node.detach()
+
+    # Standardize features for the model
+    data.node_feat = model.feature_scaler.transform(data.node_feat)
+
+    return x_orig, data
+
+
+def compute_physics_residual(
+    pred_standardized: torch.Tensor,
+    data,
+    model: nn.Module,
+    original_features: torch.Tensor
+) -> torch.Tensor:
+    """Safely compute physics residual with proper feature handling.
+
+    Args:
+        pred_standardized: Model predictions in standardized space
+        data: Batch data with time information
+        model: Neural network model with scalers
+        original_features: Original (unstandardized) node features
+
+    Returns:
+        Physics residual tensor (scalar or mean reduced)
+    """
+    try:
+        # Transform predictions back to original space for physics
+        pred_orig = model.target_scaler.inv_transform(pred_standardized)
+
+        # Temporarily restore original features for physics computation
+        data_feat_backup = data.node_feat.clone()
+        data.node_feat = original_features
+
+        # Compute physics residual
+        phys = physics_residual(pred_orig, data)
+        phys_tensor = phys if phys.dim() == 0 else phys.mean()
+
+        # Restore standardized features
+        data.node_feat = data_feat_backup
+
+        return phys_tensor
+
+    except Exception as e:
+        # Fallback to zero if physics computation fails
+        return torch.tensor(0.0, device=pred_standardized.device)
+
+
+def compute_loss_and_metrics(
+    pred_standardized: torch.Tensor,
+    targets: torch.Tensor,
+    physics_residual_tensor: torch.Tensor,
+    model: nn.Module,
+    loss_type: LossType,
+    lambda_phys: float = 1.0
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute loss and metrics in a unified way.
+
+    Args:
+        pred_standardized: Model predictions in standardized space
+        targets: Target values in original space
+        physics_residual_tensor: Precomputed physics residual
+        model: Neural network model with scalers
+        loss_type: Type of loss to compute
+        lambda_phys: Physics term weight
+
+    Returns:
+        Tuple of (total_loss, mse, mae, physics_residual)
+    """
+    # Transform targets to standardized space for MSE computation
+    targets_standardized = model.target_scaler.transform(targets)
+
+    # MSE in standardized space
+    mse = F.mse_loss(pred_standardized, targets_standardized, reduction='mean')
+
+    # MAE in original space for interpretability
+    pred_original = model.target_scaler.inv_transform(pred_standardized)
+    mae = (pred_original - targets).abs().mean()
+
+    # Compute total loss based on configuration
+    total_loss = compute_loss(mse, physics_residual_tensor, loss_type, lambda_phys)
+
+    return total_loss, mse, mae, physics_residual_tensor
+
+
 def run_final_evaluation(
     model_setup: ModelSetup,
     test_loader: DataLoader,
@@ -657,6 +785,45 @@ def run_final_evaluation(
     print(f"\nFinal test metrics - Loss: {test_loss:.4f}, MSE: {test_mse:.4f}, Physics: {test_physics:.4f}")
 
 
+def log_gradient_norms(
+    model: nn.Module,
+    writer: SummaryWriter,
+    epoch: int,
+    batch_idx: int,
+    loader_len: int
+) -> None:
+    """Log gradient norms to TensorBoard."""
+    total_grad_norm = 0.0
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            param_grad_norm = param.grad.data.norm(2).item()
+            total_grad_norm += param_grad_norm ** 2
+            writer.add_scalar(f'Gradients/{name}', param_grad_norm,
+                            epoch * loader_len + batch_idx)
+
+    total_grad_norm = total_grad_norm ** 0.5
+    writer.add_scalar('Gradients/total_norm', total_grad_norm,
+                    epoch * loader_len + batch_idx)
+
+
+def log_batch_metrics(
+    writer: SummaryWriter,
+    epoch: int,
+    batch_idx: int,
+    loader_len: int,
+    loss: torch.Tensor,
+    mse: torch.Tensor,
+    mae: torch.Tensor,
+    physics: torch.Tensor
+) -> None:
+    """Log batch-level metrics to TensorBoard."""
+    step = epoch * loader_len + batch_idx
+    writer.add_scalar('Training/Batch_Loss', float(loss), step)
+    writer.add_scalar('Training/Batch_MSE', float(mse), step)
+    writer.add_scalar('Training/Batch_MAE', float(mae), step)
+    writer.add_scalar('Training/Batch_Physics', float(physics), step)
+
+
 def train_one_epoch(
         model: nn.Module,
         loader: DataLoader,
@@ -679,6 +846,7 @@ def train_one_epoch(
         clip_grad_norm: Maximum norm for gradient clipping
         loss_type: Type of loss to compute (data_only, physics_only, or combined)
         lambda_phys: Weight for physics term (only used with combined loss)
+        time_jitter_std: Standard deviation for time jitter
 
     Returns:
         Tuple of (average_loss, average_mae, average_mse, average_physics)
@@ -694,124 +862,70 @@ def train_one_epoch(
     n_batches = 0
 
     for batch_idx, data in enumerate(loader):
-        data = data.to(next(model.parameters()).device)
         optimizer.zero_grad(set_to_none=True)
 
-        # Build per-node time outside the model
-        if not hasattr(model, "time_scaler") or model.time_scaler is None:
-            raise RuntimeError("Missing model.time_scaler (fit during setup).")
-        if not hasattr(data, "time") or data.time is None:
-            raise ValueError("Each Data must carry a graph-level `time` tensor.")
+        # Prepare data for forward pass (handles time, jitter, standardization)
+        original_features, prepared_data = prepare_data_for_forward_pass(
+            data, model, is_training=True, time_jitter_std=time_jitter_std
+        )
 
-        # Standardize graph-level time and broadcast to nodes
-        time_scaled = model.time_scaler.transform(data.time.view(-1, 1)).view(-1)
+        # Forward pass with prepared data
+        pred_standardized = model(prepared_data)
 
-        if hasattr(data, "batch") and data.batch is not None:
-            time_node = time_scaled[data.batch]
-        else:
-            N = data.num_nodes
-            time_node = time_scaled.expand(N)
-        time_node = time_node.view(-1, 1).to(next(model.parameters()).device)
+        # Compute physics residual safely
+        physics_residual_tensor = compute_physics_residual(
+            pred_standardized, prepared_data, model, original_features
+        )
 
-        # σ_t per node (for d/dτ -> d/dt)
-        time_std_scalar = model.time_scaler.std.view(-1)[0].to(time_node.device)
-        time_std_node = time_std_scalar.expand_as(time_node).clone()
+        # Compute loss and metrics
+        loss, mse, mae, physics_tensor = compute_loss_and_metrics(
+            pred_standardized, data.y, physics_residual_tensor,
+            model, loss_type, lambda_phys
+        )
 
-        # Add small random jitter to time to prevent model from ignoring it
-        if model.training and time_jitter_std > 0:
-            jitter = torch.randn_like(time_node) * time_jitter_std
-            time_node = time_node + jitter
-
-        # Physics autograd needs time to require grad during training
-        if not time_node.requires_grad:
-            time_node.requires_grad_(True)
-
-        # Attach to data so the model (which requires them) can use it
-        data.time_node = time_node
-        data.time_std_node = time_std_node
-
-        # Keep original features for physics computation
-        x_orig = data.node_feat.clone()
-
-        # Standardize features for the model
-        data.node_feat = model.feature_scaler.transform(data.node_feat)
-
-        # Forward pass returns predictions in standardized space
-        pred = model(data) # [N,1]
-
-        y = data.y # [N,1]
-        y_t = model.target_scaler.transform(y)  # Transform targets for loss computation
-
-        # MSE in standardized space (mean over nodes in batch)
-        mse = F.mse_loss(pred, y_t, reduction='mean')
-
-        # Physics computation in original space
-        pred_orig = model.target_scaler.inv_transform(pred)
-
-        # Temporarily restore original features for physics computation
-        data.node_feat = x_orig
-        phys = physics_residual(pred_orig, data)  # already a mean over nodes/graphs
-        phys_tensor = phys if phys.dim() == 0 else phys.mean()
-
-        # Restore standardized features for next iteration
-        data.node_feat = model.feature_scaler.transform(x_orig)
-
-        # print(f"y samples: {y[:10].squeeze().cpu().numpy()}")
-        # print(f"pred samples: {pred_orig[:10].squeeze().detach().cpu().numpy()}\n")
-
-        # Compute loss based on configuration
-        loss = compute_loss(mse, phys_tensor, loss_type, lambda_phys)
+        # Backward pass
         loss.backward()
 
-        # Log gradient norms before clipping
-        if writer is not None and batch_idx == 0:  # Log only first batch to avoid clutter
-            total_grad_norm = 0.0
-            for name, param in model.named_parameters():
-                if param.grad is not None:
-                    param_grad_norm = param.grad.data.norm(2).item()
-                    total_grad_norm += param_grad_norm ** 2
-                    writer.add_scalar(f'Gradients/{name}', param_grad_norm,
-                                    epoch * len(loader) + batch_idx)
+        # Log gradient norms (first batch only to avoid clutter)
+        if writer is not None and batch_idx == 0:
+            log_gradient_norms(model, writer, epoch, batch_idx, len(loader))
 
-            total_grad_norm = total_grad_norm ** 0.5
-            writer.add_scalar('Gradients/total_norm', total_grad_norm,
-                            epoch * len(loader) + batch_idx)
-
+        # Gradient clipping and optimization step
         nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_grad_norm)
         optimizer.step()
 
+        # Accumulate metrics for epoch averaging
         with torch.no_grad():
-            # Report MAE in original units using model's scaler
-            pred_un = model.target_scaler.inv_transform(pred) if hasattr(model, 'target_scaler') and model.target_scaler is not None else pred
-
-            # Convert physics tensor to scalar for logging only
-            phys_scalar = float(phys_tensor.detach())
-
-            # Track means per batch; we'll average by number of batches
-            mae = (pred_un - y).abs().mean()
-            total_mae += mae.item()
-            total_mse += mse.item()
-            total_physics += phys_scalar
-            total_loss += loss.item()
+            total_loss += float(loss)
+            total_mse += float(mse)
+            total_mae += float(mae)
+            total_physics += float(physics_tensor)
             n_batches += 1
 
-            # Log batch-level metrics to TensorBoard (every 10 batches to avoid clutter)
+            # Log batch-level metrics (every 10 batches to avoid clutter)
             if writer is not None and batch_idx % 10 == 0:
-                step = epoch * len(loader) + batch_idx
-                writer.add_scalar('Training/Batch_Loss', (mse + getattr(model, "lambda_phys", 1.0)*phys_tensor).item(), step)
-                writer.add_scalar('Training/Batch_MSE', mse.item(), step)
-                writer.add_scalar('Training/Batch_MAE', mae.item(), step)
-                writer.add_scalar('Training/Batch_Physics', phys_scalar, step)
+                log_batch_metrics(writer, epoch, batch_idx, len(loader),
+                                loss, mse, mae, physics_tensor)
 
     if n_batches == 0:
         raise RuntimeError("No training samples this epoch.")
 
-    avg_loss = total_loss / n_batches
-    avg_mae = total_mae / n_batches
-    avg_mse = total_mse / n_batches
-    avg_physics = total_physics / n_batches
+    # Return epoch averages
+    return (total_loss / n_batches, total_mae / n_batches,
+            total_mse / n_batches, total_physics / n_batches)
 
-    return avg_loss, avg_mae, avg_mse, avg_physics
+
+def log_evaluation_histograms(
+    writer: SummaryWriter,
+    phase: str,
+    epoch: int,
+    predictions: torch.Tensor,
+    targets: torch.Tensor
+) -> None:
+    """Log distribution histograms for evaluation metrics."""
+    writer.add_histogram(f'{phase}/Predictions', predictions.cpu(), epoch)
+    writer.add_histogram(f'{phase}/Targets', targets.cpu(), epoch)
+    writer.add_histogram(f'{phase}/Residuals', (predictions - targets).cpu(), epoch)
 
 
 def evaluate(
@@ -846,80 +960,48 @@ def evaluate(
 
     with torch.no_grad():
         for batch_idx, data in enumerate(loader):
-            data = data.to(next(model.parameters()).device)
+            # Prepare data for forward pass (no training mode, no jitter)
+            original_features, prepared_data = prepare_data_for_forward_pass(
+                data, model, is_training=False, time_jitter_std=0.0
+            )
 
-            # Build per-node time outside the model
-            if not hasattr(model, "time_scaler") or model.time_scaler is None:
-                raise RuntimeError("Missing model.time_scaler (fit during setup).")
-            if not hasattr(data, "time") or data.time is None:
-                raise ValueError("Each Data must carry a graph-level `time` tensor.")
+            # Forward pass with prepared data
+            pred_standardized = model(prepared_data)
 
-            time_scaled = model.time_scaler.transform(data.time.view(-1, 1)).view(-1)
-            if hasattr(data, "batch") and data.batch is not None:
-                time_node = time_scaled[data.batch]
-            else:
-                N = data.num_nodes
-                time_node = time_scaled.expand(N)
-            time_node = time_node.view(-1, 1).to(next(model.parameters()).device)
+            # Compute physics residual safely with gradient context for evaluation
+            physics_residual_tensor = torch.tensor(0.0, device=pred_standardized.device)
+            with torch.enable_grad():
+                time_node_grad = prepared_data.time_node.clone().requires_grad_(True)
+                data_with_grad = prepared_data  # Use prepared data directly
+                data_with_grad.time_node = time_node_grad
+                pred_for_physics = model(data_with_grad)
+                pred_orig_for_physics = model.target_scaler.inv_transform(pred_for_physics)
+                data_with_grad.node_feat = original_features
+                phys_val = physics_residual(pred_orig_for_physics, data_with_grad)
+                physics_residual_tensor = phys_val if phys_val.dim() == 0 else phys_val.mean()
+                physics_residual_tensor = physics_residual_tensor.detach()
 
-            time_std_scalar = model.time_scaler.std.view(-1)[0].to(time_node.device)
-            time_std_node = time_std_scalar.expand_as(time_node).clone()
+            # Compute loss and metrics using helper function
+            loss, mse, mae, physics_tensor = compute_loss_and_metrics(
+                pred_standardized, data.y, physics_residual_tensor,
+                model, loss_type, lambda_phys
+            )
 
-            # In evaluation we keep them detached (no autograd graph)
-            data.time_node = time_node.detach()
-            data.time_std_node = time_std_node.detach()
-
-            # Keep original features
-            x_orig = data.node_feat.clone()
-
-            # Standardize features for the model
-            data.node_feat = model.feature_scaler.transform(data.node_feat)
-
-            # Forward pass returns predictions in standardized space
-            pred = model(data)
-
-            y = data.y
-            y_t = model.target_scaler.transform(y)
-            mse = F.mse_loss(pred, y_t, reduction='mean')
-
-            # Transform predictions back for MAE in original space
-            pred_un = model.target_scaler.inv_transform(pred)
-
-            # Compute physics residual for validation/test
-            phys_val_scalar = 0.0
-            try:
-                if hasattr(data, 'time_node') and data.time_node is not None:
-                    with torch.enable_grad():
-                        time_node_grad = data.time_node.clone().requires_grad_(True)
-                        data_with_grad = data.clone() if hasattr(data, 'clone') else data
-                        data_with_grad.time_node = time_node_grad
-                        data_with_grad.node_feat = model.feature_scaler.transform(x_orig)
-                        pred_for_physics = model(data_with_grad)
-                        pred_orig_for_physics = model.target_scaler.inv_transform(pred_for_physics)
-                        data_with_grad.node_feat = x_orig
-                        phys_val = physics_residual(pred_orig_for_physics, data_with_grad)
-                        phys_val_scalar = float((phys_val if phys_val.dim() == 0 else phys_val.mean()).detach())
-            except Exception:
-                phys_val_scalar = 0.0
-
-            mae = (pred_un - y).abs().mean()
-            loss = compute_loss(mse, torch.tensor(phys_val_scalar), loss_type, lambda_phys)
-
+            # Accumulate metrics
             total_loss += float(loss)
             total_mse += float(mse)
             total_mae += float(mae)
-            total_physics += phys_val_scalar
+            total_physics += float(physics_tensor)
             n_batches += 1
 
-            # Log distribution of predictions and targets (first batch only)
+            # Log distribution of predictions and targets (first batch only, every 5 epochs)
             if writer is not None and batch_idx == 0 and epoch % 5 == 0:
-                writer.add_histogram(f'{phase}/Predictions', pred_un.cpu(), epoch)
-                writer.add_histogram(f'{phase}/Targets', y.cpu(), epoch)
-                writer.add_histogram(f'{phase}/Residuals', (pred_un - y).cpu(), epoch)
+                pred_original = model.target_scaler.inv_transform(pred_standardized)
+                log_evaluation_histograms(writer, phase, epoch, pred_original, data.y)
 
-                # Log loss values for debugging
+                # Log individual loss components for debugging
                 writer.add_scalar(f'{phase}/MSE', float(mse), epoch)
-                writer.add_scalar(f'{phase}/Physics', phys_val_scalar, epoch)
+                writer.add_scalar(f'{phase}/Physics', float(physics_tensor), epoch)
                 writer.add_scalar(f'{phase}/Loss', float(loss), epoch)
 
     # Compute averages per batch

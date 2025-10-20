@@ -1,5 +1,5 @@
 import torch
-from typing import Optional, List
+from typing import Optional
 from torch_geometric.data import Data
 
 def create_delta2(data: Data, psi: torch.Tensor, align_to_upstream: bool = True,

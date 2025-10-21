@@ -23,14 +23,14 @@ def compute_axial_flux(y_pred: torch.Tensor, data: Data, device: torch.device) -
     """
     # Get edge topology and features
     edge_index = data.edge_index.to(device)  # [2, E]
-    
+
     # Handle empty graph case
     if edge_index.size(1) == 0:
         return torch.zeros(0, device=device)
 
     src, dst = edge_index[0], edge_index[1]
     r_ST = data.edge_feat.to(device).squeeze(-1)  # [E, 1] -> [E]
-    
+
     # Prevent division by zero in resistance
     r_ST = torch.clamp(r_ST, min=1e-12)
 
@@ -82,11 +82,11 @@ def compute_flux_divergence(J_ax: torch.Tensor, edge_index: torch.Tensor, N: int
         torch.Tensor: Net flux change per node [N]
     """
     dS_dt_from_flux = torch.zeros(N, device=device)
-    
+
     # Handle empty graph case
     if J_ax.size(0) == 0:
         return dS_dt_from_flux
-        
+
     src, dst = edge_index[0], edge_index[1]
 
     # Divergence of flux -> net inflow per node
@@ -215,12 +215,12 @@ def compute_time_derivative(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
             raise
 
     # Convert ∂/∂τ to ∂/∂t using stored σ_t (τ = (t - μ_t)/σ_t)
-    ds_dt /= data.time_std_node.squeeze()
+    ds_dt = ds_dt / data.time_std_node.squeeze()
 
     return ds_dt
 
 
-def physics_residual(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
+def physics_residual(y_pred: torch.Tensor, data: Data):
     """Compute physics-informed residual term based on sucrose transport equations.
 
     Implements the governing equation:
@@ -240,7 +240,8 @@ def physics_residual(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
         data: Graph data containing topology, features, simulation parameters, and node fields
 
     Returns:
-        torch.Tensor: Physics residual loss term
+        tuple: (residual_loss, physics_components_dict) where physics_components_dict contains
+            {'J_ax', 'F_in', 'F_out', 'ds_dt', 'dS_dt_from_flux'}
 
     Raises:
         ValueError: If y_pred is not connected to data.time_node in the computation graph
@@ -277,4 +278,42 @@ def physics_residual(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
     else:
         loss = residual_node.mean()
 
-    return loss
+    # Prepare detailed physics components for logging
+    # Compute per-graph averages first, then average across graphs (consistent with loss computation)
+    if batch_vec is not None:
+        # Batched case: compute per-graph averages using scatter_mean
+        # Node-level quantities: average per graph, then across graphs
+        F_in_per_graph = scatter_mean(F_in.detach(), batch_vec, dim=0)
+        F_out_per_graph = scatter_mean(F_out.detach(), batch_vec, dim=0)
+        ds_dt_per_graph = scatter_mean(ds_dt.detach().abs(), batch_vec, dim=0)
+        dS_dt_from_flux_per_graph = scatter_mean(dS_dt_from_flux.detach().abs(), batch_vec, dim=0)
+        dS_dt_from_physics_per_graph = scatter_mean(dS_dt_from_physics.detach(), batch_vec, dim=0)
+
+        # Edge-level quantities: need edge-to-graph mapping
+        if J_ax.size(0) > 0:
+            # Create edge batch vector by mapping edges to their source node's graph
+            edge_batch = batch_vec[data.edge_index[0].to(device)]
+            J_ax_per_graph = scatter_mean(J_ax.detach().abs(), edge_batch, dim=0)
+            J_ax_avg = J_ax_per_graph.mean()
+        else:
+            J_ax_avg = torch.tensor(0.0, device=device)
+
+        physics_components = {
+            'J_ax': J_ax_avg,
+            'F_in': F_in_per_graph.mean(),
+            'F_out': F_out_per_graph.mean(),
+            'ds_dt': ds_dt_per_graph.mean(),
+            'dS_dt_from_flux': dS_dt_from_flux_per_graph.mean(),
+            'dS_dt_from_physics': dS_dt_from_physics_per_graph.mean()
+        }
+    else:
+        # Single graph case: simple mean across nodes/edges
+        physics_components = {
+            'J_ax': J_ax.detach().abs().mean() if J_ax.size(0) > 0 else torch.tensor(0.0, device=device),
+            'F_in': F_in.detach().mean(),
+            'F_out': F_out.detach().mean(),
+            'ds_dt': ds_dt.detach().abs().mean(),
+            'dS_dt_from_flux': dS_dt_from_flux.detach().abs().mean(),
+            'dS_dt_from_physics': dS_dt_from_physics.detach().mean()
+        }
+    return loss, physics_components

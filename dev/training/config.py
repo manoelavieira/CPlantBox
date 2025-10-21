@@ -101,15 +101,34 @@ class TrainingState:
 
 
 @dataclass
+class PhysicsMetrics:
+    """Container for detailed physics indicators."""
+    J_ax: float = 0.0               # Axial flux magnitude
+    F_in: float = 0.0               # Phloem loading rate
+    F_out: float = 0.0              # Sucrose outflow rate
+    ds_dt: float = 0.0              # Model-predicted time derivative magnitude
+    dS_dt_from_flux: float = 0.0    # Flux divergence magnitude
+    dS_dt_from_physics: float = 0.0 # Total physics-based rate of change
+
+    def __str__(self) -> str:
+        return (f"J_ax={self.J_ax:.4f} F_in={self.F_in:.4f} F_out={self.F_out:.4f} "
+                f"ds_dt={self.ds_dt:.4f} flux_div={self.dS_dt_from_flux:.4f}")
+
+
+@dataclass
 class TrainingMetrics:
     """Container for training metrics."""
     loss: float
     mse: float
     mae: float
     physics: float
+    physics_details: Optional['PhysicsMetrics'] = None
 
     def __str__(self) -> str:
-        return f"loss={self.loss:.4f} MSE={self.mse:.4f} physics={self.physics:.4f}"
+        base_str = f"loss={self.loss:.4f} MSE={self.mse:.4f} physics={self.physics:.4f}"
+        if self.physics_details is not None:
+            base_str += f" | {self.physics_details}"
+        return base_str
 
 
 @dataclass

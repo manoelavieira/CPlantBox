@@ -8,7 +8,7 @@ from pathlib import Path
 from datetime import datetime
 
 from model.config import ModelConfig
-from .config import TrainingConfig, TrainingMetrics
+from .config import TrainingConfig, TrainingMetrics, PhysicsMetrics
 
 
 def create_tensorboard_writer(config: TrainingConfig) -> SummaryWriter:
@@ -53,6 +53,44 @@ def print_experiment_config(config: TrainingConfig):
         print(f"{field_name}: {field_value}")
 
 
+def log_physics_components(
+    writer: SummaryWriter,
+    epoch: int,
+    batch_idx: int,
+    loader_len: int,
+    physics_metrics: 'PhysicsMetrics',
+    phase: str = 'train'
+) -> None:
+    """Log detailed physics components to TensorBoard.
+
+    Args:
+        writer: TensorBoard writer
+        epoch: Current epoch number
+        batch_idx: Current batch index
+        loader_len: Total number of batches in loader
+        physics_metrics: Detailed physics metrics
+        phase: Phase name ('train', 'val', 'test')
+    """
+    step = epoch * loader_len + batch_idx
+    prefix = f'Physics_{phase.capitalize()}' if phase != 'train' else 'Physics'
+
+    writer.add_scalar(f'{prefix}/J_ax', physics_metrics.J_ax, step)
+    writer.add_scalar(f'{prefix}/F_in', physics_metrics.F_in, step)
+    writer.add_scalar(f'{prefix}/F_out', physics_metrics.F_out, step)
+    writer.add_scalar(f'{prefix}/ds_dt', physics_metrics.ds_dt, step)
+    writer.add_scalar(f'{prefix}/dS_dt_from_flux', physics_metrics.dS_dt_from_flux, step)
+    writer.add_scalar(f'{prefix}/dS_dt_from_physics', physics_metrics.dS_dt_from_physics, step)
+
+    # Also log as a scalar group for easy comparison
+    writer.add_scalars(f'{prefix}_Components', {
+        'J_ax': physics_metrics.J_ax,
+        'F_in': physics_metrics.F_in,
+        'F_out': physics_metrics.F_out,
+        'ds_dt': physics_metrics.ds_dt,
+        'flux_div': physics_metrics.dS_dt_from_flux
+    }, step)
+
+
 def log_epoch_metrics(
     writer: SummaryWriter,
     epoch: int,
@@ -90,6 +128,13 @@ def log_epoch_metrics(
         'Physics': train_metrics.physics,
         'Total': train_metrics.loss
     }, epoch)
+
+    # Log detailed physics components if available
+    if train_metrics.physics_details is not None:
+        log_physics_components(writer, epoch, 0, 1, train_metrics.physics_details, phase='train_epoch')
+
+    if val_metrics.physics_details is not None:
+        log_physics_components(writer, epoch, 0, 1, val_metrics.physics_details, phase='val_epoch')
 
 
 def log_gradient_norms(

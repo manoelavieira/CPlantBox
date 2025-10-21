@@ -28,7 +28,6 @@ from torch_geometric.nn import NNConv
 from torch_geometric.nn.norm import GraphNorm  # per-graph normalization
 
 from .config import ModelConfig
-from .physics import physics_residual
 
 
 class EdgeNet(nn.Module):

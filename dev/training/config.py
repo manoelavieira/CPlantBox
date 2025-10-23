@@ -111,8 +111,8 @@ class PhysicsMetrics:
     dS_dt_from_physics: float = 0.0 # Total physics-based rate of change
 
     def __str__(self) -> str:
-        return (f"J_ax={self.J_ax:.4f} F_in={self.F_in:.4f} F_out={self.F_out:.4f} "
-                f"ds_dt={self.ds_dt:.4f} flux_div={self.dS_dt_from_flux:.4f}")
+        return (f"J_ax={self.J_ax:.3e} F_in={self.F_in:.3e} F_out={self.F_out:.3e} "
+                f"ds_dt={self.ds_dt:.3e} flux_div={self.dS_dt_from_flux:.3e}")
 
 
 @dataclass

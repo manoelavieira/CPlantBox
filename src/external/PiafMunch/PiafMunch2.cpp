@@ -28,7 +28,7 @@ string GnuplotPath = "C:/gnuplot/bin/gnuplot.exe" ; // Path to GnuPlot executabl
 //Fortran_vector vol_ST_seg;
 //Fortran_vector C_ST_seg, Q_ST_seg, Q_ST_seg_new, Q_ST_newFuFl, grad_Q_ST_seg;
 Fortran_vector Length;
-Fortran_vector  Q_Exud, Q_Gr, Q_Rm, Q_Fl; 
+Fortran_vector  Q_Exud, Q_Gr, Q_Rm, Q_Fl;
 Fortran_vector  Ag, Q_Grmax, Q_Rmmax, Q_Exudmax, exud_k, krm2, len_leaf;
 
 
@@ -129,7 +129,7 @@ Fortran_vector k2					; // kinetic parameter / maintenance respiration						(ml 
 Fortran_vector k3						; // kinetic parameter / starch/sugar equilibrium. (regul. par. sugar conc.) 			(h-1)
 Fortran_vector StructC				; // structural C subject to maintenance respiration					(mmol sug. eq.)
 Fortran_vector vol_ST, vol_ParApo, vol_PhlApo,vol_Seg ; // (ml) total volume of, resp. : sieve tubes, and  parenchyma and phloem apoplasm
-//Fortran_vector	isTip ,Ag,  Lmax_org, Rmax_org, krm1, krm2 , exud_k, Q_Grmax_; 
+//Fortran_vector	isTip ,Ag,  Lmax_org, Rmax_org, krm1, krm2 , exud_k, Q_Grmax_;
 //double krm2;
 /*******************************   LIQUID-FLUXES-RELATED BIOPHYSICAL PARAMETERS  **********************************/
 extern Fortran_vector r_Xyl, r_Trsv, r_ST, r_ST_ref, r_Sympl, r_Apo, r_PhlMb, r_Par_Mb ; // Hydraulic resistances (might change in response to embolism, cold block, aquaporin function, etc...)
@@ -151,19 +151,19 @@ static long long DBG_ITER = 0;  // accumulates values at each solver iteration
 static const int DBG_EVERY_ITER = 100; // logs progress every DBG_EVERY_ITER iterations
 inline bool dbg_sample_iter(long long it) { return (it % DBG_EVERY_ITER) == 0; }
 
-void PhloemFlux::C_fluxes(double t, int Nt)  
+void PhloemFlux::C_fluxes(double t, int Nt)
 {
-	for (int i = 1 ; i <= Nt ; i++) 
+	for (int i = 1 ; i <= Nt ; i++)
 	{ // edit (make different loops) to enter specific equations for specific nodes or conn.orders
 		int cpp_id = i -1;// o go from Fortran_vector numeration to cpp vector numeration
 		double CSTi = max(0.,C_ST[i]);// From A.Lacointe: solver may try C<0 even if actual C never does
 		double Cmeso = max(0.,Q_Mesophyll[i]/vol_ParApo[i]);//concentration in meosphyll compartment
 		//Q_Fl[i] = k_meso*max(Cmeso - CSTi, 0.);//flux from mesophyll to sieve tube
-		 
+
 		double Q_Rmmax_ ;double Q_Exudmax_;double Fu_lim;
-        
-		//starch		
-			//ST	
+
+		//starch
+			//ST
 		//Q_S_ST_dot[i] = 0;
 		double denominator = kM_S_ST + CSTi;
 		double StarchSyn = 0;
@@ -173,9 +173,9 @@ void PhloemFlux::C_fluxes(double t, int Nt)
 		}
 		Q_Mucil_dot[i] = std::max(0.,k_mucil_[cpp_id] *   Q_S_ST[i]);//mucilage exudation
 		//an alternate, target-oriented,  expression of starch variation rate, mutually exclusive of (AmSyn - kHyd * Amid), so that...
-        double Starch_dot_alt = k_S_ST * (CSTi - C_targ) * vol_ST[i] ;	
+        double Starch_dot_alt = k_S_ST * (CSTi - C_targ) * vol_ST[i] ;
 		Q_S_ST_dot[i] = StarchSyn + Starch_dot_alt - kHyd_S_ST *std::max(0., Q_S_ST[i]) ; // (Vmax and kHyd) or k3 (below),  or all three, should be zero
-		
+
         if((Q_S_ST[i] <= 0.) && (Q_S_ST_dot[i] < 0.)) { // control negative starch concentrations (remove 4-lines-block if not relevant)
             //cout << "at t=" << t << ", node#" << i << ": Starch <= 0 and Starch_dot < 0  =>  Starch_dot set to zero" << endl ;
             Q_S_ST_dot[i] = 0. ;
@@ -183,7 +183,7 @@ void PhloemFlux::C_fluxes(double t, int Nt)
         }
         double st_2_starch = Q_S_ST_dot[i] ;//+ Q_Mucil_dot[i];
 		Q_S_ST_dot[i] -=  Q_Mucil_dot[i];
-		
+
         	//MEsophyll
 		Q_S_Mesophyll_dot[i] = 0.;
         if(vol_ParApo[i]>0) {
@@ -194,46 +194,46 @@ void PhloemFlux::C_fluxes(double t, int Nt)
                 StarchSyn = Vmax_S_Mesophyll * max(0.,Q_Mesophyll[i]) /  (denominator) ; //  (Vmax and kHyd below) or k3 (below),  or all three, should be zero
             }
             //an alternate, target-oriented,  expression of starch variation rate, mutually exclusive of (AmSyn - kHyd * Amid), so that...
-            Starch_dot_alt = k_S_Mesophyll * (Cmeso - C_targMesophyll) * vol_ParApo[i] ;	
+            Starch_dot_alt = k_S_Mesophyll * (Cmeso - C_targMesophyll) * vol_ParApo[i] ;
             Q_S_Mesophyll_dot[i] = StarchSyn - kHyd_S_Mesophyll * Q_S_Mesophyll[i] + Starch_dot_alt ; // (Vmax and kHyd) or k3 (below),  or all three, should be zero
             if((Q_S_Mesophyll[i] <= 0.) && (Q_S_Mesophyll_dot[i] < 0.)) { // control negative starch concentrations (remove 4-lines-block if not relevant)
                 //cout << "at t=" << t << ", node#" << i << ": Starch <= 0 and Starch_dot < 0  =>  Starch_dot set to zero" << endl ;
                 Q_S_Mesophyll_dot[i] = 0. ;
             }
         }
-		
+
 		Q_Fl[i] = (Vmaxloading *len_leaf[i])* Cmeso/(Mloading + Cmeso) * exp(-CSTi* beta_loading);//phloem loading. from Stanfield&Bartlett_2022
 		CSTi = max(0., CSTi-CSTimin); //if CSTi < CSTimin, no sucrose usage
-		
-		double CSTi_delta = max(0.,CSTi-Csoil_node[cpp_id]); //concentration gradient for passive exudation. TODO: take Csoil from dumux 
+
+		double CSTi_delta = max(0.,CSTi-Csoil_node[cpp_id]); //concentration gradient for passive exudation. TODO: take Csoil from dumux
 		Q_Rmmax_ = (Q_Rmmax[i] + krm2[i] * CSTi) * pow(Q10,(TairK_phloem - 273.15 - TrefQ10)/10);//max maintenance respiration rate
-		
+
 		Q_Exudmax_ = CSTi_delta*Q_Exudmax[i];//max exudation rate
-		Fu_lim = (Q_Rmmax_  + Q_Grmax[i])* (CSTi/(CSTi + KMfu));//active transport of sucrose out of sieve tube			
+		Fu_lim = (Q_Rmmax_  + Q_Grmax[i])* (CSTi/(CSTi + KMfu));//active transport of sucrose out of sieve tube
 		Q_ST_dot[i] = Q_Fl[i] - Fu_lim -Q_Exudmax_ + Delta_JS_ST[i] - st_2_starch;//variation of sucrose content in node
-		
+
 		//Q_meso_dot:
-		Q_Mesophyll_dot[i] = Ag[i] -Q_Fl[i] - Q_S_Mesophyll_dot[i] ;//variaiton of sucrose content in mesophyll compartment 
-		
+		Q_Mesophyll_dot[i] = Ag[i] -Q_Fl[i] - Q_S_Mesophyll_dot[i] ;//variaiton of sucrose content in mesophyll compartment
+
 		Input[i] = Q_Fl[i];//phloem loading
-		
+
 		//Q_Rm_dot:
-		Q_Rm_dot[i] = min(Fu_lim, Q_Rmmax_);//realized rate of maintenance respiration 
-		
+		Q_Rm_dot[i] = min(Fu_lim, Q_Rmmax_);//realized rate of maintenance respiration
+
 		//Growth:
 		//add max(X,0.) in case of issues with rounding
 		Q_Gtot_dot[i] = max(min(Fu_lim - Q_Rm_dot[i], Q_Grmax[i]),0.);//realized rate of sucrose usage for growth + growth respiration
 		//Exudation:
 		Q_Exud_dot[i] =  Q_Exudmax_;//realized rate of exudation
-		
+
 		////save maximum sucrose usage rate for post-processing
 		//Resp_maintmax:
 		Q_Rmmax_dot[i] = Q_Rmmax_ ;
 		//Growthmax:
 		Q_Gtotmax_dot[i] = Q_Grmax[i];
-				 
-								   
-		
+
+
+
 		if(doTroubleshooting && (dbg_sample_iter(DBG_ITER) || FORCE_DBG_C_FLUXES)){
 			std::cout<<"C_fluxes "<<i<<" "<<vol_ST[i]<<" "<<vol_ParApo[i]<<" "<<vol_Seg[i]<<" CSTimin "<<CSTimin<<std::endl;
 			std::cout<<"max(0.,C_ST[i]) "<<max(0.,C_ST[i])<<std::endl;
@@ -242,8 +242,9 @@ void PhloemFlux::C_fluxes(double t, int Nt)
 			std::cout<<Q_Exudmax_<<" Fu_lim "<<Fu_lim<<" Q_ST_dot "<<Q_ST_dot[i]<<" "<<Q_Mesophyll_dot[i]<<" "<<Input[i]<<" "<<Q_Rm_dot[i]<<std::endl;
 			std::cout<<"Qgri "<<Q_Gtot_dot[i] <<" Q_Exudmax_ "<<Q_Exud_dot[i]<<" Q_Rmmax_ "<<Q_Rmmax_dot[i]<<" Qgrmaxi "<<Q_Gtotmax_dot[i]<<std::endl;
 			std::cout<<"Qmeso "<<Q_Mesophyll[i]<<" "<<Ag[i]<<std::endl;
+			std::cout<<"Delta_JS_ST "<<Delta_JS_ST[i]<<std::endl;
 		}
-		
+
 		//check if error
 		if(((Q_ST[i]<= 0) &&(Q_ST_dot[i] < 0))||((Q_Rm_dot[i]<0)||(Q_Gtot_dot[i]<0)||(Q_Exud_dot[i]<0))){
 			std::cout<<"error, see file errors.txt"<<std::endl;
@@ -258,7 +259,7 @@ void PhloemFlux::C_fluxes(double t, int Nt)
 		}
 
 	}
-		
+
 	++DBG_ITER;
 }
 

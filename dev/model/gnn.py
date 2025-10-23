@@ -134,7 +134,7 @@ class PhloemNNConv(nn.Module):
             return
 
         must_have = ["node_feat", "edge_feat", "edge_index", "edge_org",
-                     "time_node", "time_std_node", "node_fields", "sim_params", "step_params",]
+                     "time_norm", "time_sigma", "node_fields", "sim_params", "step_params",]
 
         for k in must_have:
             if not hasattr(data, k):
@@ -158,12 +158,12 @@ class PhloemNNConv(nn.Module):
         if data.edge_org.max() >= self.cfg.num_org_types:
             raise ValueError(f"Edge organ type index {data.edge_org.max()} >= num_org_types {self.cfg.num_org_types}")
 
-        if data.time_node is None or data.time_std_node is None:
-            raise ValueError("time_node and time_std_node are required for physics-informed loss computation")
-        if data.time_node.ndim != 2 or data.time_node.size(1) != 1:
-            raise ValueError(f"time_node must be [N,1], got {tuple(data.time_node.shape)}")
-        if data.time_std_node.ndim != 2 or data.time_std_node.size(1) != 1:
-            raise ValueError(f"time_std_node must be [N,1], got {tuple(data.time_std_node.shape)}")
+        if data.time_norm is None or data.time_sigma is None:
+            raise ValueError("time_norm and time_sigma are required for physics-informed loss computation")
+        if data.time_norm.ndim != 2 or data.time_norm.size(1) != 1:
+            raise ValueError(f"time_norm must be [N,1], got {tuple(data.time_norm.shape)}")
+        if data.time_sigma.ndim != 2 or data.time_sigma.size(1) != 1:
+            raise ValueError(f"time_sigma must be [N,1], got {tuple(data.time_sigma.shape)}")
 
         self._validated_input = True
         print("Input validation successful: data format matches model configuration.")
@@ -183,7 +183,7 @@ class PhloemNNConv(nn.Module):
     def forward(self, data: Data) -> torch.Tensor:
         """Forward pass of the model.
 
-        IMPORTANT: This method expects data.time_node / data.time_std_node to be present;
+        IMPORTANT: This method expects data.time_norm / data.time_sigma to be present;
         which is essential for physics-informed loss computation. Always use the same
         data object for both model forward pass and physics_residual calculation.
 
@@ -200,21 +200,21 @@ class PhloemNNConv(nn.Module):
         edge_index: torch.Tensor = data.edge_index.to(device)
         edge_feat: torch.Tensor = data.edge_feat.to(device)
         edge_org: torch.Tensor = data.edge_org.to(device)
-        time_node: torch.Tensor = data.time_node.to(device)             # [N,1], standardized time τ
-        time_std_node: torch.Tensor = data.time_std_node.to(device)     # [N,1], σ_t for d/dt conversion
+        time_norm: torch.Tensor = data.time_norm.to(device)       # [N,1], standardized time τ
+        time_sigma: torch.Tensor = data.time_sigma.to(device)   # [N,1], σ_t for d/dt conversion
 
         # Shape checks
-        if time_node.size(0) != node_feat.size(0):
-            raise RuntimeError(f"`time_node` must be [N,1]; got {tuple(time_node.shape)} vs N={node_feat.size(0)}.")
-        if time_std_node.size(0) != node_feat.size(0):
-            raise RuntimeError(f"`time_std_node` must be [N,1]; got {tuple(time_std_node.shape)} vs N={node_feat.size(0)}.")
+        if time_norm.size(0) != node_feat.size(0):
+            raise RuntimeError(f"`time_norm` must be [N,1]; got {tuple(time_norm.shape)} vs N={node_feat.size(0)}.")
+        if time_sigma.size(0) != node_feat.size(0):
+            raise RuntimeError(f"`time_sigma` must be [N,1]; got {tuple(time_sigma.shape)} vs N={node_feat.size(0)}.")
 
         # Keep them on data for physics_residual
-        data.time_node = time_node
-        data.time_std_node = time_std_node
+        data.time_norm = time_norm
+        data.time_sigma = time_sigma
 
         # Concatenate as extra channel
-        node_feat = torch.cat([node_feat, time_node], dim=1)
+        node_feat = torch.cat([node_feat, time_norm], dim=1)
 
         # Optionally standardize continuous edge features (e.g., r_ST) before EdgeNet
         edge_feat = self.edge_scaler.transform(edge_feat)

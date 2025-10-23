@@ -3,6 +3,9 @@
 /dev/simulation/plot/
 /dev/results/
 
+# Byte-compiled / optimized / DLL files
+__pycache__/
+
 # build system clutter
 build-*
 Testing

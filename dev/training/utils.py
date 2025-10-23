@@ -187,6 +187,13 @@ def prepare_model_inputs(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Prepare data for forward pass by handling time and feature standardization.
 
+    This function standardizes node features and graph-level time values using
+    the fitted scalers from the model. It also attaches standardized time tensors
+    (`time_norm`) and corresponding scaling factors (`time_sigma`) to the input
+    data, ensuring consistent handling of temporal information for both training
+    and physics-based computations. During training, a small random time jitter
+    can be added to improve temporal generalization.
+
     Args:
         data: Input batch data
         model: The neural network model with fitted scalers
@@ -209,33 +216,33 @@ def prepare_model_inputs(
     time_scaled = model.time_scaler.transform(data.time.view(-1, 1)).view(-1)
 
     if hasattr(data, "batch") and data.batch is not None:
-        time_node = time_scaled[data.batch]
+        time_norm = time_scaled[data.batch]
     else:
         N = data.num_nodes
-        time_node = time_scaled.expand(N)
-    time_node = time_node.view(-1, 1).to(next(model.parameters()).device)
+        time_norm = time_scaled.expand(N)
 
-    # σ_t per node (for d/dτ -> d/dt)
-    time_std_scalar = model.time_scaler.std.view(-1)[0].to(time_node.device)
-    time_std_node = time_std_scalar.expand_as(time_node).clone()
+    # time_norm: the standardized, differentiable input used by the GNN
+    # time_sigma: the conversion factor σ_t used to scale d/dτ -> d/dt
+    # time_norm and time_sigma are tensors of shape [N, 1]
+    scale = model.time_scaler.std.view(-1)[0].to(time_norm.device)
+    time_norm = time_norm.view(-1, 1).to(next(model.parameters()).device)
+    time_sigma = scale.expand_as(time_norm).clone()
 
     # Add small random jitter to time during training
     if is_training and time_jitter_std > 0:
-        jitter = torch.randn_like(time_node) * time_jitter_std
-        time_node = time_node + jitter
+        jitter = torch.randn_like(time_norm) * time_jitter_std
+        time_norm = time_norm + jitter
 
     # Physics autograd needs time to require grad during training
-    if is_training and not time_node.requires_grad:
-        time_node.requires_grad_(True)
-
-    # Store original features before standardization
-    x_orig = data.node_feat.clone()
+    if is_training and not time_norm.requires_grad:
+        time_norm.requires_grad_(True)
 
     # Attach time information to data
-    data.time_node = time_node if is_training else time_node.detach()
-    data.time_std_node = time_std_node if is_training else time_std_node.detach()
+    data.time_norm = time_norm if is_training else time_norm.detach()
+    data.time_sigma = time_sigma if is_training else time_sigma.detach()
 
-    # Standardize features for the model
+    # Store original features before standardization + standardize features
+    node_feat_orig = data.node_feat.clone()
     data.node_feat = model.feature_scaler.transform(data.node_feat)
 
-    return x_orig, data
+    return node_feat_orig, data

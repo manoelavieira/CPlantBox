@@ -14,6 +14,96 @@ from .config import TrainingConfig, TrainingState, TrainingMetrics, ModelSetup, 
 import training.utils as utils
 import training.logging as logging
 
+def accumulate_epoch_stats(
+    totals,
+    loss: float,
+    mse: float,
+    mae: float,
+    phys: float,
+    last_phys: Optional[PhysicsMetrics]
+):
+    totals["loss"] += float(loss)
+    totals["mse"] += float(mse)
+    totals["mae"] += float(mae)
+    totals["phys"] += float(phys)
+    totals["n_batches"] += 1
+    totals["last_phys_metrics"] = last_phys
+
+
+def run_forward(model: nn.Module, data_norm) -> torch.Tensor:
+    """Forward pass on standardized inputs (tiny wrapper for symmetry)."""
+    return model(data_norm)
+
+
+def _to_physics_metrics(physics_res) -> Optional[PhysicsMetrics]:
+    """Convert dict of physics components to PhysicsMetrics."""
+    if physics_res is not None:
+        return PhysicsMetrics(
+            J_ax=float(physics_res['J_ax']),
+            F_in=float(physics_res['F_in']),
+            F_out=float(physics_res['F_out']),
+            ds_dt=float(physics_res['ds_dt']),
+            dS_dt_from_flux=float(physics_res['dS_dt_from_flux']),
+            dS_dt_from_physics=float(physics_res['dS_dt_from_physics'])
+        )
+    else:
+        return None
+
+
+def compute_physics_residual_step(
+    model: nn.Module,
+    data,
+    node_feat_orig: torch.Tensor,
+    pred: Optional[torch.Tensor],
+    require_time_grad: bool,
+) -> Tuple[torch.Tensor, Optional[PhysicsMetrics]]:
+    """
+    Unified physics residual computation for train/eval.
+
+    - In training, use the already-built graph (pred computed under grad,
+      and data.time_norm requires_grad=True from prepare_model_inputs).
+    - In eval, temporarily enable grad, rebuild a leaf for time_norm, re-forward,
+      then compute and detach the scalar physics residual.
+
+    Returns (phys_res_scalar_detached, PhysicsMetrics|None).
+    """
+    if require_time_grad:
+        # Training path: time_norm came from prepare_model_inputs with requires_grad=True
+
+        # Transform to original space and swap in original node features for physics.
+        pred_orig = model.target_scaler.inv_transform(pred)
+
+        node_feat_std = data.node_feat
+        data.node_feat = node_feat_orig
+
+        # Provide data and pred values in original space to physics residual function
+        phys_res, phys_res_dict = physics_residual(pred_orig, data)
+
+        # Restore standardized features
+        data.node_feat = node_feat_std
+    else:
+        # Eval path: we need to (re)enable grad and (re)forward
+        with torch.enable_grad():
+            # Make τ (standardized time) a fresh leaf that tracks grad
+            time_norm_grad = data.time_norm.detach().clone().requires_grad_(True)
+
+            # Shallow overwrite is fine here; data isn't reused after this step
+            data.time_norm = time_norm_grad
+            data.node_feat = node_feat_orig
+
+            pred_norm = model(data)
+            pred_orig = model.target_scaler.inv_transform(pred_norm)
+            phys_res, phys_res_dict = physics_residual(pred_orig, data)
+
+    # Reduce to scalar; detach ONLY in eval (no grad) path
+    phys_res_scalar = phys_res if phys_res.dim() == 0 else phys_res.mean()
+    if not require_time_grad:
+        phys_res_scalar = phys_res_scalar.detach()
+
+    return phys_res_scalar, _to_physics_metrics(phys_res_dict)
+
+
+
 def compute_loss(loss_mse: torch.Tensor, loss_phys: torch.Tensor, loss_type: LossType, lambda_phys: float = 1.0) -> torch.Tensor:
     """Compute loss based on the specified loss type configuration.
 
@@ -34,52 +124,6 @@ def compute_loss(loss_mse: torch.Tensor, loss_phys: torch.Tensor, loss_type: Los
         return loss_mse + lambda_phys * loss_phys
     else:
         raise ValueError(f"Unknown loss type: {loss_type}")
-
-
-def compute_physics_residual(
-    pred_norm: torch.Tensor,
-    data,
-    model: nn.Module,
-    node_feat_orig: torch.Tensor
-):
-    """Compute physics residual with proper feature handling.
-
-    Args:
-        pred_norm: Model predictions in standardized space
-        data: Batch data with time information
-        model: Neural network model with scalers
-        node_feat_orig: Original (unstandardized) node features
-
-    Returns:
-        tuple: (physics_residual, PhysicsMetrics)
-    """
-    try:
-        # Transform features and predictions back to original space for physics
-        pred_orig = model.target_scaler.inv_transform(pred_norm)
-        node_feat_std_backup = data.node_feat.clone()
-        data.node_feat = node_feat_orig
-
-        # Compute physics residual with optional detailed components
-        phys_res, phys_res_dict = physics_residual(pred_orig, data)
-        phys_res = phys_res if phys_res.dim() == 0 else phys_res.mean()
-
-        # Convert tensor components to PhysicsMetrics
-        phys_res_metrics = PhysicsMetrics(
-            J_ax=float(phys_res_dict['J_ax']),
-            F_in=float(phys_res_dict['F_in']),
-            F_out=float(phys_res_dict['F_out']),
-            ds_dt=float(phys_res_dict['ds_dt']),
-            dS_dt_from_flux=float(phys_res_dict['dS_dt_from_flux']),
-            dS_dt_from_physics=float(phys_res_dict['dS_dt_from_physics'])
-        )
-
-        # Restore standardized features
-        data.node_feat = node_feat_std_backup
-
-        return phys_res, phys_res_metrics
-
-    except Exception as e:
-        raise RuntimeError(f"Physics computation failed: {e}")
 
 
 def compute_loss_and_metrics(
@@ -150,12 +194,7 @@ def train_epoch(
         RuntimeError: If no training samples are processed
     """
     model.train()
-    total_loss = 0.0
-    total_mae = 0.0
-    total_mse = 0.0
-    total_phys = 0.0
-    n_batches = 0
-    last_phys_metrics = None  # Store physics metrics from last batch for logging
+    totals = {"loss": 0.0, "mse": 0.0, "mae": 0.0, "phys": 0.0, "n_batches": 0, "last_phys_metrics": None}
 
     for batch_idx, data in enumerate(loader):
         optimizer.zero_grad(set_to_none=True)
@@ -169,15 +208,19 @@ def train_epoch(
         )
 
         # Forward pass with standardized data
-        pred_norm = model(data_norm)
+        pred_norm = run_forward(model, data_norm)
 
-        # Compute physics residual safely
-        phys_res, phys_res_metrics = compute_physics_residual(
-            pred_norm,
-            data_norm,
-            model,
-            node_feat_orig
-        )
+        # Compute physics residual
+        if loss_type == LossType.DATA_ONLY:
+            phys_res, phys_res_metrics = torch.tensor(0.0, device=pred_norm.device), None
+        else:
+            phys_res, phys_res_metrics = compute_physics_residual_step(
+                model=model,
+                data=data_norm,
+                node_feat_orig=node_feat_orig,
+                pred=pred_norm,
+                require_time_grad=True,
+            )
 
         # Compute loss and metrics
         loss, mse, mae = compute_loss_and_metrics(
@@ -189,7 +232,6 @@ def train_epoch(
             lambda_phys,
         )
 
-        # Backward pass
         loss.backward()
 
         # Log gradient norms (first batch only to avoid clutter)
@@ -202,12 +244,7 @@ def train_epoch(
 
         # Accumulate metrics for epoch averaging
         with torch.no_grad():
-            total_loss += float(loss)
-            total_mse += float(mse)
-            total_mae += float(mae)
-            total_phys += float(phys_res)
-            n_batches += 1
-            last_phys_metrics = phys_res_metrics  # keep last batch's physics for representative logging
+            accumulate_epoch_stats(totals, loss, mse, mae, phys_res, phys_res_metrics)
 
             # Log batch-level metrics (every 10 batches to avoid clutter)
             if writer is not None and batch_idx % 10 == 0:
@@ -219,16 +256,13 @@ def train_epoch(
                     logging.log_physics_components(writer, epoch, batch_idx, len(loader),
                                                    phys_res_metrics, phase='train')
 
-    if n_batches == 0:
+    if totals["n_batches"] == 0:
         raise RuntimeError("No training samples this epoch.")
-
-    # Return epoch averages
-    avg_loss = total_loss / n_batches
-    avg_mae = total_mae / n_batches
-    avg_mse = total_mse / n_batches
-    avg_phys = total_phys / n_batches
-
-    return (avg_loss, avg_mae, avg_mse, avg_phys, last_phys_metrics)
+    return (totals["loss"] / totals["n_batches"],
+            totals["mae"] / totals["n_batches"],
+            totals["mse"] / totals["n_batches"],
+            totals["phys"] / totals["n_batches"],
+            totals["last_phys_metrics"])
 
 
 def train_model(
@@ -264,7 +298,7 @@ def train_model(
         training_state.current_epoch = epoch
 
         # Training
-        tr_loss, tr_mae, tr_mse, tr_physics, tr_physics_details = train_epoch(
+        tr_loss, tr_mae, tr_mse, tr_physics, tr_phys_metrics = train_epoch(
             model_setup.model,
             train_loader,
             optimizer,
@@ -277,7 +311,7 @@ def train_model(
         )
 
         # Validation
-        val_loss, val_mse, val_mae, val_physics, val_physics_details = eval_model(
+        val_loss, val_mse, val_mae, val_phys, val_phys_metrics = eval_model(
             model_setup.model,
             val_loader,
             writer,
@@ -292,20 +326,20 @@ def train_model(
         current_lr = optimizer.param_groups[0]['lr']
 
         # Create metrics objects
-        train_metrics = TrainingMetrics(tr_loss, tr_mse, tr_mae, tr_physics, tr_physics_details)
-        val_metrics = TrainingMetrics(val_loss, val_mse, val_mae, val_physics, val_physics_details)
+        tr_metrics = TrainingMetrics(tr_loss, tr_mse, tr_mae, tr_physics, tr_phys_metrics)
+        val_metrics = TrainingMetrics(val_loss, val_mse, val_mae, val_phys, val_phys_metrics)
 
         # Log metrics to TensorBoard
-        logging.log_epoch_metrics(writer, epoch, train_metrics, val_metrics, current_lr)
+        logging.log_epoch_metrics(writer, epoch, tr_metrics, val_metrics, current_lr)
 
         # Console logging
         base_log = (f"Epoch {epoch:03d} | "
                    f"train_tot={tr_loss:.3e} train_mse={tr_mse:.4f} train_phys={tr_physics:.3e} | "
-                   f"val_tot={val_loss:.3e} val_mse={val_mse:.4f} val_phys={val_physics:.3e}")
+                   f"val_tot={val_loss:.3e} val_mse={val_mse:.4f} val_phys={val_phys:.3e}")
 
         # Add physics details to console output if available
-        if tr_physics_details is not None:
-            physics_log = f" | {tr_physics_details}"
+        if tr_phys_metrics is not None:
+            physics_log = f" | {tr_phys_metrics}"
             print(base_log + physics_log)
         else:
             print(base_log)
@@ -362,7 +396,7 @@ def test_model(
     utils.load_best_model(model_setup, config.model_save_path, model_setup.device)
 
     # Final evaluation on test set
-    test_loss, test_mse, test_mae, test_physics, test_physics_details = eval_model(
+    test_loss, test_mse, test_mae, test_phys, test_phys_metrics = eval_model(
         model_setup.model,
         test_loader,
         writer,
@@ -376,24 +410,24 @@ def test_model(
     writer.add_scalar('Final/Test_Loss', test_loss, training_state.best_epoch)
     writer.add_scalar('Final/Test_MSE', test_mse, training_state.best_epoch)
     writer.add_scalar('Final/Test_MAE', test_mae, training_state.best_epoch)
-    writer.add_scalar('Final/Test_Physics', test_physics, training_state.best_epoch)
+    writer.add_scalar('Final/Test_Physics', test_phys, training_state.best_epoch)
 
     # Create final summary
     final_summary = (f"Final Results:\n"
                     f"Test Loss: {test_loss:.4f}\n"
                     f"Test MSE: {test_mse:.4f}\n"
                     f"Test MAE: {test_mae:.4f}\n"
-                    f"Test Physics: {test_physics:.4f}\n"
+                    f"Test Physics: {test_phys:.4f}\n"
                     f"Best epoch: {training_state.best_epoch}")
 
-    if test_physics_details is not None:
-        final_summary += f"\nTest Physics Details: {test_physics_details}"
+    if test_phys_metrics is not None:
+        final_summary += f"\nTest Physics Details: {test_phys_metrics}"
 
     writer.add_text('Final/Results', final_summary)
 
-    print(f"\nFinal test metrics - Loss: {test_loss:.3e}, MSE: {test_mse:.4f}, Physics: {test_physics:.3e}")
-    if test_physics_details is not None:
-        print(f"Physics details: {test_physics_details}")
+    print(f"\nFinal test metrics - Loss: {test_loss:.3e}, MSE: {test_mse:.4f}, Physics: {test_phys:.3e}")
+    if test_phys_metrics is not None:
+        print(f"Physics details: {test_phys_metrics}")
 
 
 def eval_model(
@@ -420,16 +454,11 @@ def eval_model(
         Tuple of (average_loss, average_mse, average_mae, average_physics, last_physics_metrics)
     """
     model.eval()
-    total_loss = 0.0
-    total_mse = 0.0
-    total_mae = 0.0
-    total_phys = 0.0
-    n_batches = 0
-    last_phys_metrics = None  # Store physics metrics from last batch for logging
+    totals = {"loss": 0.0, "mse": 0.0, "mae": 0.0, "phys": 0.0, "n_batches": 0, "last_phys_metrics": None}
 
     with torch.no_grad():
         for batch_idx, data in enumerate(loader):
-            # Prepare data for forward pass (no training mode, no jitter)
+            # Prepare data for model: add time info, jitter (if training), and normalize features
             node_feat_orig, data_norm = utils.prepare_model_inputs(
                 data,
                 model,
@@ -438,30 +467,18 @@ def eval_model(
             )
 
             # Forward pass with prepared data
-            pred_norm = model(data_norm)
+            pred_norm = run_forward(model, data_norm)
 
-            # Compute physics residual safely with gradient context for evaluation
-            phys_res = torch.tensor(0.0, device=pred_norm.device)
-            phys_res_metrics = None
-            with torch.enable_grad():
-                time_norm_grad = data_norm.time_norm.clone().requires_grad_(True)
-                data_norm_with_grad = data_norm
-                data_norm_with_grad.time_norm = time_norm_grad
-                pred_for_phys = model(data_norm_with_grad)
-                pred_orig_for_physics = model.target_scaler.inv_transform(pred_for_phys)
-                data_norm_with_grad.node_feat = node_feat_orig
-                phys_res, phys_res_metrics = physics_residual(pred_orig_for_physics, data_norm_with_grad)
-                phys_res = phys_res if phys_res.dim() == 0 else phys_res.mean()
-                phys_res = phys_res.detach()
-
-                # Convert to PhysicsMetrics for logging
-                phys_res_metrics = PhysicsMetrics(
-                    J_ax=float(phys_res_metrics['J_ax']),
-                    F_in=float(phys_res_metrics['F_in']),
-                    F_out=float(phys_res_metrics['F_out']),
-                    ds_dt=float(phys_res_metrics['ds_dt']),
-                    dS_dt_from_flux=float(phys_res_metrics['dS_dt_from_flux']),
-                    dS_dt_from_physics=float(phys_res_metrics['dS_dt_from_physics'])
+            # Compute physics residual (eval path re-enables grad internally)
+            if loss_type == LossType.DATA_ONLY:
+                phys_res, phys_res_metrics = torch.tensor(0.0, device=pred_norm.device), None
+            else:
+                phys_res, phys_res_metrics = compute_physics_residual_step(
+                    model=model,
+                    data=data_norm,
+                    node_feat_orig=node_feat_orig,
+                    pred=None,
+                    require_time_grad=False,
                 )
 
             # Compute loss and metrics using helper function
@@ -475,12 +492,7 @@ def eval_model(
             )
 
             # Accumulate metrics
-            total_loss += float(loss)
-            total_mse += float(mse)
-            total_mae += float(mae)
-            total_phys += float(phys_res)
-            n_batches += 1
-            last_phys_metrics = phys_res_metrics  # Keep last batch's physics for representative logging
+            accumulate_epoch_stats(totals, loss, mse, mae, phys_res, phys_res_metrics)
 
             # Log distribution of predictions and targets (first batch only, every 5 epochs)
             if writer is not None and batch_idx == 0 and epoch % 5 == 0:
@@ -495,17 +507,16 @@ def eval_model(
                 # Log detailed physics components if available
                 if phys_res_metrics is not None:
                     logging.log_physics_components(writer, epoch, 0, 1,
-                                                 phys_res_metrics, phase=phase)
-
-    # Compute averages per batch
-    denom = n_batches if n_batches > 0 else 1
-    avg_loss = total_loss / denom
-    avg_mse = total_mse / denom
-    avg_mae = total_mae / denom
-    avg_phys = total_phys / denom
+                                                   phys_res_metrics, phase=phase)
 
     # Clear GPU memory after evaluation
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    return avg_loss, avg_mse, avg_mae, avg_phys, last_phys_metrics
+    # Compute averages per batch
+    denom = max(1, totals["n_batches"])
+    return (totals["loss"] / denom,
+            totals["mse"] / denom,
+            totals["mae"] / denom,
+            totals["phys"] / denom,
+            totals["last_phys_metrics"])

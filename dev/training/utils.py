@@ -183,7 +183,7 @@ def prepare_model_inputs(
     data,
     model: nn.Module,
     is_training: bool = False,
-    time_jitter_std: float = 0.01
+    time_jitter_std: float = 0.0
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Prepare data for forward pass by handling time and feature standardization.
 

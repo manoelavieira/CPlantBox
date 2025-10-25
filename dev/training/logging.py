@@ -40,10 +40,10 @@ def print_model_summary(model: nn.Module, writer: Optional[SummaryWriter] = None
 
     # Log model parameters to TensorBoard
     if writer is not None:
-        writer.add_text('Model/Architecture',
-                       f"Total: {total_params:,}, Trainable: {trainable_params:,}")
-        writer.add_scalar('Model/Total_Parameters', total_params, 0)
-        writer.add_scalar('Model/Trainable_Parameters', trainable_params, 0)
+        writer.add_text('model/architecture',
+                       f"total: {total_params:,}, trainable: {trainable_params:,}")
+        writer.add_scalar('model/total_parameters', total_params, 0)
+        writer.add_scalar('model/trainable_parameters', trainable_params, 0)
 
 
 def print_experiment_config(config: TrainingConfig):
@@ -72,7 +72,7 @@ def log_physics_components(
         phase: Phase name ('train', 'val', 'test')
     """
     step = epoch * loader_len + batch_idx
-    prefix = f'Physics_{phase.capitalize()}' if phase != 'train' else 'Physics'
+    prefix = f'physics_{phase}' if phase != 'train' else 'physics'
 
     writer.add_scalar(f'{prefix}/J_ax', physics_metrics.J_ax, step)
     writer.add_scalar(f'{prefix}/F_in', physics_metrics.F_in, step)
@@ -82,7 +82,7 @@ def log_physics_components(
     writer.add_scalar(f'{prefix}/dS_dt_from_physics', physics_metrics.dS_dt_from_physics, step)
 
     # Also log as a scalar group for easy comparison
-    writer.add_scalars(f'{prefix}_Components', {
+    writer.add_scalars(f'{prefix}_components', {
         'J_ax': physics_metrics.J_ax,
         'F_in': physics_metrics.F_in,
         'F_out': physics_metrics.F_out,
@@ -108,25 +108,25 @@ def log_epoch_metrics(
         current_lr: Current learning rate
     """
     # Log individual metrics
-    writer.add_scalar('Loss/Train_Total', train_metrics.loss, epoch)
-    writer.add_scalar('Loss/Train_MSE', train_metrics.mse, epoch)
-    writer.add_scalar('Loss/Train_Physics', train_metrics.physics, epoch)
+    writer.add_scalar('loss/train_total', train_metrics.loss, epoch)
+    writer.add_scalar('loss/train_mse', train_metrics.mse, epoch)
+    writer.add_scalar('loss/train_physics', train_metrics.physics, epoch)
 
-    writer.add_scalar('Metrics/Val_Total', val_metrics.loss, epoch)
-    writer.add_scalar('Metrics/Val_MSE', val_metrics.mse, epoch)
-    writer.add_scalar('Metrics/Val_Physics', val_metrics.physics, epoch)
+    writer.add_scalar('metrics/val_total', val_metrics.loss, epoch)
+    writer.add_scalar('metrics/val_mse', val_metrics.mse, epoch)
+    writer.add_scalar('metrics/val_physics', val_metrics.physics, epoch)
 
-    writer.add_scalar('Learning_Rate', current_lr, epoch)
+    writer.add_scalar('learning_rate', current_lr, epoch)
 
-    writer.add_scalars('Loss_Comparison', {
-        'Train_Total': train_metrics.loss,
-        'Val_Total': val_metrics.loss
+    writer.add_scalars('loss/comparison', {
+        'train_total': train_metrics.loss,
+        'val_total': val_metrics.loss
     }, epoch)
 
-    writer.add_scalars('Loss_Components', {
-        'MSE': train_metrics.mse,
-        'Physics': train_metrics.physics,
-        'Total': train_metrics.loss
+    writer.add_scalars('loss/components', {
+        'mse': train_metrics.mse,
+        'physics': train_metrics.physics,
+        'total': train_metrics.loss
     }, epoch)
 
     # Log detailed physics components if available
@@ -150,11 +150,11 @@ def log_gradient_norms(
         if param.grad is not None:
             param_grad_norm = param.grad.data.norm(2).item()
             total_grad_norm += param_grad_norm ** 2
-            writer.add_scalar(f'Gradients/{name}', param_grad_norm,
+            writer.add_scalar(f'gradients/{name}', param_grad_norm,
                             epoch * loader_len + batch_idx)
 
     total_grad_norm = total_grad_norm ** 0.5
-    writer.add_scalar('Gradients/total_norm', total_grad_norm,
+    writer.add_scalar('gradients/total_norm', total_grad_norm,
                     epoch * loader_len + batch_idx)
 
 
@@ -170,10 +170,10 @@ def log_batch_metrics(
 ) -> None:
     """Log batch-level metrics to TensorBoard."""
     step = epoch * loader_len + batch_idx
-    writer.add_scalar('Training/Batch_Loss', float(loss), step)
-    writer.add_scalar('Training/Batch_MSE', float(mse), step)
-    writer.add_scalar('Training/Batch_MAE', float(mae), step)
-    writer.add_scalar('Training/Batch_Physics', float(physics), step)
+    writer.add_scalar('training/batch_loss', float(loss), step)
+    writer.add_scalar('training/batch_mse', float(mse), step)
+    writer.add_scalar('training/batch_mae', float(mae), step)
+    writer.add_scalar('training/batch_physics', float(physics), step)
 
 
 def log_evaluation_histograms(
@@ -184,9 +184,9 @@ def log_evaluation_histograms(
     targets: torch.Tensor
 ) -> None:
     """Log distribution histograms for evaluation metrics."""
-    writer.add_histogram(f'{phase}/Predictions', predictions.cpu(), epoch)
-    writer.add_histogram(f'{phase}/Targets', targets.cpu(), epoch)
-    writer.add_histogram(f'{phase}/Residuals', (predictions - targets).cpu(), epoch)
+    writer.add_histogram(f'{phase}/predictions', predictions.cpu(), epoch)
+    writer.add_histogram(f'{phase}/targets', targets.cpu(), epoch)
+    writer.add_histogram(f'{phase}/residuals', (predictions - targets).cpu(), epoch)
 
 
 def log_hyperparameters(writer: SummaryWriter, config: TrainingConfig, model_cfg: ModelConfig):

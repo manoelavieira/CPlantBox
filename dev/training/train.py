@@ -222,11 +222,14 @@ def train_epoch(
                 require_time_grad=True,
             )
 
+        # Normalize physics residual
+        phys_res_norm, phys_scale, phys_res_orig = utils.scale_physics_to_std_space(model, phys_res)
+
         # Compute loss and metrics
         loss, mse, mae = compute_loss_and_metrics(
             pred_norm,
             data.y,
-            phys_res,
+            phys_res_norm,
             model,
             loss_type,
             lambda_phys,
@@ -244,12 +247,21 @@ def train_epoch(
 
         # Accumulate metrics for epoch averaging
         with torch.no_grad():
-            accumulate_epoch_stats(totals, loss, mse, mae, phys_res, phys_res_metrics)
+            # Accumulate the standardized physics (the one entering the loss)
+            accumulate_epoch_stats(totals, loss, mse, mae, phys_res_norm, phys_res_metrics)
+
+            # Optional: log both versions + scale
+            if writer is not None and batch_idx % 10 == 0:
+                step = epoch * len(loader) + batch_idx
+                writer.add_scalar('training/batch_physics_norm',  float(phys_res_norm), step)
+                writer.add_scalar('training/batch_physics_orig', float(phys_res_orig), step)
+            if writer is not None and batch_idx == 0:
+                writer.add_scalar('scales/phys_scale', float(phys_scale), epoch)
 
             # Log batch-level metrics (every 10 batches to avoid clutter)
             if writer is not None and batch_idx % 10 == 0:
                 logging.log_batch_metrics(writer, epoch, batch_idx, len(loader),
-                                          loss, mse, mae, phys_res)
+                                          loss, mse, mae, phys_res_norm)
 
                 # Log detailed physics components if available
                 if phys_res_metrics is not None:
@@ -347,9 +359,9 @@ def train_model(
         # Model saving and early stopping (use combined validation loss)
         if training_state.update_best(val_loss, epoch):
             # Log best model achievement
-            writer.add_scalar('Best_Model/Epoch', epoch, epoch)
-            writer.add_scalar('Best_Model/Val_Loss', val_loss, epoch)
-            writer.add_scalar('Best_Model/Val_MSE', val_mse, epoch)
+            writer.add_scalar('best_model/epoch', epoch, epoch)
+            writer.add_scalar('best_model/val_loss', val_loss, epoch)
+            writer.add_scalar('best_model/val_mse', val_mse, epoch)
 
             # Save model checkpoint
             utils.save_checkpoint(
@@ -363,14 +375,14 @@ def train_model(
                       f"at epoch {training_state.best_epoch}")
 
                 # Log early stopping
-                writer.add_text('Training/Early_Stopping',
+                writer.add_text('training/early_stopping',
                                 f"Stopped at epoch {epoch}, best at {training_state.best_epoch}")
                 break
 
     print("\nTraining completed!")
 
     # Log final training summary
-    writer.add_text('Training/Summary',
+    writer.add_text('training/summary',
                     f"Training completed. Best validation loss: {training_state.best_val_loss:.4f} at epoch {training_state.best_epoch}")
 
     return training_state
@@ -407,10 +419,10 @@ def test_model(
     )
 
     # Log final test metrics
-    writer.add_scalar('Final/Test_Loss', test_loss, training_state.best_epoch)
-    writer.add_scalar('Final/Test_MSE', test_mse, training_state.best_epoch)
-    writer.add_scalar('Final/Test_MAE', test_mae, training_state.best_epoch)
-    writer.add_scalar('Final/Test_Physics', test_phys, training_state.best_epoch)
+    writer.add_scalar('final/test_loss', test_loss, training_state.best_epoch)
+    writer.add_scalar('final/test_mse', test_mse, training_state.best_epoch)
+    writer.add_scalar('final/test_mae', test_mae, training_state.best_epoch)
+    writer.add_scalar('final/test_physics', test_phys, training_state.best_epoch)
 
     # Create final summary
     final_summary = (f"Final Results:\n"
@@ -423,7 +435,7 @@ def test_model(
     if test_phys_metrics is not None:
         final_summary += f"\nTest Physics Details: {test_phys_metrics}"
 
-    writer.add_text('Final/Results', final_summary)
+    writer.add_text('final/results', final_summary)
 
     print(f"\nFinal test metrics - Loss: {test_loss:.3e}, MSE: {test_mse:.4f}, Physics: {test_phys:.3e}")
     if test_phys_metrics is not None:
@@ -481,18 +493,21 @@ def eval_model(
                     require_time_grad=False,
                 )
 
+            # Normalize physics with the same helper used in training
+            phys_res_norm, phys_scale, phys_res_orig = utils.scale_physics_to_std_space(model, phys_res)
+
             # Compute loss and metrics using helper function
             loss, mse, mae = compute_loss_and_metrics(
                 pred_norm,
                 data.y,
-                phys_res,
+                phys_res_norm,
                 model,
                 loss_type,
                 lambda_phys,
             )
 
             # Accumulate metrics
-            accumulate_epoch_stats(totals, loss, mse, mae, phys_res, phys_res_metrics)
+            accumulate_epoch_stats(totals, loss, mse, mae, phys_res_norm, phys_res_metrics)
 
             # Log distribution of predictions and targets (first batch only, every 5 epochs)
             if writer is not None and batch_idx == 0 and epoch % 5 == 0:
@@ -500,9 +515,10 @@ def eval_model(
                 logging.log_evaluation_histograms(writer, phase, epoch, pred_original, data.y)
 
                 # Log individual loss components for debugging
-                writer.add_scalar(f'{phase}/MSE', float(mse), epoch)
-                writer.add_scalar(f'{phase}/Physics', float(phys_res), epoch)
-                writer.add_scalar(f'{phase}/Loss', float(loss), epoch)
+                writer.add_scalar(f'{phase}/mse', float(mse), epoch)
+                writer.add_scalar(f'{phase}/physics_norm', float(phys_res_norm), epoch)
+                writer.add_scalar(f'{phase}/physics_orig', float(phys_res_orig), epoch)
+                writer.add_scalar(f'{phase}/loss', float(loss), epoch)
 
                 # Log detailed physics components if available
                 if phys_res_metrics is not None:

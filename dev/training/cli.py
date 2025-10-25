@@ -31,8 +31,8 @@ def parse_arguments() -> TrainingConfig:
                        help='Random seed for reproducibility')
     parser.add_argument('--lambda-phys', type=float, default=1.0,
                         help='Weight for physics loss term (only used with combined loss)')
-    parser.add_argument('--loss-type', type=str, default='physics_only',
-                        choices=['data_only', 'physics_only', 'combined'],
+    parser.add_argument('--loss-type', type=str, default='physics',
+                        choices=['data', 'physics', 'combined'],
                         help='Type of loss to use: data_only (MSE), physics_only, or combined (MSE + lambda_phys * physics)')
     parser.add_argument('--time-jitter-std', type=float, default=0.01,
                         help='Standard deviation of time jitter applied during training')

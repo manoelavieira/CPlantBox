@@ -10,9 +10,9 @@ import torch
 
 class LossType(Enum):
     """Enumeration for different loss configurations."""
-    DATA_ONLY = "data_only"         # MSE only
-    PHYSICS_ONLY = "physics_only"   # Physics term only
-    COMBINED = "combined"           # Both MSE and physics terms
+    DATA_ONLY = "data"         # MSE only
+    PHYSICS_ONLY = "physics"   # Physics term only
+    COMBINED = "combined"      # Both MSE and physics terms
 
 
 @dataclass
@@ -20,7 +20,7 @@ class TrainingConfig:
     """Configuration for training parameters."""
     # Data parameters
     data_path: str
-    batch_size: int = 8
+    batch_size: int = 2
     train_ratio: float = 0.8
     val_ratio: float = 0.1
 

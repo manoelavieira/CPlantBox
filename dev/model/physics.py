@@ -197,7 +197,7 @@ def compute_time_derivative(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
     try:
         ds_dt = torch.autograd.grad(
             y_pred.sum(),        # sum to get scalar for gradient computation
-            data.time_norm,       # [N, 1] per-node time features
+            data.time_norm,      # [N, 1] per-node time features
             create_graph=True,   # needed for second backward pass
             retain_graph=True,   # keep graph for subsequent loss computation
             allow_unused=False   # ERROR if time_norm is not connected

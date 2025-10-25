@@ -246,3 +246,33 @@ def prepare_model_inputs(
     data.node_feat = model.feature_scaler.transform(data.node_feat)
 
     return node_feat_orig, data
+
+
+def physics_scale_to_std_space(model, device=None):
+    """
+    Returns the scalar factor that maps an original-space squared residual r^2 (units y^2 / t^2)
+    to standardized (y_std, tau) space:
+        r_std^2 = ((sigma_t / sigma_y) ** 2) * r^2
+    """
+    # model.target_scaler.std and model.time_scaler.std are assumed 1-D tensors
+    sigma_y = model.target_scaler.std.view(-1)[0]
+    sigma_t = model.time_scaler.std.view(-1)[0]
+    scale = (sigma_t / sigma_y) ** 2
+
+    if device is not None:
+        scale = scale.to(device)
+
+    return scale
+
+
+def scale_physics_to_std_space(model, phys_res_orig):
+    """
+    Given a scalar physics residual (mean squared residual) in original units,
+    return (phys_res_std, phys_scale, phys_res_orig) where:
+      phys_res_std = phys_res_orig * ((sigma_t / sigma_y) ** 2)
+      phys_scale   = ((sigma_t / sigma_y) ** 2)
+    """
+    phys_scale = physics_scale_to_std_space(model, device=phys_res_orig.device)
+    phys_res_norm = phys_res_orig * phys_scale
+
+    return phys_res_norm, phys_scale, phys_res_orig

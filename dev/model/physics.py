@@ -8,7 +8,7 @@ from torch_geometric.data import Data
 from . import utils
 from . import config
 
-def compute_axial_flux(y_pred: torch.Tensor, data: Data, device: torch.device) -> torch.Tensor:
+def compute_axial_flux_backup(y_pred: torch.Tensor, data: Data, device: torch.device) -> torch.Tensor:
     """Compute axial sucrose flux J_ax along edges.
 
     Args:
@@ -65,6 +65,95 @@ def compute_axial_flux(y_pred: torch.Tensor, data: Data, device: torch.device) -
 
     # Sugar flux on edge: J_ax = (JW_ST / r_ST) * C_upstream
     J_ax = (JW_ST / r_ST) * C_upstream
+
+    return J_ax
+
+
+def compute_axial_flux(y_pred: torch.Tensor, data: Data, device: torch.device) -> torch.Tensor:
+    """Compute axial sucrose flux J_ax along edges.
+
+    This implementation follows the C++ PiafMunch algorithm (external/PiafMunch/solve.cpp):
+    1. Compute osmotic pressure P_ST = C_ST * RT for each node
+    2. Compute water flux JW_ST based on pressure gradients
+    3. Select upstream concentration based on flow direction
+    4. Compute sugar flux JS_ST = JW_ST * C_upstream
+
+    Args:
+        y_pred: Predicted sucrose content [N, 1]
+        data: Graph data containing topology and features
+        device: Target device for computations
+
+    Returns:
+        torch.Tensor: Axial flux per edge [E]
+    """
+    # Get edge topology and features
+    edge_index = data.edge_index.to(device)  # [2, E]
+
+    # Handle empty graph case
+    if edge_index.size(1) == 0:
+        return torch.zeros(0, device=device, dtype=y_pred.dtype)
+
+    src, dst = edge_index[0], edge_index[1]
+    r_ST = data.edge_feat.to(device).squeeze(-1)  # [E, 1] -> [E]
+
+    # Node features already in original space
+    node_feat = data.node_feat.to(device)
+    psi = node_feat[:, 0]  # hydraulic potential
+    vol_ST = node_feat[:, 1]  # sieve-tube volume per node
+    Temp = node_feat[:, 6]  # temperature [°C]
+
+    # ---- Step 1: Compute concentrations and osmotic pressures
+    C_ST = y_pred.squeeze(-1) / vol_ST
+
+    # Osmotic pressure P_ST = C_ST * RT
+    # In C++, TairK_phloem is global, but in batched case we need per-graph temperature
+    batch_vec = getattr(data, "batch", None)
+    RT = utils.compute_RT_per_node(
+        Temp=Temp,
+        batch_vec=batch_vec,
+        R=config.R,
+        device=device,
+        dtype=y_pred.dtype,
+    )
+    P_ST_osmotic = C_ST * RT
+
+    # Convert hydraulic potential psi to hPa and add to osmotic pressure
+    psi = psi * config.cmH2O_to_hPa
+    P_ST = P_ST_osmotic + psi
+
+    # ---- Step 2: Compute water flux from pressure gradients
+    P_i = P_ST[src]
+    P_j = P_ST[dst]
+
+    JW_ST = (P_j - P_i) / r_ST
+
+    # ---- Step 3: Select upstream concentration based on flow direction
+    # With dP = P_j - P_i, positive JW_ST means P_j > P_i, so flow is j -> i
+    # For sugar flux, we want the upstream (source) concentration
+    # If flow is j -> i, then upstream is j (dst), downstream is i (src)
+    C_i = C_ST[src]
+    C_j = C_ST[dst]
+
+    C_upstream = torch.where(JW_ST > 0, C_j, C_i)
+    C_upstream = torch.clamp(C_upstream, min=0.0)
+
+    # ---- Step 4: Sugar flux JS_ST = JW_ST * C_upstream
+    J_ax = JW_ST * C_upstream
+
+    #  DEBUG: Print intermediate values to compare with C++
+    print(f"DEBUG - psi:")
+    for i, val in enumerate(psi.detach().cpu().numpy()[:5]):
+        print(f"DEBUG - psi_converted[{i}]: {val:.12f}")
+    print(f"DEBUG - P_ST:")
+    for i, val in enumerate(P_ST.detach().cpu().numpy()[:5]):
+        print(f"DEBUG - P_ST[{i}]: {val:.12f}")
+    print(f"DEBUG - First few C_ST: {C_ST[:5]}")
+    print(f"DEBUG - C_ST samples:")
+    print(f"DEBUG - First few JW_ST: {JW_ST[:5]}")
+    print(f"DEBUG - First few JW_ST:")
+    for val in JW_ST.detach().cpu().numpy()[:10]:
+        print(f"DEBUG - JW_ST value: {val:.12f}")
+    print(f"DEBUG - First few C_upstream: {C_upstream[:5]}")
 
     return J_ax
 

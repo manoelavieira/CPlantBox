@@ -110,3 +110,41 @@ def extract_node_fields(data, device):
         fields[f"{name}"] = node_fields[:, i]
 
     return fields
+
+
+def compute_RT_per_node(
+    Temp: torch.Tensor,
+    batch_vec: Optional[torch.Tensor],
+    R: float,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """
+    Compute per-node RT given per-node temperature (°C).
+    - If batched, uses the temperature of the first node of each graph,
+      then broadcasts within that graph (mirrors C++ global-per-graph T behavior).
+    - If single-graph, uses Temp[0] and broadcasts to all nodes.
+
+    Returns:
+        torch.Tensor: RT per node [N], on `device` and in `dtype`.
+    """
+    Temp = Temp.to(device=device, dtype=dtype)
+
+    if batch_vec is not None:
+        # Batched case: use temperature from first node of each graph
+        batch_vec = batch_vec.to(device)
+        unique_graphs = torch.unique(batch_vec)
+        first_node_per_graph = torch.zeros(len(unique_graphs), dtype=torch.long, device=device)
+
+        for i, graph_id in enumerate(unique_graphs):
+            first_node_per_graph[i] = torch.where(batch_vec == graph_id)[0][0]
+
+        # Get temperature for each graph and broadcast to all nodes in that graph
+        temp_per_graph = Temp[first_node_per_graph]
+        RT_per_graph = R * (temp_per_graph + 273.15)
+        RT = RT_per_graph[batch_vec]
+    else:
+        RT_scalar = R * (Temp[0] + 273.15)
+        RT = RT_scalar.expand_as(Temp)
+
+    return RT

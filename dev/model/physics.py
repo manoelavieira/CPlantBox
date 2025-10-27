@@ -6,9 +6,7 @@ from torch_scatter import scatter_mean
 from torch_geometric.data import Data
 
 from . import utils
-
-# Global constants
-R = 83.14  # universal gas constant
+from . import config
 
 def compute_axial_flux(y_pred: torch.Tensor, data: Data, device: torch.device) -> torch.Tensor:
     """Compute axial sucrose flux J_ax along edges.
@@ -36,35 +34,37 @@ def compute_axial_flux(y_pred: torch.Tensor, data: Data, device: torch.device) -
 
     # Node features already in original space
     node_feat = data.node_feat.to(device)
-    psi = node_feat[:, 0]
-    Temp = node_feat[:, 6]
+    psi = node_feat[:, 0]  # hydraulic potential
+    vol_ST = node_feat[:, 1]  # sieve-tube volume per node
+    Temp = node_feat[:, 6]  # temperature [°C]
 
     # Sucrose at endpoints
     s_i = y_pred[src, 0]
     s_j = y_pred[dst, 0]
 
     # Water potential differences
+    psi = psi * config.cmH2O_to_hPa  # convert to hPa
     psi_i = psi[src]
     psi_j = psi[dst]
 
-    # Jw < 0: psi_i > psi_j (physical flow src -> dst (arrow direction))
-    # Jw > 0: psi_j > psi_i (physical flow dst -> src (arrow direction))
-    Jw = psi_j - psi_i
+    # Concentrations at edge ends (mmol / ml) = amount / volume
+    vol_i = vol_ST[src]
+    vol_j = vol_ST[dst]
+    C_i = s_i / vol_i
+    C_j = s_j / vol_j
 
-    # (Optional / debug) Incidence matrices aligned by physics; not used in residual here
-    # delta2_physics = create_delta2(data, psi)
+    # Total pressure drop that drives water: ΔP_tot = RT * (C_j - C_i) + (psi_j - psi_i)
+    # Use per-edge RT based on temperature at src node
+    RT_i = config.R * (Temp[src] + 273.15)
+    JW_ST = RT_i * (C_j - C_i) + (psi_j - psi_i)
 
-    # Use the upstream node’s sucrose for the advective term:
-    # If Jw < 0 (src -> dst), upstream is src, thus pick s_i
-    # If Jw > 0 (dst -> src), upstream is dst, thus pick s_j
-    s_ij = torch.where(Jw < 0, s_i, s_j)
+    # Choose *upstream concentration* by sign of JW_ST
+    # JW_ST > 0 -> flow dst -> src (opposite edge direction) -> upstream is dst -> use C_j
+    # JW_ST < 0 -> flow src -> dst (edge direction) -> upstream is src -> use C_i
+    C_upstream = torch.where(JW_ST > 0, C_j, C_i)
 
-    # Sign choice below makes J_ax > 0 correspond to flow src -> dst (arrow direction)
-    # Jax > 0: Flow along edge direction (src → dst)
-    # Jax < 0: Flow opposite to edge direction (dst → src)
-    # If psi_i > psi_j (and/or s_i > s_j), driving > 0, giving J_ax > 0 (src -> dst).
-    RT_i = R * (Temp[src] + 273.15)  # Use temperature at source nodes for each edge
-    J_ax = (1 / r_ST) * s_ij * (RT_i * (s_i - s_j) + (psi_i - psi_j))
+    # Sugar flux on edge: J_ax = (JW_ST / r_ST) * C_upstream
+    J_ax = (JW_ST / r_ST) * C_upstream
 
     return J_ax
 
@@ -81,7 +81,8 @@ def compute_flux_divergence(J_ax: torch.Tensor, edge_index: torch.Tensor, N: int
     Returns:
         torch.Tensor: Net flux change per node [N]
     """
-    dS_dt_from_flux = torch.zeros(N, device=device)
+    # Initialize with same dtype as J_ax
+    dS_dt_from_flux = torch.zeros(N, device=device, dtype=J_ax.dtype)
 
     # Handle empty graph case
     if J_ax.size(0) == 0:
@@ -91,10 +92,10 @@ def compute_flux_divergence(J_ax: torch.Tensor, edge_index: torch.Tensor, N: int
 
     # Divergence of flux -> net inflow per node
     # This computes the sum of incoming/outgoing fluxes for each node
-    # dst node accumulates +J_ax   (incoming)
-    # src node accumulates -J_ax   (outgoing)
-    dS_dt_from_flux.scatter_add_(0, dst, J_ax)   # Add incoming fluxes
-    dS_dt_from_flux.scatter_add_(0, src, -J_ax)  # Subtract outgoing fluxes
+    # dst node accumulates -J_ax
+    # src node accumulates +J_ax
+    dS_dt_from_flux.scatter_add_(0, dst, -J_ax)
+    dS_dt_from_flux.scatter_add_(0, src, +J_ax)
 
     return dS_dt_from_flux
 
@@ -246,6 +247,17 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
     Raises:
         ValueError: If y_pred is not connected to data.time_norm in the computation graph
     """
+    # TEMPORARY: Use true values for testing coherence of physics calculations
+    # Create a version of true values that requires gradients and is connected to time_norm
+    y_true = data.y.clone().detach()
+    y_true.requires_grad_(True)
+
+    # Connect y_true to time_norm by adding a small term that depends on time_norm
+    # This ensures the gradient computation works while keeping values essentially unchanged
+    epsilon = 1e-10
+    time_connection = epsilon * data.time_norm.sum()
+    y_true_connected = y_true + time_connection
+
     device = y_pred.device
     batch_vec = getattr(data, "batch", None)
     N = y_pred.size(0)
@@ -255,15 +267,15 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
     node_fields = utils.extract_node_fields(data, device)
 
     # Compute axial flux and its divergence
-    J_ax = compute_axial_flux(y_pred, data, device)
+    J_ax = compute_axial_flux(y_true, data, device)
     dS_dt_from_flux = compute_flux_divergence(J_ax, data.edge_index.to(device), N, device)
 
     # Compute phloem loading and outflow
-    F_in = compute_phloem_loading(y_pred, data, params, node_fields, device)
-    F_out = compute_sucrose_outflow(y_pred, data, params, node_fields, device)
+    F_in = compute_phloem_loading(y_true, data, params, node_fields, device)
+    F_out = compute_sucrose_outflow(y_true, data, params, node_fields, device)
 
     # Compute time derivative from model
-    ds_dt = compute_time_derivative(y_pred, data)
+    ds_dt = compute_time_derivative(y_true_connected, data)
 
     # Total rate of change from physics
     dS_dt_from_physics = dS_dt_from_flux + F_in - F_out
@@ -297,6 +309,16 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
             J_ax_avg = J_ax_per_graph.mean()
         else:
             J_ax_avg = torch.tensor(0.0, device=device)
+
+        print(f"Number of graphs in batch: {torch.bincount(batch_vec).size(0)}")
+        print(f"Number of nodes per graph: {torch.bincount(batch_vec).detach().cpu().numpy()}")
+        print(f"sucrose concentration samples:\n{y_true[batch_vec == 0].squeeze(-1).detach().cpu().numpy()[50:113] / data.node_feat[batch_vec == 0, 1].detach().cpu().numpy()[50:113]}")
+        print(f"sucrose content samples:\n{y_true[batch_vec == 0].squeeze(-1).detach().cpu().numpy()[50:113]}")
+        print(f"dS_dt_from_flux samples:\n{dS_dt_from_flux[batch_vec == 0].detach().cpu().numpy()[50:113]}")
+        print(f"F_in samples:\n{F_in[batch_vec == 0].detach().cpu().numpy()[50:113]}")
+        print(f"F_out samples:\n{F_out[batch_vec == 0].detach().cpu().numpy()[50:113]}")
+        print(f"ds_dt samples:\n{ds_dt[batch_vec == 0].detach().cpu().numpy()[50:113]}")
+        print(f"dS_dt_from_physics samples:\n{dS_dt_from_physics[batch_vec == 0].detach().cpu().numpy()[50:113]}")
 
         loss_dict = {
             'J_ax': J_ax_avg,

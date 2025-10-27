@@ -1,6 +1,9 @@
 from __future__ import annotations
 from dataclasses import dataclass
 
+# Global constants
+R = 83.14  # universal gas constant
+cmH2O_to_hPa = 0.980638  # Conversion factor from cmH2O to hPa (from C++ runPM.cpp)
 
 @dataclass
 class ModelConfig:

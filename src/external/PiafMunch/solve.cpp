@@ -27,6 +27,7 @@
 #include <vector>
 #include "PM_arrays.h"
 #include "runPM.h"
+#include <iomanip>  // for std::setprecision, std::fixed
 
 /**********************************************  Network Architecture: *********************************************/
 
@@ -272,6 +273,16 @@ void PhloemFlux::f(double t, double *y, double *y_dot) { // the function to be p
 	
 	JS_ST.set_elemult(JW_ST, C_amont) ;	// 	i.e.   JS_ST = JW_ST * C_amont			   (eq. 11)
 	Delta_JS_ST.set_matmult(Delta2, JS_ST) ;
+
+	// std::cout << std::fixed << std::setprecision(12);
+	// std::cout<<"RT "<<RT<<std::endl;
+	// std::cout<<"usePsiXyl "<<usePsiXyl<<std::endl;
+	// for(int j = 1 ; j <= Nc ; j ++) {
+	// 	std::cout<<"Psi_Xyl "<<Psi_Xyl[j]<<std::endl;
+		// std::cout<<"P_ST "<<P_ST[j]<<std::endl;
+		// std::cout<<"JW_ST "<<JW_ST[j]<<std::endl;
+		// std::cout<<"JS_ST "<<JS_ST[j]<<std::endl;
+	// }
 	
 	C_fluxes(t, Nt) ; //see PiafMunch2.cpp
 	

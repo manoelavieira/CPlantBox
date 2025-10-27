@@ -22,6 +22,7 @@
 * If not, see <http://www.gnu.org/licenses/>.
 *
 -----------------------------------------------------------------------------------------------------------------------------------*/
+#include <iomanip>  // for std::setprecision, std::fixed
 #include "runPM.h"
 //#include "PiafMunch2.h"
 string GnuplotPath = "C:/gnuplot/bin/gnuplot.exe" ; // Path to GnuPlot executable, including executable file name
@@ -235,14 +236,17 @@ void PhloemFlux::C_fluxes(double t, int Nt)
 
 
 		if(doTroubleshooting && (dbg_sample_iter(DBG_ITER) || FORCE_DBG_C_FLUXES)){
-			std::cout<<"C_fluxes "<<i<<" "<<vol_ST[i]<<" "<<vol_ParApo[i]<<" "<<vol_Seg[i]<<" CSTimin "<<CSTimin<<std::endl;
+			std::cout << std::fixed << std::setprecision(12);
+			std::cout<<"C_fluxes "<<i-1<<" "<<vol_ST[i]<<" "<<vol_ParApo[i]<<" "<<vol_Seg[i]<<" CSTimin "<<CSTimin<<std::endl;
 			std::cout<<"max(0.,C_ST[i]) "<<max(0.,C_ST[i])<<std::endl;
 			std::cout<<" C_ST[i] "<<C_ST[i]<<" Q_ST[i] "<<Q_ST[i]<<" "<<Q_Fl[i]<<" "<<CSTi<<" "<<Cmeso<<" "<<len_leaf[i]<<" max(0., CSTi-CSTimin) "<< max(0., CSTi-CSTimin)<<std::endl;
 			std::cout<<Q_Rmmax_<<" "<<Q_Rmmax[i]<<" "<< krm2[i]<<" "<<CSTi_delta<<std::endl;
 			std::cout<<Q_Exudmax_<<" Fu_lim "<<Fu_lim<<" Q_ST_dot "<<Q_ST_dot[i]<<" "<<Q_Mesophyll_dot[i]<<" "<<Input[i]<<" "<<Q_Rm_dot[i]<<std::endl;
 			std::cout<<"Qgri "<<Q_Gtot_dot[i] <<" Q_Exudmax_ "<<Q_Exud_dot[i]<<" Q_Rmmax_ "<<Q_Rmmax_dot[i]<<" Qgrmaxi "<<Q_Gtotmax_dot[i]<<std::endl;
 			std::cout<<"Qmeso "<<Q_Mesophyll[i]<<" "<<Ag[i]<<std::endl;
-			std::cout<<"Delta_JS_ST "<<Delta_JS_ST[i]<<std::endl;
+			std::cout<<"Delta_JS_ST "<<Delta_JS_ST[i]<<" F_in "<<Q_Fl[i]<<" F_out "<<Q_Exudmax_+Fu_lim<<std::endl;
+			std::cout<<"C_amont[i] "<<C_amont[i]<<" r_ST[i] "<<r_ST[i]<<std::endl;
+			std::cout<<std::endl;
 		}
 
 		//check if error

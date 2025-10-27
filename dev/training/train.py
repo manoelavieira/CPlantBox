@@ -255,6 +255,7 @@ def train_epoch(
                 step = epoch * len(loader) + batch_idx
                 writer.add_scalar('training/batch_physics_norm',  float(phys_res_norm), step)
                 writer.add_scalar('training/batch_physics_orig', float(phys_res_orig), step)
+
             if writer is not None and batch_idx == 0:
                 writer.add_scalar('scales/phys_scale', float(phys_scale), epoch)
 

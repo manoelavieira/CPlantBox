@@ -119,15 +119,15 @@ def load_graph_data(h5_file: h5py.File, timestep: int) -> Data:
     if step_params_missing:
         missing_keys = ", ".join(step_params_missing.keys())
         print(f"[WARN] Missing step attrs at {step_key}: {missing_keys}")
-    step_params = torch.tensor(step_params_vals, dtype=torch.float32).view(1, -1)
+    step_params = torch.tensor(step_params_vals, dtype=torch.float64).view(1, -1)
 
     # Load node features
-    psi = torch.tensor(h5_file[f'{step_key}/nodes/psiXyl4Phloem'][:], dtype=torch.float32)
-    vol = torch.tensor(h5_file[f'{step_key}/nodes/vol_ST'][:], dtype=torch.float32)
-    len_leaf = torch.tensor(h5_file[f'{step_key}/nodes/len_leaf'][:], dtype=torch.float32)
-    Q_Rmmax = torch.tensor(h5_file[f'{step_key}/nodes/Q_Rmmax'][:], dtype=torch.float32)
-    Q_Grmax = torch.tensor(h5_file[f'{step_key}/nodes/Q_Grmax'][:], dtype=torch.float32)
-    Q_Exudmax = torch.tensor(h5_file[f'{step_key}/nodes/Q_Exudmax'][:], dtype=torch.float32)
+    psi = torch.tensor(h5_file[f'{step_key}/nodes/psiXyl4Phloem'][:], dtype=torch.float64)
+    vol = torch.tensor(h5_file[f'{step_key}/nodes/vol_ST'][:], dtype=torch.float64)
+    len_leaf = torch.tensor(h5_file[f'{step_key}/nodes/len_leaf'][:], dtype=torch.float64)
+    Q_Rmmax = torch.tensor(h5_file[f'{step_key}/nodes/Q_Rmmax'][:], dtype=torch.float64)
+    Q_Grmax = torch.tensor(h5_file[f'{step_key}/nodes/Q_Grmax'][:], dtype=torch.float64)
+    Q_Exudmax = torch.tensor(h5_file[f'{step_key}/nodes/Q_Exudmax'][:], dtype=torch.float64)
     Temp = step_params[0, step_params_names.index("Tair")].repeat(psi.shape[0])
 
     node_feat = torch.stack([psi, vol, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp], dim=1)  # [N, 7]
@@ -140,12 +140,12 @@ def load_graph_data(h5_file: h5py.File, timestep: int) -> Data:
         "vol_Meso", "vol_ST"
     ]
 
-    node_fields = torch.empty((num_nodes, len(node_fields_names)), dtype=torch.float32)
+    node_fields = torch.empty((num_nodes, len(node_fields_names)), dtype=torch.float64)
     for j, n in enumerate(node_fields_names):
-        node_fields[:, j] = torch.from_numpy(h5_file[f"{step_key}/nodes/{n}"][:]).to(torch.float32)
+        node_fields[:, j] = torch.from_numpy(h5_file[f"{step_key}/nodes/{n}"][:]).to(torch.float64)
 
     node_pos_np = h5_file[f"{step_key}/nodes/positions"][:]  # [N, 3]
-    node_pos = torch.from_numpy(node_pos_np.astype(np.float32, copy=False))
+    node_pos = torch.from_numpy(node_pos_np.astype(np.float64, copy=False))
 
     # print(f"\nStep {timestep}: Number of nodes = {num_nodes}")
     # print(f"node_feat_shape: {node_feat.shape}, node_feat_dtype: {node_feat.dtype}")
@@ -169,7 +169,7 @@ def load_graph_data(h5_file: h5py.File, timestep: int) -> Data:
 
     # Load per-edge resistance values r_ST [E], then reshape to [E, 1]
     # so each edge has an explicit single feature column (required by PyG)
-    r_st = torch.tensor(h5_file[f'{step_key}/segments/r_ST'][:], dtype=torch.float32)
+    r_st = torch.tensor(h5_file[f'{step_key}/segments/r_ST'][:], dtype=torch.float64)
     edge_feat = r_st.view(-1, 1)  # [E, 1]
 
     # Use CPlantBox organ type mapping directly: ot_organ=0, ot_seed=1, ot_root=2, ot_stem=3, ot_leaf=4
@@ -190,10 +190,10 @@ def load_graph_data(h5_file: h5py.File, timestep: int) -> Data:
             print(f"Organ type distribution: {type_dist}")
 
     # Load target values (sucrose concentration)
-    y = torch.tensor(h5_file[f'{step_key}/nodes/Q_ST'][:], dtype=torch.float32).view(-1, 1)
+    y = torch.tensor(h5_file[f'{step_key}/nodes/Q_ST'][:], dtype=torch.float64).view(-1, 1)
 
     # Use timestep as time feature
-    time = torch.tensor(timestep, dtype=torch.float32)
+    time = torch.tensor(timestep, dtype=torch.float64)
 
     # Load physics constants from parameters
     sim_params = h5_file['parameters/sieve_tube'].attrs
@@ -217,7 +217,7 @@ def load_graph_data(h5_file: h5py.File, timestep: int) -> Data:
         missing_keys = ", ".join(sim_param_missing.keys())
         print(f"[WARN] Missing sieve_tube attrs at {step_key}: {missing_keys}")
 
-    sim_params = torch.tensor(sim_param_vals, dtype=torch.float32).view(1, -1)  # [1, K]
+    sim_params = torch.tensor(sim_param_vals, dtype=torch.float64).view(1, -1)  # [1, K]
 
     # Create PyG Data object with explicit num_nodes
     data = Data(

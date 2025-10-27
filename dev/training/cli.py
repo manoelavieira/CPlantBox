@@ -34,7 +34,7 @@ def parse_arguments() -> TrainingConfig:
     parser.add_argument('--loss-type', type=str, default='physics',
                         choices=['data', 'physics', 'combined'],
                         help='Type of loss to use: data_only (MSE), physics_only, or combined (MSE + lambda_phys * physics)')
-    parser.add_argument('--time-jitter-std', type=float, default=0.01,
+    parser.add_argument('--time-jitter-std', type=float, default=0,
                         help='Standard deviation of time jitter applied during training')
     parser.add_argument('--tensorboard-log-dir', type=str, default='results/tensorboard_logs',
                         help='Directory for TensorBoard logs')

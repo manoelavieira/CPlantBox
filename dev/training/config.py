@@ -32,7 +32,7 @@ class TrainingConfig:
     lambda_phys: float = 1.0
 
     # Standard deviation of time jitter noise
-    time_jitter_std: float = 0.01
+    time_jitter_std: float = 0
 
     # Loss configuration
     loss_type: LossType = LossType.PHYSICS_ONLY

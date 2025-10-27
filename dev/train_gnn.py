@@ -38,6 +38,7 @@ def main():
 
     # Setup model and scalers
     model_setup = setup.setup_model_and_scalers(config, train_loader, device)
+    model_setup.model = model_setup.model.double()  # Convert to float64
 
     # Create model config for logging
     model_cfg = ModelConfig()

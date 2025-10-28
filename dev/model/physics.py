@@ -8,6 +8,8 @@ from torch_geometric.data import Data
 from . import utils
 from . import config
 
+DEBUG = True
+
 def compute_axial_flux(y_pred: torch.Tensor, data: Data, device: torch.device) -> torch.Tensor:
     """Compute axial sucrose flux J_ax along edges.
 
@@ -264,6 +266,18 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
     batch_vec = getattr(data, "batch", None)
     N = y_pred.size(0)
 
+    # TEMPORARY: Use true values for testing coherence of physics calculations
+    if DEBUG:
+        y_true = data.y.clone().detach()
+        y_true.requires_grad_(True)
+
+        # Create a version of true values that requires gradients and is connected to time_norm
+        # Connect y_true to time_norm by adding a small term that depends on time_norm
+        # This ensures the gradient computation works while keeping values essentially unchanged
+        epsilon = 1e-10
+        time_connection = epsilon * data.time_norm.sum()
+        y_true_connected = y_true + time_connection
+
     # Extract parameters and node fields
     params = utils.extract_parameters(data, device, batch_vec, N if batch_vec is None else None)
     node_fields = utils.extract_node_fields(data, device)
@@ -281,6 +295,32 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
 
     # Total rate of change from physics
     dS_dt_from_physics = dS_dt_from_flux + F_in - F_out
+
+    if DEBUG:
+        J_ax_true = compute_axial_flux(y_true, data, device)
+        dS_dt_from_flux_true = compute_flux_divergence(J_ax_true, data.edge_index.to(device), N, device)
+        F_in_true = compute_phloem_loading(y_true, data, params, node_fields, device)
+        F_out_true = compute_sucrose_outflow(y_true, data, params, node_fields, device)
+        ds_dt_true = compute_time_derivative(y_true_connected, data)
+        dS_dt_from_physics_true = dS_dt_from_flux_true + F_in_true - F_out_true
+
+        print(f"\nNumber of graphs in batch: {torch.bincount(batch_vec).size(0)}")
+        print(f"Number of nodes per graph: {torch.bincount(batch_vec).detach().cpu().numpy()}")
+
+        print(f"\nQ_ST_true:\n{y_true[batch_vec == 0].squeeze(-1).detach().cpu().numpy()[:10]}")
+        print(f"Q_ST:\n{y_pred[batch_vec == 0].squeeze(-1).detach().cpu().numpy()[:10]}")
+
+        print(f"\ndS_dt_from_flux_true:\n{dS_dt_from_flux_true[batch_vec == 0].detach().cpu().numpy()[:10]}")
+        print(f"dS_dt_from_flux:\n{dS_dt_from_flux[batch_vec == 0].detach().cpu().numpy()[:10]}")
+
+        print(f"\nF_in_true:\n{F_in_true[batch_vec == 0].detach().cpu().numpy()[:10]}")
+        print(f"F_in:\n{F_in[batch_vec == 0].detach().cpu().numpy()[:10]}")
+
+        print(f"\nF_out_true:\n{F_out_true[batch_vec == 0].detach().cpu().numpy()[:10]}")
+        print(f"F_out:\n{F_out[batch_vec == 0].detach().cpu().numpy()[:10]}")
+
+        print(f"\nds_dt_true:\n{ds_dt_true[batch_vec == 0].detach().cpu().numpy()[:10]}")
+        print(f"ds_dt:\n{ds_dt[batch_vec == 0].detach().cpu().numpy()[:10]}")
 
     # Compute residual as difference between model derivative and physics derivative
     residual_node = (ds_dt.squeeze() - dS_dt_from_physics).pow(2)

@@ -12,7 +12,7 @@ from pathlib import Path
 
 from model.config import ModelConfig
 from model.gnn import PhloemNNConv
-from model.utils import Standardizer
+from model.utils import Standardizer, IdentityScaler
 from .config import TrainingConfig, ModelSetup
 
 
@@ -62,10 +62,21 @@ def setup_model_and_scalers(
     model = PhloemNNConv(model_cfg).to(device)
 
     # Setup standardization on training data
-    feature_scaler = Standardizer()  # for input node features (psi, vol, len_leaf...)
-    target_scaler = Standardizer()   # for targets (y)
-    time_scaler = Standardizer()     # for graph-level time (scalar)
-    edge_scaler = Standardizer()     # for continuous edge features (e.g., r_ST)
+    if config.no_standardization:
+        # Use identity scalers that perform no transformation
+        # This enables training in original space without standardization
+        # Both MSE and physics residuals will be computed in original space
+        feature_scaler = IdentityScaler()  # for input node features (psi, vol, len_leaf...)
+        target_scaler = IdentityScaler()   # for targets (y)
+        time_scaler = IdentityScaler()     # for graph-level time (scalar)
+        edge_scaler = IdentityScaler()     # for continuous edge features (e.g., r_ST)
+    else:
+        # Use standard scalers that normalize to mean=0, std=1
+        # Physics residuals will be converted from original to standardized space
+        feature_scaler = Standardizer()  # for input node features (psi, vol, len_leaf...)
+        target_scaler = Standardizer()   # for targets (y)
+        time_scaler = Standardizer()     # for graph-level time (scalar)
+        edge_scaler = Standardizer()     # for continuous edge features (e.g., r_ST)
 
     # Fit scalers on training data
     with torch.no_grad():

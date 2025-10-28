@@ -37,6 +37,9 @@ class TrainingConfig:
     # Loss configuration
     loss_type: LossType = LossType.PHYSICS_ONLY
 
+    # Data preprocessing
+    no_standardization: bool = False  # If True, train in original space without standardization
+
     # Reproducibility
     seed: int = 42
 

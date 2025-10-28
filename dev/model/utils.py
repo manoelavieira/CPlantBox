@@ -54,6 +54,43 @@ class Standardizer:
         return self
 
 
+class IdentityScaler:
+    """No-op scaler that returns input unchanged.
+
+    Used when standardization is disabled to maintain interface compatibility.
+    """
+    def __init__(self):
+        self.mean: Optional[torch.Tensor] = None
+        self.std: Optional[torch.Tensor] = None
+        self.device = torch.device('cpu')
+
+    def fit(self, X: torch.Tensor):
+        """Fit is a no-op, but store device and fake statistics for compatibility."""
+        self.device = X.device
+        # Set fake mean=0, std=1 for compatibility with physics scaling calculations
+        self.mean = torch.zeros(1, X.shape[-1], device=X.device)
+        self.std = torch.ones(1, X.shape[-1], device=X.device)
+
+    def transform(self, X: torch.Tensor) -> torch.Tensor:
+        """Return input unchanged."""
+        return X
+
+    def inv_transform(self, X: torch.Tensor) -> torch.Tensor:
+        """Return input unchanged."""
+        return X
+
+    def to(self, device) -> 'IdentityScaler':
+        """Move internal tensors to the specified device."""
+        device = torch.device(device)
+
+        if self.mean is not None:
+            self.mean = self.mean.to(device)
+        if self.std is not None:
+            self.std = self.std.to(device)
+        self.device = device
+        return self
+
+
 def extract_parameters(data, device, batch_vec=None, y_pred_size=None):
     """Extract and broadcast simulation and step parameters to per-node tensors.
 

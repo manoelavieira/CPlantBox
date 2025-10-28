@@ -117,6 +117,10 @@ class PhloemNNConv(nn.Module):
             nn.Linear(cfg.hidden_size, cfg.hidden_size), nn.ReLU(),
             nn.Linear(cfg.hidden_size, 1)
         )
+
+        # Learnable output gain for softplus scaling
+        self.log_alpha = nn.Parameter(torch.tensor(0.0))  # starts at 1.0x scale
+
         self.dropout = nn.Dropout(cfg.dropout)
         self._init_weights()
 
@@ -256,5 +260,8 @@ class PhloemNNConv(nn.Module):
 
         # Final MLP head to produce scalar output per node
         out = self.head(node_feat)
+
+        # Positive output with learnable scale (better gradient flow)
+        out = torch.exp(self.log_alpha) * F.softplus(out)
 
         return out

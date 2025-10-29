@@ -8,7 +8,7 @@ from torch_geometric.data import Data
 from . import utils
 from . import config
 
-DEBUG = True
+DEBUG = False  # Set to True for detailed physics debug output
 
 def compute_axial_flux(y_pred: torch.Tensor, data: Data, device: torch.device) -> torch.Tensor:
     """Compute axial sucrose flux J_ax along edges.

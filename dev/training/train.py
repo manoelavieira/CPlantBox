@@ -171,8 +171,7 @@ def train_epoch(
         epoch: int = 0,
         clip_grad_norm: float = 1.0,
         loss_type: LossType = LossType.COMBINED,
-        lambda_phys: float = 1.0,
-        time_jitter_std : float = 0.01
+        lambda_phys: float = 1.0
     ) -> Tuple[float, float, float, float, Optional[PhysicsMetrics]]:
     """Train model for one epoch.
 
@@ -185,7 +184,6 @@ def train_epoch(
         clip_grad_norm: Maximum norm for gradient clipping
         loss_type: Type of loss to compute (data_only, physics_only, or combined)
         lambda_phys: Weight for physics term (only used with combined loss)
-        time_jitter_std: Standard deviation for time jitter
 
     Returns:
         Tuple of (average_loss, average_mae, average_mse, average_physics, last_physics_metrics)
@@ -199,12 +197,11 @@ def train_epoch(
     for batch_idx, data in enumerate(loader):
         optimizer.zero_grad(set_to_none=True)
 
-        # Prepare data for model: add time info, jitter (if training), and normalize features
+        # Prepare data for model: add time info and normalize features
         node_feat_orig, data_norm = utils.prepare_model_inputs(
             data,
             model,
-            is_training=True,
-            time_jitter_std=time_jitter_std
+            is_training=True
         )
 
         # Forward pass with standardized data
@@ -319,8 +316,7 @@ def train_model(
             epoch,
             clip_grad_norm=config.clip_grad_norm,
             loss_type=config.loss_type,
-            lambda_phys=config.lambda_phys,
-            time_jitter_std=config.time_jitter_std
+            lambda_phys=config.lambda_phys
         )
 
         # Validation
@@ -471,12 +467,11 @@ def eval_model(
 
     with torch.no_grad():
         for batch_idx, data in enumerate(loader):
-            # Prepare data for model: add time info, jitter (if training), and normalize features
+            # Prepare data for model: add time info and normalize features
             node_feat_orig, data_norm = utils.prepare_model_inputs(
                 data,
                 model,
-                is_training=False,
-                time_jitter_std=0.0
+                is_training=False
             )
 
             # Forward pass with prepared data

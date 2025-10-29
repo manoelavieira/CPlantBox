@@ -182,8 +182,7 @@ def load_best_model(
 def prepare_model_inputs(
     data,
     model: nn.Module,
-    is_training: bool = False,
-    time_jitter_std: float = 0.0
+    is_training: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Prepare data for forward pass by handling time and feature standardization.
 
@@ -191,14 +190,12 @@ def prepare_model_inputs(
     the fitted scalers from the model. It also attaches standardized time tensors
     (`time_norm`) and corresponding scaling factors (`time_sigma`) to the input
     data, ensuring consistent handling of temporal information for both training
-    and physics-based computations. During training, a small random time jitter
-    can be added to improve temporal generalization.
+    and physics-based computations.
 
     Args:
         data: Input batch data
         model: The neural network model with fitted scalers
-        is_training: Whether this is for training (enables time jitter)
-        time_jitter_std: Standard deviation for time jitter during training
+        is_training: Whether this is for training
 
     Returns:
         Tuple of (original_features, standardized_data_ready_for_model)
@@ -227,11 +224,6 @@ def prepare_model_inputs(
     scale = model.time_scaler.std.view(-1)[0].to(time_norm.device)
     time_norm = time_norm.view(-1, 1).to(next(model.parameters()).device)
     time_sigma = scale.expand_as(time_norm).clone()
-
-    # Add small random jitter to time during training
-    if is_training and time_jitter_std > 0:
-        jitter = torch.randn_like(time_norm) * time_jitter_std
-        time_norm = time_norm + jitter
 
     # Physics autograd needs time to require grad during training
     if is_training and not time_norm.requires_grad:

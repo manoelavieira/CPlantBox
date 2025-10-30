@@ -6,6 +6,8 @@ from .config import TrainingConfig, LossType
 def parse_arguments() -> TrainingConfig:
     """Parse command line arguments and create training configuration.
 
+    Note: Data standardization has been removed - all training happens in original space.
+
     Returns:
         TrainingConfig: Validated training configuration
     """
@@ -34,8 +36,6 @@ def parse_arguments() -> TrainingConfig:
     parser.add_argument('--loss-type', type=str, default='physics',
                         choices=['data', 'physics', 'combined'],
                         help='Type of loss to use: data_only (MSE), physics_only, or combined (MSE + lambda_phys * physics)')
-    parser.add_argument('--no-standardization', action='store_true',
-                        help='Disable data standardization - train in original space')
     parser.add_argument('--tensorboard-log-dir', type=str, default='results/tensorboard_logs',
                         help='Directory for TensorBoard logs')
     args = parser.parse_args()
@@ -53,7 +53,6 @@ def parse_arguments() -> TrainingConfig:
         seed=args.seed,
         lambda_phys=args.lambda_phys,
         loss_type=LossType(args.loss_type),
-        no_standardization=args.no_standardization,
         tensorboard_log_dir=args.tensorboard_log_dir
     )
 

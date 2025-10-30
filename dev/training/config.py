@@ -34,9 +34,6 @@ class TrainingConfig:
     # Loss configuration
     loss_type: LossType = LossType.PHYSICS_ONLY
 
-    # Data preprocessing
-    no_standardization: bool = False  # If True, train in original space without standardization
-
     # Reproducibility
     seed: int = 42
 
@@ -136,19 +133,7 @@ class ModelSetup:
     """Configuration for model setup."""
     device: torch.device
     model: torch.nn.Module
-    feature_scaler: Optional[object] = None
-    target_scaler: Optional[object] = None
-    time_scaler: Optional[object] = None
-    edge_scaler: Optional[object] = None  # scaler for continuous edge features (e.g., r_ST)
 
     def to_device(self) -> None:
-        """Move model and scalers to the configured device."""
+        """Move model to the configured device."""
         self.model.to(self.device)
-        if self.feature_scaler is not None:
-            self.feature_scaler.device = self.device
-        if self.target_scaler is not None:
-            self.target_scaler.device = self.device
-        if self.time_scaler is not None:
-            self.time_scaler.device = self.device
-        if self.edge_scaler is not None:
-            self.edge_scaler.device = self.device

@@ -189,49 +189,43 @@ def compute_time_derivative(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
     """Compute time derivative of sucrose content from model predictions.
 
     Args:
-        y_pred: Predicted sucrose content [N, 1] - must be connected to data.time_norm
+        y_pred: Predicted sucrose content [N, 1] - must be connected to data.time_per_node
         data: Graph data containing time features
 
     Returns:
         torch.Tensor: Time derivative ds/dt per node [N]
 
     Raises:
-        ValueError: If y_pred is not connected to data.time_norm in computation graph
+        ValueError: If y_pred is not connected to data.time_per_node in computation graph
     """
 
     # We need ds/dt from the model with respect to a differentiable time feature
     # This is ESSENTIAL for physics-informed learning: without it, the physics constraint is meaningless
-    if not hasattr(data, 'time_norm') or data.time_norm is None:
-        raise ValueError("data.time_norm not found. Required for physics residual computation.")
-    if not data.time_norm.requires_grad:
-        raise ValueError("data.time_norm must have requires_grad=True for physics residual computation.")
-    if not hasattr(data, "time_sigma") or data.time_sigma is None:
-        raise ValueError("data.time_sigma missing; ensure model.forward() sets it.")
+    if not hasattr(data, 'time_per_node') or data.time_per_node is None:
+        raise ValueError("data.time_per_node not found. Required for physics residual computation.")
+    if not data.time_per_node.requires_grad:
+        raise ValueError("data.time_per_node must have requires_grad=True for physics residual computation.")
 
-    # Compute gradient of predictions w.r.t. **scaled** time_norm τ [N,1]
-    # We'll convert to real time derivative via  ∂/∂t = (1/σ_t) ∂/∂τ
+    # Compute gradient of predictions w.r.t. time_per_node [N,1]
     try:
         ds_dt = torch.autograd.grad(
             y_pred.sum(),        # sum to get scalar for gradient computation
-            data.time_norm,      # [N, 1] per-node time features
+            data.time_per_node,      # [N, 1] per-node time features
             create_graph=True,   # needed for second backward pass
             retain_graph=True,   # keep graph for subsequent loss computation
-            allow_unused=False   # ERROR if time_norm is not connected
+            allow_unused=False   # ERROR if time_per_node is not connected
         )[0]
         ds_dt = ds_dt.squeeze()
     except RuntimeError as e:
         if "not have been used in the graph" in str(e):
             raise ValueError(
-                "Physics residual computation failed: y_pred is not connected to time_norm. "
+                "Physics residual computation failed: y_pred is not connected to time_per_node. "
                 "This indicates that the model predictions don't depend on time, which breaks the physics constraint. "
                 "Ensure that y_pred comes from a model forward pass that uses the same data object, "
                 "or that the model architecture properly utilizes the time feature."
             ) from e
         else:
             raise
-
-    # Convert ∂/∂τ to ∂/∂t using stored σ_t (τ = (t - μ_t)/σ_t)
-    ds_dt = ds_dt / data.time_sigma.squeeze()
 
     return ds_dt
 
@@ -248,11 +242,11 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
     - F_out is the sucrose outflow
 
     IMPORTANT: y_pred MUST come from a model forward pass using the same data object,
-    so that data.time_norm is properly connected to y_pred in the computation graph.
+    so that data.time_per_node is properly connected to y_pred in the computation graph.
     Without this connection, ds/dt cannot be computed and the physics constraint is meaningless.
 
     Args:
-        y_pred: Predicted sucrose content [N, 1] - MUST be connected to data.time_norm
+        y_pred: Predicted sucrose content [N, 1] - MUST be connected to data.time_per_node
         data: Graph data containing topology, features, simulation parameters, and node fields
 
     Returns:
@@ -260,7 +254,7 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
             {'J_ax', 'F_in', 'F_out', 'ds_dt', 'dS_dt_from_flux'}
 
     Raises:
-        ValueError: If y_pred is not connected to data.time_norm in the computation graph
+        ValueError: If y_pred is not connected to data.time_per_node in the computation graph
     """
     device = y_pred.device
     batch_vec = getattr(data, "batch", None)
@@ -271,11 +265,11 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
         y_true = data.y.clone().detach()
         y_true.requires_grad_(True)
 
-        # Create a version of true values that requires gradients and is connected to time_norm
-        # Connect y_true to time_norm by adding a small term that depends on time_norm
+        # Create a version of true values that requires gradients and is connected to time_per_node
+        # Connect y_true to time_per_node by adding a small term that depends on time_per_node
         # This ensures the gradient computation works while keeping values essentially unchanged
         epsilon = 1e-10
-        time_connection = epsilon * data.time_norm.sum()
+        time_connection = epsilon * data.time_per_node.sum()
         y_true_connected = y_true + time_connection
 
     # Extract parameters and node fields

@@ -4,15 +4,11 @@ from typing import Tuple
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
-from torch.utils.data import DataLoader
 
 from pathlib import Path
 
 from model.config import ModelConfig
 from model.gnn import PhloemNNConv
-from model.utils import Standardizer, IdentityScaler
 from .config import TrainingConfig, ModelSetup
 
 
@@ -42,77 +38,24 @@ def setup_environment(config: TrainingConfig) -> torch.device:
     return device
 
 
-def setup_model_and_scalers(
-    config: TrainingConfig,
-    train_loader: DataLoader,
-    device: torch.device
-) -> ModelSetup:
-    """Setup model and scalers.
+def setup_model(device: torch.device) -> ModelSetup:
+    """Setup model.
 
     Args:
-        config: Training configuration
-        train_loader: Training data loader for fitting scalers
-        device: Device to place model and scalers on
+        device: Device to place model on
 
     Returns:
-        ModelSetup: Configured model with fitted scalers
+        ModelSetup: Configured model without scalers
     """
     # Create model
     model_cfg = ModelConfig()
     model = PhloemNNConv(model_cfg).to(device)
 
-    # Setup standardization on training data
-    if config.no_standardization:
-        # Use identity scalers that perform no transformation
-        # This enables training in original space without standardization
-        # Both MSE and physics residuals will be computed in original space
-        feature_scaler = IdentityScaler()  # for input node features (psi, vol, len_leaf...)
-        target_scaler = IdentityScaler()   # for targets (y)
-        time_scaler = IdentityScaler()     # for graph-level time (scalar)
-        edge_scaler = IdentityScaler()     # for continuous edge features (e.g., r_ST)
-    else:
-        # Use standard scalers that normalize to mean=0, std=1
-        # Physics residuals will be converted from original to standardized space
-        feature_scaler = Standardizer()  # for input node features (psi, vol, len_leaf...)
-        target_scaler = Standardizer()   # for targets (y)
-        time_scaler = Standardizer()     # for graph-level time (scalar)
-        edge_scaler = Standardizer()     # for continuous edge features (e.g., r_ST)
-
-    # Fit scalers on training data
-    with torch.no_grad():
-        x_list, y_list, t_list, e_list = [], [], [], []
-
-        for batch in train_loader:
-            x_list.append(batch.node_feat[:, :model_cfg.node_feat_dim])
-            y_list.append(batch.y)
-            e_list.append(batch.edge_feat[:, :model_cfg.edge_feat_dim])  # [E, D], typically D=1
-            t_list.append(batch.time.view(-1, 1))  # collect per-graph scalars
-
-        Xs = torch.cat(x_list, dim=0)  # [sum_N, 2]
-        Ys = torch.cat(y_list, dim=0)  # [sum_N, 1]
-        Es = torch.cat(e_list, dim=0)  # [sum_E, edge_feat_dim]
-        Ts = torch.cat(t_list, dim=0)  # [sum_B, 1], one per graph
-
-        feature_scaler.fit(Xs)
-        target_scaler.fit(Ys)
-        time_scaler.fit(Ts)
-        edge_scaler.fit(Es)
-
-    # Create model setup
+    # Create model setup without scalers
     model_setup = ModelSetup(
         device=device,
-        model=model,
-        feature_scaler=feature_scaler,
-        target_scaler=target_scaler,
-        time_scaler=time_scaler,
-        edge_scaler=edge_scaler
+        model=model
     )
-
-    # Add scalers to the model for backward compatibility
-    model.feature_scaler = feature_scaler
-    model.target_scaler = target_scaler
-    model.time_scaler = time_scaler
-    model.edge_scaler = edge_scaler
 
     # Ensure everything is on the correct device
     model_setup.to_device()

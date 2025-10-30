@@ -36,8 +36,8 @@ def main():
           f"Validation batches: {len(val_loader)}, "
           f"Test batches: {len(test_loader)}")
 
-    # Setup model and scalers
-    model_setup = setup.setup_model_and_scalers(config, train_loader, device)
+    # Setup model
+    model_setup = setup.setup_model(device)
     model_setup.model = model_setup.model.double()  # Convert to float64
 
     # Create model config for logging

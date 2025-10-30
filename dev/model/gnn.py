@@ -93,10 +93,6 @@ class PhloemNNConv(nn.Module):
         super().__init__()
 
         self.cfg = cfg
-        self.feature_scaler = None      # for node features
-        self.target_scaler = None       # for output values
-        self.time_scaler = None         # for time normalization
-        self.edge_scaler = None         # for edge features
         self._validated_input = False   # Track if input has been validated
 
         # Node input = continuous node features + time
@@ -153,7 +149,7 @@ class PhloemNNConv(nn.Module):
             return
 
         must_have = ["node_feat", "edge_feat", "edge_index", "edge_org",
-                     "time_norm", "time_sigma", "node_fields", "sim_params", "step_params",]
+                     "node_fields", "sim_params", "step_params",]
 
         for k in must_have:
             if not hasattr(data, k):
@@ -174,35 +170,27 @@ class PhloemNNConv(nn.Module):
             raise ValueError("edge_org is empty")
         if data.edge_org.dtype != torch.long:
             raise ValueError(f"edge_org must be torch.long, got {data.edge_org.dtype}")
-        if data.edge_org.max() >= self.cfg.num_org_types:
-            raise ValueError(f"Edge organ type index {data.edge_org.max()} >= num_org_types {self.cfg.num_org_types}")
+        if data.edge_org.max().item() >= self.cfg.num_org_types:
+            raise ValueError(
+                f"Edge organ type index {data.edge_org.max().item()} >= num_org_types {self.cfg.num_org_types}"
+            )
 
-        if data.time_norm is None or data.time_sigma is None:
-            raise ValueError("time_norm and time_sigma are required for physics-informed loss computation")
-        if data.time_norm.ndim != 2 or data.time_norm.size(1) != 1:
-            raise ValueError(f"time_norm must be [N,1], got {tuple(data.time_norm.shape)}")
-        if data.time_sigma.ndim != 2 or data.time_sigma.size(1) != 1:
-            raise ValueError(f"time_sigma must be [N,1], got {tuple(data.time_sigma.shape)}")
+        if data.time_per_node is None:
+            raise ValueError("time_per_node is required for physics-informed loss computation")
+        if data.time_per_node.ndim != 2 or data.time_per_node.size(1) != 1:
+            raise ValueError(f"time_per_node must be [N,1], got {tuple(data.time_per_node.shape)}")
 
         self._validated_input = True
         print("Input validation successful: data format matches model configuration.")
 
     def to(self, device):
-        """Move the model and its scalers to the specified device."""
-        if hasattr(self, 'feature_scaler') and self.feature_scaler is not None:
-            self.feature_scaler.to(device)
-        if hasattr(self, 'target_scaler') and self.target_scaler is not None:
-            self.target_scaler.to(device)
-        if hasattr(self, 'time_scaler') and self.time_scaler is not None:
-            self.time_scaler.to(device)
-        if hasattr(self, 'edge_scaler') and self.edge_scaler is not None:
-            self.edge_scaler.to(device)
+        """Move the model to the specified device."""
         return super().to(device)
 
     def forward(self, data: Data) -> torch.Tensor:
         """Forward pass of the model.
 
-        IMPORTANT: This method expects data.time_norm / data.time_sigma to be present;
+        IMPORTANT: This method expects data.time_per_node to be present;
         which is essential for physics-informed loss computation. Always use the same
         data object for both model forward pass and physics_residual calculation.
 
@@ -214,35 +202,29 @@ class PhloemNNConv(nn.Module):
         """
         self._validate_input(data)
         device = next(self.parameters()).device
+        dtype = next(self.parameters()).dtype
 
-        node_feat: torch.Tensor = data.node_feat.to(device)
+        # Ensure inputs match model device and dtype (model is set to double())
+        node_feat: torch.Tensor = data.node_feat.to(device=device, dtype=dtype)
         edge_index: torch.Tensor = data.edge_index.to(device)
-        edge_feat: torch.Tensor = data.edge_feat.to(device)
+        edge_feat: torch.Tensor = data.edge_feat.to(device=device, dtype=dtype)
         edge_org: torch.Tensor = data.edge_org.to(device)
-        time_norm: torch.Tensor = data.time_norm.to(device)       # [N,1], standardized time τ
-        time_sigma: torch.Tensor = data.time_sigma.to(device)   # [N,1], σ_t for d/dt conversion
+        time_per_node: torch.Tensor = data.time_per_node.to(device=device, dtype=dtype)
 
         # Shape checks
-        if time_norm.size(0) != node_feat.size(0):
-            raise RuntimeError(f"`time_norm` must be [N,1]; got {tuple(time_norm.shape)} vs N={node_feat.size(0)}.")
-        if time_sigma.size(0) != node_feat.size(0):
-            raise RuntimeError(f"`time_sigma` must be [N,1]; got {tuple(time_sigma.shape)} vs N={node_feat.size(0)}.")
-
-        # Keep them on data for physics_residual
-        data.time_norm = time_norm
-        data.time_sigma = time_sigma
+        if time_per_node.dim() != 2 or time_per_node.size(1) != 1 or time_per_node.size(0) != node_feat.size(0):
+            raise RuntimeError(
+                f"`time_per_node` must be [N,1]; got {tuple(time_per_node.shape)} with N={node_feat.size(0)}."
+            )
 
         # Concatenate as extra channel
-        node_feat = torch.cat([node_feat, time_norm], dim=1)
-
-        # Optionally standardize continuous edge features (e.g., r_ST) before EdgeNet
-        edge_feat = self.edge_scaler.transform(edge_feat)
+        node_feat = torch.cat([node_feat, time_per_node], dim=1)
 
         # Pre-allocate tensor for edge features (continuous + categorical)
         # Use the same dtype as edge_feat to maintain consistency
         edge_features = torch.empty(
             edge_feat.size(0), edge_feat.size(1) + 1,
-            device=device, dtype=edge_feat.dtype
+            device=device, dtype=dtype
         )  # [E, D + 1] where D = number of continuous edge features
 
         edge_features[:, :-1] = edge_feat

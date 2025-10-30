@@ -367,7 +367,7 @@ def load_phloem_data(h5_path: str, batch_size: int = 32,
 
 def main():
     # Example 1: Load from single file (original behavior)
-    h5_path = '../simulation/data/sim_00/phloem_simulation.h5'
+    h5_path = '../cplantbox/data/sim_00/phloem_simulation.h5'
     print("====== Loading from single file ======")
     try:
         train_loader, val_loader, test_loader = load_phloem_data(h5_path)
@@ -376,7 +376,7 @@ def main():
         print(f"Single file loading failed: {e}")
 
     # Example 2: Load from directory (new batch loading functionality)
-    h5_dir = '../simulation/data/'  # Directory containing multiple .h5 files
+    h5_dir = '../cplantbox/data/'  # Directory containing multiple .h5 files
     print("\n====== Loading from directory ======")
     try:
         train_loader, val_loader, test_loader = load_phloem_data(h5_dir)

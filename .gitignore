@@ -1,6 +1,6 @@
 # ignore data, plots and models generated during development
-/dev/simulation/data/
-/dev/simulation/plot/
+/dev/cplantbox/data/
+/dev/cplantbox/plot/
 /dev/results/
 
 # Byte-compiled / optimized / DLL files

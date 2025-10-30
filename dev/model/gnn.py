@@ -37,15 +37,15 @@ class EdgeNet(nn.Module):
     MLP that turns per-edge features into a per-edge weight matrix W_e that NNConv
     will use to transform neighbor node features.
     """
-    def __init__(self, edge_feat_cont_dim: int, num_org_types: int, org_emb_size: int,
+    def __init__(self, edge_feat_cont_dim: int, num_org_types: int,
                  in_node_dim: int, out_node_dim: int, hidden_size: int = 64):
         super().__init__()
 
         self.in_node_dim = in_node_dim
         self.out_node_dim = out_node_dim
+        self.num_org_types = num_org_types
 
-        self.org_emb = nn.Embedding(num_org_types, org_emb_size)
-        edge_input_dim = edge_feat_cont_dim + org_emb_size
+        edge_input_dim = edge_feat_cont_dim + num_org_types
 
         # Combined MLP for both continuous and categorical features
         # It outputs a flattened weight matrix of size [out_channels * in_channels] per edge
@@ -57,14 +57,27 @@ class EdgeNet(nn.Module):
             nn.Linear(hidden_size, in_node_dim * out_node_dim)
         )
 
+        # Ensure EdgeNet is in float64 to match data loader dtype
+        self.double()
+        self.mlp.double()
+
     def forward(self, edge_features: torch.Tensor) -> torch.Tensor:
         # edge_features: [E, D+1] where D is edge_feat_cont_dim and last column is organ type
         edge_feat_cont = edge_features[:, :-1]  # continuous features
         edge_feat_cat = edge_features[:, -1].long()  # organ type as long tensor (int64)
 
-        # Combine continuous edge features with organ embeddings
-        edge_emb = self.org_emb(edge_feat_cat)
-        edge_inputs = torch.cat([edge_feat_cont, edge_emb], dim=-1)
+        # Convert organ type to one-hot encoding
+        device = edge_feat_cont.device
+        edge_one_hot = torch.zeros(edge_feat_cat.size(0), self.num_org_types,
+                                   device=device, dtype=edge_feat_cont.dtype)
+        edge_one_hot.scatter_(1, edge_feat_cat.unsqueeze(1), 1.0)
+
+        # Combine continuous edge features with one-hot organ type
+        edge_inputs = torch.cat([edge_feat_cont, edge_one_hot], dim=-1)
+
+        # Ensure dtype consistency by converting to model weights dtype
+        model_dtype = next(self.mlp.parameters()).dtype
+        edge_inputs = edge_inputs.to(dtype=model_dtype)
 
         return self.mlp(edge_inputs)
 
@@ -95,7 +108,6 @@ class PhloemNNConv(nn.Module):
         for _ in range(cfg.num_layers):
             edge_mlp = EdgeNet(edge_feat_cont_dim = cfg.edge_feat_dim,
                                num_org_types = cfg.num_org_types,
-                               org_emb_size = cfg.org_emb_size,
                                in_node_dim = current_dim,
                                out_node_dim = cfg.hidden_size,
                                hidden_size = cfg.hidden_size)
@@ -123,6 +135,9 @@ class PhloemNNConv(nn.Module):
 
         self.dropout = nn.Dropout(cfg.dropout)
         self._init_weights()
+
+        # Ensure model is in float64 to match data loader dtype
+        self.double()
 
     def _init_weights(self):
         """Initialize model weights."""
@@ -224,9 +239,10 @@ class PhloemNNConv(nn.Module):
         edge_feat = self.edge_scaler.transform(edge_feat)
 
         # Pre-allocate tensor for edge features (continuous + categorical)
+        # Use the same dtype as edge_feat to maintain consistency
         edge_features = torch.empty(
             edge_feat.size(0), edge_feat.size(1) + 1,
-            device=device, dtype=torch.float32
+            device=device, dtype=edge_feat.dtype
         )  # [E, D + 1] where D = number of continuous edge features
 
         edge_features[:, :-1] = edge_feat

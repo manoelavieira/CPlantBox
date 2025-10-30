@@ -67,10 +67,7 @@ class EdgeNet(nn.Module):
         edge_feat_cat = edge_features[:, -1].long()  # organ type as long tensor (int64)
 
         # Convert organ type to one-hot encoding
-        device = edge_feat_cont.device
-        edge_one_hot = torch.zeros(edge_feat_cat.size(0), self.num_org_types,
-                                   device=device, dtype=edge_feat_cont.dtype)
-        edge_one_hot.scatter_(1, edge_feat_cat.unsqueeze(1), 1.0)
+        edge_one_hot = F.one_hot(edge_feat_cat, num_classes=self.num_org_types).to(edge_features.dtype)
 
         # Combine continuous edge features with one-hot organ type
         edge_inputs = torch.cat([edge_feat_cont, edge_one_hot], dim=-1)
@@ -102,18 +99,18 @@ class PhloemNNConv(nn.Module):
         conv_layers = []
         norm_layers = []
         for _ in range(cfg.num_layers):
-            edge_mlp = EdgeNet(edge_feat_cont_dim = cfg.edge_feat_dim,
-                               num_org_types = cfg.num_org_types,
-                               in_node_dim = current_dim,
-                               out_node_dim = cfg.hidden_size,
-                               hidden_size = cfg.hidden_size)
+            edge_mlp = EdgeNet(edge_feat_cont_dim=cfg.edge_feat_dim,
+                               num_org_types=cfg.num_org_types,
+                               in_node_dim=current_dim,
+                               out_node_dim=cfg.hidden_size,
+                               hidden_size=cfg.hidden_size)
 
             # EdgeNet returns [E, in_channels * hidden_size]
             # NNConv reshapes to [E, in_channels, hidden_size]
-            conv = NNConv(in_channels = current_dim,
-                          out_channels = cfg.hidden_size,
-                          nn = edge_mlp,
-                          aggr = cfg.aggr)
+            conv = NNConv(in_channels=current_dim,
+                          out_channels=cfg.hidden_size,
+                          nn=edge_mlp,
+                          aggr=cfg.aggr)
             conv_layers.append(conv)
             norm_layers.append(GraphNorm(cfg.hidden_size))  # per-graph stats
             current_dim = cfg.hidden_size
@@ -261,5 +258,8 @@ class PhloemNNConv(nn.Module):
 
         # Positive output with learnable scale (better gradient flow)
         out = torch.exp(self.log_alpha) * F.softplus(out)
+
+        # For sharper non-negativity barrier, put the scale inside Softplus
+        # out = F.softplus(torch.exp(self.log_alpha) * out)
 
         return out

@@ -10,9 +10,10 @@ import torch
 
 class LossType(Enum):
     """Enumeration for different loss configurations."""
-    DATA_ONLY = "data"         # MSE only
-    PHYSICS_ONLY = "physics"   # Physics term only
-    COMBINED = "combined"      # Both MSE and physics terms
+    DATA_ONLY = "data"              # MSE only
+    PHYSICS_ONLY = "physics"        # Physics term only
+    PHYSICS_WITH_IC = "physics_ic"  # Physics term + initial condition supervision
+    COMBINED = "combined"           # Both MSE and physics terms
 
 
 @dataclass
@@ -32,7 +33,8 @@ class TrainingConfig:
     lambda_phys: float = 1.0
 
     # Loss configuration
-    loss_type: LossType = LossType.PHYSICS_ONLY
+    loss_type: LossType = LossType.PHYSICS_WITH_IC
+    lambda_ic: float = 1.0  # Weight for initial condition term (only used with PHYSICS_WITH_IC)
 
     # Reproducibility
     seed: int = 42
@@ -119,10 +121,13 @@ class TrainingMetrics:
     mse: float
     mae: float
     physics: float
+    ic_loss: float = 0.0  # Initial condition loss
     physics_details: Optional['PhysicsMetrics'] = None
 
     def __str__(self) -> str:
         base_str = f"loss={self.loss:.4f} MSE={self.mse:.4f} physics={self.physics:.4f}"
+        if self.ic_loss > 0:
+            base_str += f" IC={self.ic_loss:.4f}"
         if self.physics_details is not None:
             base_str += f" | {self.physics_details}"
         return base_str

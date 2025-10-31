@@ -115,8 +115,8 @@ def load_best_model(
         model_setup.model.load_state_dict(best_checkpoint['state_dict'])
 
         print(f"Loaded best model from epoch {best_checkpoint['epoch']} "
-              f"with validation loss {best_checkpoint['val_loss']:.4f} "
-              f"(MSE: {best_checkpoint['val_mse']:.4f})")
+              f"with validation loss {best_checkpoint['val_loss']:.4e} "
+              f"(MSE: {best_checkpoint['val_mse']:.4e})")
         return True
 
     except Exception as e:

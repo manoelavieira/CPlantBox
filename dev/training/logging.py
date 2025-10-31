@@ -111,10 +111,12 @@ def log_epoch_metrics(
     writer.add_scalar('loss/train_total', train_metrics.loss, epoch)
     writer.add_scalar('loss/train_mse', train_metrics.mse, epoch)
     writer.add_scalar('loss/train_physics', train_metrics.physics, epoch)
+    writer.add_scalar('loss/train_ic', train_metrics.ic_loss, epoch)
 
     writer.add_scalar('metrics/val_total', val_metrics.loss, epoch)
     writer.add_scalar('metrics/val_mse', val_metrics.mse, epoch)
     writer.add_scalar('metrics/val_physics', val_metrics.physics, epoch)
+    writer.add_scalar('metrics/val_ic', val_metrics.ic_loss, epoch)
 
     writer.add_scalar('learning_rate', current_lr, epoch)
 
@@ -166,7 +168,8 @@ def log_batch_metrics(
     loss: torch.Tensor,
     mse: torch.Tensor,
     mae: torch.Tensor,
-    physics: torch.Tensor
+    physics: torch.Tensor,
+    ic_loss: torch.Tensor = None
 ) -> None:
     """Log batch-level metrics to TensorBoard."""
     step = epoch * loader_len + batch_idx
@@ -174,6 +177,8 @@ def log_batch_metrics(
     writer.add_scalar('training/batch_mse', float(mse), step)
     writer.add_scalar('training/batch_mae', float(mae), step)
     writer.add_scalar('training/batch_physics', float(physics), step)
+    if ic_loss is not None:
+        writer.add_scalar('training/batch_ic_loss', float(ic_loss), step)
 
 
 def log_evaluation_histograms(

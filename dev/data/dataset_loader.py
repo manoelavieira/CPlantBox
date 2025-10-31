@@ -48,7 +48,11 @@ def collate_graphs(batch):
     return batched_data
 
 
-def get_edge_index_from_topology(I_Upflow: np.ndarray, I_Downflow: np.ndarray, connectivity: np.ndarray = None) -> torch.Tensor:
+def get_edge_index_from_topology(
+        I_Upflow: np.ndarray,
+        I_Downflow: np.ndarray,
+        connectivity: np.ndarray = None
+    ) -> torch.Tensor:
     """
     Convert topology arrays (edge->node mapping) into a PyG edge_index.
 
@@ -63,13 +67,11 @@ def get_edge_index_from_topology(I_Upflow: np.ndarray, I_Downflow: np.ndarray, c
     edges = []
 
     if connectivity is not None:
-        # print("> Using connectivity array for edge construction")
         n_edges = len(connectivity)
         for e in range(n_edges):
             up, down = connectivity[e]
             edges.append([up, down])  # add directed edge
     else:
-        # print("> Using I_Upflow/I_Downflow arrays for edge construction")
         n_edges = len(I_Upflow)
         for e in range(n_edges):
             up, down = I_Upflow[e], I_Downflow[e]
@@ -78,22 +80,24 @@ def get_edge_index_from_topology(I_Upflow: np.ndarray, I_Downflow: np.ndarray, c
     if not edges:
         raise ValueError("No valid edges found")
 
-    # print(f"Number of edges: {len(edges)}")
-
     # Convert list of [src, dst] edges (shape [E, 2]) into PyG format [2, E]:
-    #   1. torch.tensor(..., long) -> create integer tensor of edges
-    #   2. .t() -> transpose to [2, E], i.e. [sources; targets]
-    #   3. .contiguous() -> ensure memory layout is contiguous for safe GPU ops
+    # 1. torch.tensor(..., long) -> create integer tensor of edges
+    # 2. .t() -> transpose to [2, E], i.e. [sources; targets]
+    # 3. .contiguous() -> ensure memory layout is contiguous for safe GPU ops
     edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+
     return edge_index
 
 
-def load_graph_data(h5_file: h5py.File, timestep: int) -> Data:
+def load_graph_data(h5_file: h5py.File, timestep: int, initial_node_count: int = None) -> Data:
     """Load graph data for a specific timestep.
 
     Args:
         h5_file: Open HDF5 file containing simulation data
         timestep: Index of timestep to load
+        initial_node_count: Number of initial nodes from timestep 0.
+                            If None, will be determined from step_000.
+                            Used to create initial node mask.
 
     Returns:
         data: PyG Data object containing graph structure and features
@@ -147,9 +151,6 @@ def load_graph_data(h5_file: h5py.File, timestep: int) -> Data:
     node_pos_np = h5_file[f"{step_key}/nodes/positions"][:]  # [N, 3]
     node_pos = torch.from_numpy(node_pos_np.astype(np.float64, copy=False))
 
-    # print(f"\nStep {timestep}: Number of nodes = {num_nodes}")
-    # print(f"node_feat_shape: {node_feat.shape}, node_feat_dtype: {node_feat.dtype}")
-
     # Get graph structure from both methods for comparison
     I_Up = h5_file[f'{step_key}/arrays/I_Upflow'][:]
     I_Down = h5_file[f'{step_key}/arrays/I_Downflow'][:]
@@ -158,11 +159,6 @@ def load_graph_data(h5_file: h5py.File, timestep: int) -> Data:
     # Try both methods and compare
     edge_index_flow = get_edge_index_from_topology(I_Up, I_Down)
     edge_index_conn = get_edge_index_from_topology(None, None, connectivity)
-
-    # Compare the two edge_index tensors
-    # print("\nComparing edge construction methods:")
-    # if torch.equal(edge_index_flow, edge_index_conn):
-    #     print("Both methods yield the same edge_index.")
 
     # Use connectivity method for edge_index
     edge_index = edge_index_conn
@@ -219,6 +215,30 @@ def load_graph_data(h5_file: h5py.File, timestep: int) -> Data:
 
     sim_params = torch.tensor(sim_param_vals, dtype=torch.float64).view(1, -1)  # [1, K]
 
+    # Create initial node mask based on node indices
+    is_initial_node = torch.zeros(num_nodes, dtype=torch.bool)
+
+    try:
+        if initial_node_count is not None:
+            t0_nodes = initial_node_count
+        else:
+            t0_nodes = get_initial_node_count(h5_file)
+
+        if timestep == 0:
+            # For t=0, all nodes are initial
+            is_initial_node[:] = True
+        else:
+            # For subsequent timesteps, nodes 0 to (t0_nodes-1) are initial
+            # Only mark as initial if the node index is within the original range
+            initial_count = min(t0_nodes, num_nodes)
+            is_initial_node[:initial_count] = True
+
+    except Exception as e:
+        warnings.warn(f"Could not determine initial nodes for timestep {timestep}: {str(e)}")
+
+        if timestep == 0:
+            is_initial_node[:] = True
+
     # Create PyG Data object with explicit num_nodes
     data = Data(
         node_feat=node_feat,    # Node features [N, 3] - [psi, vol_ST, len_leaf]
@@ -234,17 +254,74 @@ def load_graph_data(h5_file: h5py.File, timestep: int) -> Data:
         step_params_names=list(step_params_names),  # list[str] (not used in math; for reference)
         node_fields=node_fields,                    # Additional node fields for physics residual [N, len(names)]
         node_fields_names=list(node_fields_names),  # list[str] (not used in math; for reference)
-        node_pos=node_pos                           # Node positions [N, 3] (optional; for visualization)
+        node_pos=node_pos,                          # Node positions [N, 3] (optional; for visualization)
+        is_initial_node=is_initial_node             # Boolean mask indicating nodes present at t=0 [N]
     )
 
     return data
 
 
-def load_graphs_from_file(h5_path: str) -> List[Data]:
+def get_initial_node_count(h5_file: h5py.File) -> int:
+    """Get the number of nodes in the first timestep (t=0) of an HDF5 file.
+
+    Args:
+        h5_file: Open HDF5 file containing simulation data
+
+    Returns:
+        int: Number of nodes in timestep 0
+    """
+    try:
+        step_key = 'step_000'  # First timestep
+        node_count = h5_file[f"{step_key}/nodes/positions"].shape[0]
+        return node_count
+    except KeyError:
+        warnings.warn(f"Could not find step_000 in HDF5 file")
+        return 0
+
+
+def find_common_initial_node_count(h5_files: List[Path]) -> int:
+    """Find the minimum number of initial nodes across all simulation files.
+
+    This identifies the common initial node count that exists across all
+    simulation runs of the same plant. Uses the minimum count to ensure
+    all files have at least this many initial nodes.
+
+    Args:
+        h5_files: List of HDF5 file paths
+
+    Returns:
+        int: Minimum number of initial nodes across all files
+    """
+    if not h5_files:
+        return 0
+
+    min_initial_count = float('inf')
+
+    for h5_file_path in h5_files:
+        try:
+            with h5py.File(h5_file_path, 'r') as f:
+                file_initial_count = get_initial_node_count(f)
+                min_initial_count = min(min_initial_count, file_initial_count)
+
+        except Exception as e:
+            warnings.warn(f"Error reading initial node count from {h5_file_path}: {str(e)}")
+            continue
+
+    if min_initial_count == float('inf'):
+        return 0
+
+    print(f"Found {min_initial_count} common initial nodes across {len(h5_files)} files")
+
+    return min_initial_count
+
+
+def load_graphs_from_file(h5_path: str, initial_node_count: int = None) -> List[Data]:
     """Load all graph data from a single HDF5 file.
 
     Args:
         h5_path: Path to HDF5 file containing simulation data
+        initial_node_count: Number of initial nodes (for index-based marking).
+                            If None, will be determined from step_000.
 
     Returns:
         graphs: List of PyG Data objects loaded from the file
@@ -266,7 +343,7 @@ def load_graphs_from_file(h5_path: str) -> List[Data]:
             # Load graphs from each timestep
             for i in range(n_steps):
                 try:
-                    graph = load_graph_data(f, i)
+                    graph = load_graph_data(f, i, initial_node_count)
                     graphs.append(graph)
                 except Exception as e:
                     warnings.warn(f"Error loading timestep {i} from {h5_path}: {str(e)}")
@@ -280,63 +357,64 @@ def load_graphs_from_file(h5_path: str) -> List[Data]:
     return graphs
 
 
-def load_phloem_data(h5_path: str, batch_size: int = 32,
-                     train_ratio: float = 0.8, val_ratio: float = 0.1,
-                     random_seed: int = 42) -> Tuple[DataLoader, DataLoader, DataLoader]:
-    """Load phloem simulation data and create train/val/test DataLoaders.
+def load_graphs_from_directory(h5_dir: str) -> List[Data]:
+    """Load all graph data from all HDF5 files in a directory.
 
     Args:
-        h5_path: Path to HDF5 file or directory containing HDF5 files with simulation data
-        batch_size: Batch size for DataLoaders
-        train_ratio: Proportion of data to use for training
-        val_ratio: Proportion of data to use for validation
-        random_seed: Random seed for reproducibility
-
+        h5_dir: Path to directory containing HDF5 files
     Returns:
-        train_loader, val_loader, test_loader: DataLoaders for each split
+        graphs: List of PyG Data objects loaded from all files
     """
-    print(f"train_ratio: {train_ratio}, val_ratio: {val_ratio}, test_ratio: {1 - train_ratio - val_ratio}")
-
     graphs: List[Data] = []
 
-    # Check if h5_path is a file or directory
-    path = Path(h5_path)
+    # Find all .h5 files in the directory
+    h5_files = list(Path(h5_dir).rglob("*.h5"))
+    if not h5_files:
+        raise RuntimeError(f"No .h5 files found in directory {h5_dir}")
 
-    if path.is_file():
-        # Single file case (original behavior)
-        print(f"Loading data from single file: {h5_path}")
-        graphs = load_graphs_from_file(h5_path)
+    print(f"Found {len(h5_files)} .h5 files in directory")
 
-    elif path.is_dir():
-        # Directory case (new batch loading functionality)
-        print(f"Loading data from directory: {h5_path}")
+    # Find common initial node count across all files
+    common_initial_count = find_common_initial_node_count(h5_files)
 
-        # Find all .h5 files in the directory
-        h5_files = list(path.rglob("*.h5"))
-        if not h5_files:
-            raise RuntimeError(f"No .h5 files found in directory {h5_path}")
-
-        print(f"Found {len(h5_files)} .h5 files in directory")
-
-        # Load graphs from each file
-        for h5_file in sorted(h5_files):  # Sort for consistent ordering
-            print(f"\nProcessing file: {h5_file}")
-            try:
-                file_graphs = load_graphs_from_file(str(h5_file))
-                graphs.extend(file_graphs)
-                print(f"\nLoaded {len(file_graphs)} graphs from {h5_file}")
-            except Exception as e:
-                warnings.warn(f"Failed to load file {h5_file}: {str(e)}")
-                continue
-
-    else:
-        raise RuntimeError(f"Path {h5_path} is neither a file nor a directory")
+    # Load graphs from each file
+    for h5_file in sorted(h5_files):  # Sort for consistent ordering
+        print(f"\nProcessing file: {h5_file}")
+        try:
+            file_graphs = load_graphs_from_file(str(h5_file), common_initial_count)
+            graphs.extend(file_graphs)
+            print(f"Loaded {len(file_graphs)} graphs from {h5_file}")
+        except Exception as e:
+            warnings.warn(f"Failed to load file {h5_file}: {str(e)}")
+            continue
 
     if not graphs:
         raise RuntimeError("No valid graphs loaded")
 
     print(f"\nSuccessfully loaded {len(graphs)} total graphs")
 
+    return graphs
+
+
+def train_test_split(
+        graphs: List[Data],
+        train_ratio: float,
+        val_ratio: float,
+        batch_size: int = 8,
+        random_seed: int = 42
+    ) -> Tuple[List[Data], List[Data], List[Data]]:
+    """Split graphs into train/val/test sets.
+
+    Args:
+        graphs: List of PyG Data objects
+        train_ratio: Proportion of data to use for training
+        val_ratio: Proportion of data to use for validation
+        batch_size: Batch size for DataLoaders
+        random_seed: Random seed for reproducibility
+
+    Returns:
+        train_graphs, val_graphs, test_graphs: Lists of graphs for each split
+    """
     # Split graphs into train/val/test
     n_samples = len(graphs)
     n_train = int(train_ratio * n_samples)
@@ -365,18 +443,70 @@ def load_phloem_data(h5_path: str, batch_size: int = 32,
     return train_loader, val_loader, test_loader
 
 
+def load_phloem_data(
+       h5_path: str,
+       batch_size: int = 8,
+       train_ratio: float = 0.8,
+       val_ratio: float = 0.1,
+       random_seed: int = 42
+   ) -> Tuple[DataLoader, DataLoader, DataLoader]:
+    """Load phloem simulation data and create train/val/test DataLoaders.
+
+    Args:
+        h5_path: Path to HDF5 file or directory containing HDF5 files with simulation data
+        batch_size: Batch size for DataLoaders
+        train_ratio: Proportion of data to use for training
+        val_ratio: Proportion of data to use for validation
+        random_seed: Random seed for reproducibility
+
+    Returns:
+        train_loader, val_loader, test_loader: DataLoaders for each split
+    """
+    print(f"train_ratio: {train_ratio}, val_ratio: {val_ratio}, test_ratio: {1 - train_ratio - val_ratio}")
+
+    graphs: List[Data] = []
+    path = Path(h5_path)
+
+    if path.is_file():
+        print(f"Loading data from single file: {h5_path}")
+        graphs = load_graphs_from_file(h5_path, None)
+    elif path.is_dir():
+        print(f"Loading data from directory: {h5_path}")
+        graphs = load_graphs_from_directory(h5_path)
+    else:
+        raise RuntimeError(f"Path {h5_path} is neither a file nor a directory")
+
+    if not graphs:
+        raise RuntimeError("No valid graphs loaded")
+
+    print(f"\nSuccessfully loaded {len(graphs)} total graphs")
+
+    train_loader, val_loader, test_loader = train_test_split(graphs, train_ratio, val_ratio, batch_size, random_seed)
+
+    return train_loader, val_loader, test_loader
+
+
 def main():
-    # Example 1: Load from single file (original behavior)
-    h5_path = '../cplantbox/data/sim_00/phloem_simulation.h5'
+    # ==== Example 1: Load from single file (original behavior)
+    h5_path = './cplantbox/data/sim_01/phloem_simulation.h5'
     print("====== Loading from single file ======")
     try:
         train_loader, val_loader, test_loader = load_phloem_data(h5_path)
         print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}, Test batches: {len(test_loader)}")
+
+        # Test the initial node mask
+        graphs = load_graphs_from_file(h5_path, None)
+        print(f"Loaded {len(graphs)} graphs from file")
+
+        # Show details for first few graphs
+        for i, graph in enumerate(graphs[:3]):
+            print(f"Graph {i} at timestep {graph.time.item()}: {graph.is_initial_node.sum().item()} initial nodes out of {graph.is_initial_node.size(0)} total nodes")
+
     except Exception as e:
         print(f"Single file loading failed: {e}")
 
-    # Example 2: Load from directory (new batch loading functionality)
-    h5_dir = '../cplantbox/data/'  # Directory containing multiple .h5 files
+    # ==== Example 2: Load from directory (new batch loading functionality)
+    h5_dir = './cplantbox/data/'  # directory containing multiple .h5 files
     print("\n====== Loading from directory ======")
     try:
         train_loader, val_loader, test_loader = load_phloem_data(h5_dir)

@@ -244,6 +244,11 @@ def train_epoch(
         # Compute physics residual
         if loss_type == LossType.DATA_ONLY:
             phys_res, phys_res_metrics = torch.tensor(0.0, device=pred.device), None
+
+            if batch_idx == 0:
+                print(f"\nEpoch {epoch} Nodes: {data.y.shape[0]}")
+                print(f"Q_ST true:\n{data.y.detach().cpu().numpy()[:10]}")
+                print(f"Q_ST pred:\n{pred.detach().cpu().numpy()[:10]}")
         else:
             phys_res, phys_res_metrics = compute_physics_residual_step(
                 model=model,

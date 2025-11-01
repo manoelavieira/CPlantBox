@@ -26,6 +26,16 @@ CPLANTBOX_ORGAN_TYPES = {
     4: "leaf"
 }
 
+# Remapped organ types for GNN model (only effective types: root, stem, leaf)
+# Maps CPlantBox indices [2,3,4] -> [0,1,2]
+GNN_ORGAN_TYPES = {
+    0: "root",
+    1: "stem",
+    2: "leaf"
+}
+
+CPLANTBOX_TO_GNN_MAPPING = {2: 0, 3: 1, 4: 2}  # root -> 0, stem -> 1, leaf -> 2
+
 
 def collate_graphs(batch):
     """Custom collate function that handles parameter names properly."""
@@ -168,22 +178,31 @@ def load_graph_data(h5_file: h5py.File, timestep: int, initial_node_count: int =
     r_st = torch.tensor(h5_file[f'{step_key}/segments/r_ST'][:], dtype=torch.float64)
     edge_feat = r_st.view(-1, 1)  # [E, 1]
 
-    # Use CPlantBox organ type mapping directly: ot_organ=0, ot_seed=1, ot_root=2, ot_stem=3, ot_leaf=4
-    org_types = torch.tensor(h5_file[f'{step_key}/segments/organ_types'][:], dtype=torch.long)
-    edge_org = org_types
+    # Load organ types and remap to GNN indices
+    # CPlantBox: ot_organ=0, ot_seed=1, ot_root=2, ot_stem=3, ot_leaf=4
+    # GNN model: ot_root=0, ot_stem=1, ot_leaf=2 (only effective types)
+    org_types_raw = torch.tensor(h5_file[f'{step_key}/segments/organ_types'][:], dtype=torch.long)
 
-    # Validate organ types are within expected range [0, 4]
+    # Filter out unused organ types (0=organ, 1=seed) and remap the rest
+    valid_mask = (org_types_raw >= 2)  # Only keep root(2), stem(3), leaf(4)
+    if not valid_mask.all():
+        print(f"[WARN] Step {timestep}: Found {(~valid_mask).sum()} edges with organ types 0 or 1, filtering them out")
+
+    # Remap organ types: 2->0, 3->1, 4->2
+    edge_org = torch.tensor([CPLANTBOX_TO_GNN_MAPPING.get(t.item(), -1) for t in org_types_raw], dtype=torch.long)
+
+    # Validate remapped organ types are within expected range [0, 2]
     if edge_org.numel() > 0:
         min_org_type, max_org_type = edge_org.min().item(), edge_org.max().item()
-        if min_org_type < 0 or max_org_type > 4:
-            print(f"[WARN] Step {timestep}: Found organ types outside range [0,4]: min={min_org_type}, max={max_org_type}")
+        if min_org_type < 0 or max_org_type > 2:
+            raise ValueError(f"Step {timestep}: Remapped organ types outside range [0,2]: min={min_org_type}, max={max_org_type}")
 
         # Print organ type distribution for debugging (only first timestep)
         if timestep == 0:
             unique_types, counts = torch.unique(edge_org, return_counts=True)
-            type_dist = {CPLANTBOX_ORGAN_TYPES.get(t.item(), f"unknown_{t.item()}"): c.item()
+            type_dist = {GNN_ORGAN_TYPES.get(t.item(), f"unknown_{t.item()}"): c.item()
                         for t, c in zip(unique_types, counts)}
-            print(f"Organ type distribution: {type_dist}")
+            print(f"GNN organ type distribution: {type_dist}")
 
     # Load target values (sucrose concentration)
     y = torch.tensor(h5_file[f'{step_key}/nodes/Q_ST'][:], dtype=torch.float64).view(-1, 1)

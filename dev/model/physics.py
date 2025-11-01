@@ -265,13 +265,6 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
         y_true = data.y.clone().detach()
         y_true.requires_grad_(True)
 
-        # Create a version of true values that requires gradients and is connected to time_per_node
-        # Connect y_true to time_per_node by adding a small term that depends on time_per_node
-        # This ensures the gradient computation works while keeping values essentially unchanged
-        epsilon = 1e-10
-        time_connection = epsilon * data.time_per_node.sum()
-        y_true_connected = y_true + time_connection
-
     # Extract parameters and node fields
     params = utils.extract_parameters(data, device, batch_vec, N if batch_vec is None else None)
     node_fields = utils.extract_node_fields(data, device)
@@ -295,7 +288,6 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
         dS_dt_from_flux_true = compute_flux_divergence(J_ax_true, data.edge_index.to(device), N, device)
         F_in_true = compute_phloem_loading(y_true, data, params, node_fields, device)
         F_out_true = compute_sucrose_outflow(y_true, data, params, node_fields, device)
-        ds_dt_true = compute_time_derivative(y_true_connected, data)
         dS_dt_from_physics_true = dS_dt_from_flux_true + F_in_true - F_out_true
 
         print(f"\nNumber of graphs in batch: {torch.bincount(batch_vec).size(0)}")
@@ -313,7 +305,6 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
         print(f"\nF_out_true:\n{F_out_true[batch_vec == 0].detach().cpu().numpy()[:10]}")
         print(f"F_out:\n{F_out[batch_vec == 0].detach().cpu().numpy()[:10]}")
 
-        print(f"\nds_dt_true:\n{ds_dt_true[batch_vec == 0].detach().cpu().numpy()[:10]}")
         print(f"ds_dt:\n{ds_dt[batch_vec == 0].detach().cpu().numpy()[:10]}")
 
     # Compute residual as difference between model derivative and physics derivative

@@ -1,7 +1,7 @@
 """
 Phloem GNN (baseline) — NNConv with edge features
 -------------------------------------------------
-Predicts sucrose concentration per node at timestep t, given:
+Predicts sucrose content per node at timestep t, given:
 - Plant topology (edge_index)
 - Node features at time t: water potential (psi), sieve-tube volume (vol_st), leaf length (len_leaf)
 - Edge features at time t: sieve-tube resistance (r_st), organ type (categorical)
@@ -83,7 +83,7 @@ class PhloemNNConv(nn.Module):
     """Neural network model for phloem flow prediction using NNConv layers.
 
     Combines node features with edge features through multiple NNConv
-    layers to predict sucrose concentration.
+    layers to predict sucrose content.
     """
 
     def __init__(self, cfg: ModelConfig):
@@ -195,7 +195,7 @@ class PhloemNNConv(nn.Module):
             data: Graph data object containing node features, edge features, topology and time
 
         Returns:
-            torch.Tensor: Predicted sucrose concentration for each node [N, 1]
+            torch.Tensor: Predicted sucrose content for each node [N, 1]
         """
         self._validate_input(data)
         device = next(self.parameters()).device

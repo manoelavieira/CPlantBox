@@ -28,7 +28,7 @@ from torch_geometric.nn import NNConv
 from torch_geometric.nn.norm import GraphNorm  # per-graph normalization
 
 from .config import ModelConfig
-
+import math
 
 class EdgeNet(nn.Module):
     """Edge MLP producing weight matrices for NNConv.
@@ -123,8 +123,8 @@ class PhloemNNConv(nn.Module):
             nn.Linear(cfg.hidden_size, 1)
         )
 
-        # Learnable output gain for softplus scaling
-        self.log_alpha = nn.Parameter(torch.tensor(0.0))  # starts at 1.0x scale
+        # Learnable output gain for softplus scaling; init near target magnitude
+        self.log_alpha = nn.Parameter(torch.tensor(math.log(5e-5), dtype=torch.float64))
 
         self.dropout = nn.Dropout(cfg.dropout)
         self._init_weights()
@@ -256,7 +256,7 @@ class PhloemNNConv(nn.Module):
         # Final MLP head to produce scalar output per node
         out = self.head(node_feat)
 
-        # Positive output with learnable scale (better gradient flow)
+        # Positive output with learnable scale
         out = torch.exp(self.log_alpha) * F.softplus(out)
 
         # For sharper non-negativity barrier, put the scale inside Softplus

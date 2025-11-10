@@ -244,11 +244,6 @@ def train_epoch(
         # Compute physics residual
         if loss_type == LossType.DATA_ONLY:
             phys_res, phys_res_metrics = torch.tensor(0.0, device=pred.device), None
-
-            if batch_idx == 0:
-                print(f"\nEpoch {epoch} Nodes: {data.y.shape[0]}")
-                print(f"Q_ST true:\n{data.y.detach().cpu().numpy()[:10]}")
-                print(f"Q_ST pred:\n{pred.detach().cpu().numpy()[:10]}")
         else:
             phys_res, phys_res_metrics = compute_physics_residual_step(
                 model=model,
@@ -267,6 +262,22 @@ def train_epoch(
             getattr(data, 'is_initial_node', None),
             lambda_ic,
         )
+
+        if loss_type == LossType.DATA_ONLY:
+            mean_y = data.y.mean().item()
+            mean_pred = pred.mean().item()
+
+            log_path = "results/debug_output.txt"
+            with open(log_path, "a") as f:
+                if batch_idx == 0 or batch_idx == len(loader) - 1:
+                    msg = (
+                        f"\nEpoch {epoch:03d} | Batch {batch_idx} | Number of nodes: {data.y.shape[0]}\n"
+                        f"Q_ST true:\n{data.y.detach().cpu().numpy()[:10]}\n"
+                        f"Q_ST pred:\n{pred.detach().cpu().numpy()[:10]}\n"
+                        f"Mean Q_ST true: {mean_y:.6e}, Mean Q_ST pred: {mean_pred:.6e}"
+                    )
+                    print(msg)
+                    f.write(msg + "\n")
 
         loss.backward()
 
@@ -480,7 +491,7 @@ def test_model(
 
     writer.add_text('final/results', final_summary)
 
-    print(f"\nFinal test metrics - Loss: {test_loss:.3e}, MSE: {test_mse:.4f}, Physics: {test_phys:.3e}, IC Loss: {test_ic:.3e}")
+    print(f"\nFinal test metrics - Loss: {test_loss:.3e}, MSE: {test_mse:.3e}, Physics: {test_phys:.3e}, IC Loss: {test_ic:.3e}")
     if test_phys_metrics is not None:
         print(f"Test Physics Details: {test_phys_metrics}")
 

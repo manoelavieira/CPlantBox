@@ -47,7 +47,7 @@ class TrainingConfig:
     clip_grad_norm: float = 1.0
 
     # Paths
-    model_save_dir: str = "results/models"
+    model_save_dir: str = "results/best_model"
     model_filename: str = "best_model.pt"
     tensorboard_log_dir: str = "results/tensorboard_logs"
 

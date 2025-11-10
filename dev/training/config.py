@@ -120,12 +120,14 @@ class TrainingMetrics:
     loss: float
     mse: float
     mae: float
+    rmse: float
+    rel_error: float
     physics: float
     ic_loss: float = 0.0  # Initial condition loss
     physics_details: Optional['PhysicsMetrics'] = None
 
     def __str__(self) -> str:
-        base_str = f"loss={self.loss:.4f} MSE={self.mse:.4f} physics={self.physics:.4f}"
+        base_str = f"loss={self.loss:.3e} MSE={self.mse:.3e} RMSE={self.rmse:.3e} MAE={self.mae:.3e} RelErr={self.rel_error:.3e} physics={self.physics:.3e}"
         if self.ic_loss > 0:
             base_str += f" IC={self.ic_loss:.4f}"
         if self.physics_details is not None:

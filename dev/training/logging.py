@@ -113,8 +113,15 @@ def log_epoch_metrics(
     writer.add_scalar('loss/train_physics', train_metrics.physics, epoch)
     writer.add_scalar('loss/train_ic', train_metrics.ic_loss, epoch)
 
+    writer.add_scalar('metrics/train_mae', train_metrics.mae, epoch)
+    writer.add_scalar('metrics/train_rmse', train_metrics.rmse, epoch)
+    writer.add_scalar('metrics/train_rel_error', train_metrics.rel_error, epoch)
+
     writer.add_scalar('metrics/val_total', val_metrics.loss, epoch)
     writer.add_scalar('metrics/val_mse', val_metrics.mse, epoch)
+    writer.add_scalar('metrics/val_mae', val_metrics.mae, epoch)
+    writer.add_scalar('metrics/val_rmse', val_metrics.rmse, epoch)
+    writer.add_scalar('metrics/val_rel_error', val_metrics.rel_error, epoch)
     writer.add_scalar('metrics/val_physics', val_metrics.physics, epoch)
     writer.add_scalar('metrics/val_ic', val_metrics.ic_loss, epoch)
 
@@ -123,6 +130,26 @@ def log_epoch_metrics(
     writer.add_scalars('loss/comparison', {
         'train_total': train_metrics.loss,
         'val_total': val_metrics.loss
+    }, epoch)
+
+    writer.add_scalars('metrics/mse_comparison', {
+        'train': train_metrics.mse,
+        'val': val_metrics.mse
+    }, epoch)
+
+    writer.add_scalars('metrics/rmse_comparison', {
+        'train': train_metrics.rmse,
+        'val': val_metrics.rmse
+    }, epoch)
+
+    writer.add_scalars('metrics/mae_comparison', {
+        'train': train_metrics.mae,
+        'val': val_metrics.mae
+    }, epoch)
+
+    writer.add_scalars('metrics/rel_error_comparison', {
+        'train': train_metrics.rel_error,
+        'val': val_metrics.rel_error
     }, epoch)
 
     writer.add_scalars('loss/components', {
@@ -168,6 +195,8 @@ def log_batch_metrics(
     loss: torch.Tensor,
     mse: torch.Tensor,
     mae: torch.Tensor,
+    rmse: torch.Tensor,
+    rel_error: torch.Tensor,
     physics: torch.Tensor,
     ic_loss: torch.Tensor = None
 ) -> None:
@@ -176,6 +205,8 @@ def log_batch_metrics(
     writer.add_scalar('training/batch_loss', float(loss), step)
     writer.add_scalar('training/batch_mse', float(mse), step)
     writer.add_scalar('training/batch_mae', float(mae), step)
+    writer.add_scalar('training/batch_rmse', float(rmse), step)
+    writer.add_scalar('training/batch_rel_error', float(rel_error), step)
     writer.add_scalar('training/batch_physics', float(physics), step)
     if ic_loss is not None:
         writer.add_scalar('training/batch_ic_loss', float(ic_loss), step)

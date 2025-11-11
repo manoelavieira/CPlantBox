@@ -167,31 +167,61 @@ def compute_loss_and_metrics(
     lambda_phys: float = 1.0,
     is_initial_node: torch.Tensor = None,
     lambda_ic: float = 1.0,
+    batch_vec: torch.Tensor = None,
 ):
-    """Compute loss and metrics without standardization.
+    """Compute loss and metrics with per-graph aggregation (consistent with physics residual).
+
+    Computes metrics per-graph first, then averages across graphs in the batch.
+    This ensures equal weight per graph regardless of graph size, matching the
+    physics residual computation strategy.
 
     Args:
-        pred: Model predictions (already in original space)
-        y: Target values (in original space)
-        loss_phys: Precomputed physics residual
+        pred: Model predictions (already in original space) [N, 1]
+        y: Target values (in original space) [N, 1]
+        loss_phys: Precomputed physics residual (already properly averaged per-graph)
         loss_type: Type of loss to compute
         lambda_phys: Physics term weight
         is_initial_node: Boolean mask for initial nodes (required for PHYSICS_WITH_IC)
         lambda_ic: Initial condition term weight
+        batch_vec: Batch assignment for each node [N] (None for single graph)
 
     Returns:
         Tuple of (total_loss, mse, mae, rmse, rel_error, ic_loss)
     """
-    # MSE and MAE in original space
-    loss_mse = F.mse_loss(pred, y, reduction='mean')
-    mae = (pred - y).abs().mean()
+    from torch_scatter import scatter_mean
 
-    # RMSE: Root Mean Squared Error
-    rmse = torch.sqrt(loss_mse)
+    # Squeeze predictions and targets to [N]
+    pred_flat = pred.squeeze(-1)
+    y_flat = y.squeeze(-1)
 
-    # Global relative MAE (% scale error)
-    epsilon = 1e-12
-    rel_error = mae / (y.abs().mean() + epsilon)
+    # Compute per-node errors
+    squared_errors = (pred_flat - y_flat).pow(2)
+    absolute_errors = torch.abs(pred_flat - y_flat)
+
+    # Compute per-graph metrics using scatter_mean (same as physics residual)
+    if batch_vec is not None:
+        # Average errors per graph first
+        mse_per_graph = scatter_mean(squared_errors, batch_vec, dim=0)
+        mae_per_graph = scatter_mean(absolute_errors, batch_vec, dim=0)
+
+        # Then average across graphs in batch
+        loss_mse = mse_per_graph.mean()
+        mae = mae_per_graph.mean()
+        rmse = torch.sqrt(mse_per_graph).mean()  # RMSE per graph, then average
+
+        # Relative error: per-graph MAE / per-graph mean target
+        y_abs_per_graph = scatter_mean(torch.abs(y_flat), batch_vec, dim=0)
+        epsilon = 1e-12
+        rel_error_per_graph = mae_per_graph / (y_abs_per_graph + epsilon)
+        rel_error = rel_error_per_graph.mean()
+    else:
+        # Single graph case: simple average across nodes
+        loss_mse = squared_errors.mean()
+        mae = absolute_errors.mean()
+        rmse = torch.sqrt(loss_mse)
+
+        epsilon = 1e-12
+        rel_error = mae / (torch.abs(y_flat).mean() + epsilon)
 
     # Compute initial condition loss if needed
     loss_ic = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
@@ -261,7 +291,7 @@ def train_epoch(
                 model=model,
                 data=data,
                 pred=pred,
-                require_time_grad=True,
+                require_time_grad=True
             )
 
         # Compute loss and metrics (no physics scaling needed)
@@ -273,6 +303,7 @@ def train_epoch(
             lambda_phys,
             getattr(data, 'is_initial_node', None),
             lambda_ic,
+            getattr(data, 'batch', None)
         )
 
         if loss_type == LossType.DATA_ONLY:
@@ -563,7 +594,7 @@ def eval_model(
                     model=model,
                     data=data,
                     pred=None,
-                    require_time_grad=False,
+                    require_time_grad=False
                 )
 
             # Compute loss and metrics (no physics scaling needed)
@@ -575,6 +606,7 @@ def eval_model(
                 lambda_phys,
                 getattr(data, 'is_initial_node', None),
                 lambda_ic,
+                getattr(data, 'batch', None)
             )
 
             # Accumulate metrics

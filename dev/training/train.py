@@ -102,29 +102,68 @@ def compute_initial_condition_loss(
     pred: torch.Tensor,
     y: torch.Tensor,
     is_initial_node: torch.Tensor,
+    data,
 ) -> torch.Tensor:
     """Compute initial condition supervision loss.
 
     Compares predicted vs true sucrose concentration values only for nodes that were
-    present at the initial timestep (t=0).
+    present at the initial timestep (t=0) AND only when the current data represents t=0.
+
+    This ensures initial conditions are only enforced at the actual initial time,
+    not for the same nodes at later times.
 
     Args:
         pred: Model predictions [N, 1]
         y: Target values [N, 1]
         is_initial_node: Boolean mask indicating initial nodes [N]
+        data: Graph data containing time information
 
     Returns:
-        torch.Tensor: Initial condition loss (MSE over initial nodes only)
+        torch.Tensor: Initial condition loss (MSE over initial nodes only if t=0)
     """
-    if not is_initial_node.any():
-        # No initial nodes in this batch, return zero loss
+    # Check if this is actually timestep 0
+    # For batched data, check if any graph in the batch is at t=0
+    if hasattr(data, 'time') and data.time is not None:
+        is_t0_batch = (data.time == 0.0).any()
+    else:
+        # Fallback: assume this is not t=0 if no time information
+        is_t0_batch = False
+
+    # Only apply initial condition loss for timestep 0
+    if not is_t0_batch or not is_initial_node.any():
         return torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
 
-    # Extract predictions and targets for initial nodes only
-    pred_initial = pred[is_initial_node]
-    y_initial = y[is_initial_node]
+    # For batched data, we need to identify which nodes belong to t=0 graphs
+    if hasattr(data, 'batch') and data.batch is not None:
+        # Find which graphs are at t=0
+        t0_graph_mask = (data.time == 0.0)
+        t0_graph_indices = torch.where(t0_graph_mask)[0]
 
-    # Compute MSE loss over initial nodes
+        if len(t0_graph_indices) == 0:
+            return torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
+
+        # Create mask for nodes that belong to t=0 graphs AND are initial nodes
+        t0_node_mask = torch.zeros_like(is_initial_node, dtype=torch.bool)
+        for graph_idx in t0_graph_indices:
+            graph_node_mask = (data.batch == graph_idx)
+            t0_node_mask |= (graph_node_mask & is_initial_node)
+
+        if not t0_node_mask.any():
+            return torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
+
+        # Extract predictions and targets for t=0 initial nodes only
+        pred_initial = pred[t0_node_mask]
+        y_initial = y[t0_node_mask]
+    else:
+        # Single graph case: check if it is t=0
+        if not is_t0_batch:
+            return torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
+
+        # Extract predictions and targets for initial nodes only
+        pred_initial = pred[is_initial_node]
+        y_initial = y[is_initial_node]
+
+    # Compute MSE loss over initial nodes at t=0
     ic_loss = F.mse_loss(pred_initial, y_initial, reduction='mean')
 
     return ic_loss
@@ -168,6 +207,7 @@ def compute_loss_and_metrics(
     is_initial_node: torch.Tensor = None,
     lambda_ic: float = 1.0,
     batch_vec: torch.Tensor = None,
+    data = None,
 ):
     """Compute loss and metrics with per-graph aggregation (consistent with physics residual).
 
@@ -184,6 +224,7 @@ def compute_loss_and_metrics(
         is_initial_node: Boolean mask for initial nodes (required for PHYSICS_WITH_IC)
         lambda_ic: Initial condition term weight
         batch_vec: Batch assignment for each node [N] (None for single graph)
+        data: Graph data object (required for PHYSICS_WITH_IC to check timesteps)
 
     Returns:
         Tuple of (total_loss, mse, mae, rmse, rel_error, ic_loss)
@@ -228,7 +269,9 @@ def compute_loss_and_metrics(
     if loss_type == LossType.PHYSICS_WITH_IC:
         if is_initial_node is None:
             raise ValueError("is_initial_node must be provided for PHYSICS_WITH_IC loss type")
-        loss_ic = compute_initial_condition_loss(pred, y, is_initial_node)
+        if data is None:
+            raise ValueError("data must be provided for PHYSICS_WITH_IC loss type to check timestep")
+        loss_ic = compute_initial_condition_loss(pred, y, is_initial_node, data)
 
     # Compute total loss based on configuration
     total_loss = compute_loss(loss_mse, loss_phys, loss_type, lambda_phys, loss_ic, lambda_ic)
@@ -303,7 +346,8 @@ def train_epoch(
             lambda_phys,
             getattr(data, 'is_initial_node', None),
             lambda_ic,
-            getattr(data, 'batch', None)
+            getattr(data, 'batch', None),
+            data
         )
 
         if loss_type == LossType.DATA_ONLY:
@@ -606,7 +650,8 @@ def eval_model(
                 lambda_phys,
                 getattr(data, 'is_initial_node', None),
                 lambda_ic,
-                getattr(data, 'batch', None)
+                getattr(data, 'batch', None),
+                data
             )
 
             # Accumulate metrics

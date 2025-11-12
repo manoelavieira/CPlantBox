@@ -205,7 +205,7 @@ def load_graph_data(h5_file: h5py.File, timestep: int, initial_node_count: int =
             print(f"GNN organ type distribution: {type_dist}")
 
     # Load target values (sucrose concentration)
-    y = torch.tensor(h5_file[f'{step_key}/nodes/Q_ST'][:], dtype=torch.float64).view(-1, 1)
+    y = torch.tensor(h5_file[f'{step_key}/nodes/C_ST_np'][:], dtype=torch.float64).view(-1, 1)
 
     # Use timestep as time feature
     time = torch.tensor(timestep, dtype=torch.float64)

@@ -105,7 +105,7 @@ def compute_initial_condition_loss(
 ) -> torch.Tensor:
     """Compute initial condition supervision loss.
 
-    Compares predicted vs true sucrose values only for nodes that were
+    Compares predicted vs true sucrose concentration values only for nodes that were
     present at the initial timestep (t=0).
 
     Args:
@@ -315,9 +315,9 @@ def train_epoch(
                 if batch_idx == 0 or batch_idx == len(loader) - 1:
                     msg = (
                         f"\nEpoch {epoch:03d} | Batch {batch_idx} | Number of nodes: {data.y.shape[0]}\n"
-                        f"Q_ST true:\n{data.y.detach().cpu().numpy()[:10]}\n"
-                        f"Q_ST pred:\n{pred.detach().cpu().numpy()[:10]}\n"
-                        f"Mean Q_ST true: {mean_y:.6e}, Mean Q_ST pred: {mean_pred:.6e}"
+                        f"C_ST true:\n{data.y.detach().cpu().numpy()}\n"
+                        f"C_ST pred:\n{pred.detach().cpu().numpy()}\n"
+                        f"Mean C_ST true: {mean_y:.6e}, Mean C_ST pred: {mean_pred:.6e}"
                     )
                     # print(msg)
                     f.write(msg + "\n")

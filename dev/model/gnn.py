@@ -1,7 +1,7 @@
 """
 Phloem GNN (baseline) — NNConv with edge features
 -------------------------------------------------
-Predicts sucrose content per node at timestep t, given:
+Predicts sucrose concentration per node at timestep t, given:
 - Plant topology (edge_index)
 - Node features at time t: water potential (psi), sieve-tube volume (vol_st), leaf length (len_leaf)
 - Edge features at time t: sieve-tube resistance (r_st), organ type (categorical)
@@ -13,7 +13,7 @@ Expected `Data` fields per graph (per timestep)
 - data.edge_feat:  FloatTensor [E, 1]      # r_st (resistance)
 - data.node_feat:  FloatTensor [N, 3]      # [psi, vol_st, len_leaf]
 - data.time:       FloatTensor [1]         # time in days (graph-level)
-- data.y:          FloatTensor [N, 1]      # target sucrose at t
+- data.y:          FloatTensor [N, 1]      # target sucrose concentration at t
 - Optional: data.batch for mini-batching multiple graphs
 """
 
@@ -83,7 +83,7 @@ class PhloemNNConv(nn.Module):
     """Neural network model for phloem flow prediction using NNConv layers.
 
     Combines node features with edge features through multiple NNConv
-    layers to predict sucrose content.
+    layers to predict sucrose concentration.
     """
 
     def __init__(self, cfg: ModelConfig):
@@ -124,7 +124,8 @@ class PhloemNNConv(nn.Module):
         )
 
         # Learnable output gain for softplus scaling; init near target magnitude
-        self.log_alpha = nn.Parameter(torch.tensor(math.log(5e-5), dtype=torch.float64))
+        # self.log_alpha = nn.Parameter(torch.tensor(math.log(5e-5), dtype=torch.float64))  # for conntent
+        self.log_alpha = nn.Parameter(torch.tensor(math.log(1e-3), dtype=torch.float64))  # for concentration
 
         self.dropout = nn.Dropout(cfg.dropout)
         self._init_weights()
@@ -195,7 +196,7 @@ class PhloemNNConv(nn.Module):
             data: Graph data object containing node features, edge features, topology and time
 
         Returns:
-            torch.Tensor: Predicted sucrose content for each node [N, 1]
+            torch.Tensor: Predicted sucrose concentration for each node [N, 1]
         """
         self._validate_input(data)
         device = next(self.parameters()).device

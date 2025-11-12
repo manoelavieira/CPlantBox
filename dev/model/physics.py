@@ -20,7 +20,7 @@ def compute_axial_flux(y_pred: torch.Tensor, data: Data, device: torch.device) -
     4. Compute sugar flux JS_ST = JW_ST * C_upstream
 
     Args:
-        y_pred: Predicted sucrose content [N, 1]
+        y_pred: Predicted sucrose concentration [N, 1]
         data: Graph data containing topology and features
         device: Target device for computations
 
@@ -43,8 +43,8 @@ def compute_axial_flux(y_pred: torch.Tensor, data: Data, device: torch.device) -
     vol_ST = node_feat[:, 1]  # sieve-tube volume per node
     Temp = node_feat[:, 6]  # temperature [°C]
 
-    # ---- Step 1: Compute concentrations and osmotic pressures
-    C_ST = y_pred.squeeze(-1) / vol_ST
+    # ---- Step 1: Get concentrations directly from predictions
+    C_ST = y_pred.squeeze(-1)
 
     # Osmotic pressure P_ST = C_ST * RT
     # In C++, TairK_phloem is global, but in batched case we need per-graph temperature
@@ -119,7 +119,7 @@ def compute_phloem_loading(y_pred: torch.Tensor, data: Data, params: dict, node_
     """Compute phloem loading rate F_in per node.
 
     Args:
-        y_pred: Predicted sucrose content [N, 1]
+        y_pred: Predicted sucrose concentration [N, 1]
         data: Graph data containing node features
         params: Simulation and step parameters
         node_fields: Node field values
@@ -132,8 +132,8 @@ def compute_phloem_loading(y_pred: torch.Tensor, data: Data, params: dict, node_
     vol_ST = node_feat[:, 1]
     len_leaf = node_feat[:, 2]
 
-    # Sucrose concentration in sieve tube
-    CSTi = y_pred.squeeze(-1) / vol_ST
+    # Sucrose concentration directly from predictions
+    CSTi = y_pred.squeeze(-1)
     CSTi_positive = torch.clamp(CSTi, min=0.0)
 
     # Phloem loading with feedback inhibition
@@ -148,7 +148,7 @@ def compute_sucrose_outflow(y_pred: torch.Tensor, data: Data, params: dict, node
     """Compute sucrose outflow F_out per node.
 
     Args:
-        y_pred: Predicted sucrose content [N, 1]
+        y_pred: Predicted sucrose concentration [N, 1]
         data: Graph data containing node features
         params: Simulation and step parameters
         node_fields: Node field values
@@ -164,8 +164,8 @@ def compute_sucrose_outflow(y_pred: torch.Tensor, data: Data, params: dict, node
     Q_Exudmax = node_feat[:, 5]
     Temp = node_feat[:, 6]
 
-    # Sucrose concentration in sieve tube
-    CSTi = y_pred.squeeze(-1) / vol_ST
+    # Sucrose concentration directly from predictions
+    CSTi = y_pred.squeeze(-1)
     CSTi_positive = torch.clamp(CSTi, min=0.0)
 
     # Apply CSTimin threshold for usage
@@ -186,14 +186,14 @@ def compute_sucrose_outflow(y_pred: torch.Tensor, data: Data, params: dict, node
 
 
 def compute_time_derivative(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
-    """Compute time derivative of sucrose content from model predictions.
+    """Compute time derivative of sucrose concentration from model predictions.
 
     Args:
-        y_pred: Predicted sucrose content [N, 1] - must be connected to data.time_per_node
+        y_pred: Predicted sucrose concentration [N, 1] - must be connected to data.time_per_node
         data: Graph data containing time features
 
     Returns:
-        torch.Tensor: Time derivative ds/dt per node [N]
+        torch.Tensor: Time derivative dC_ST/dt per node [N]
 
     Raises:
         ValueError: If y_pred is not connected to data.time_per_node in computation graph
@@ -208,14 +208,14 @@ def compute_time_derivative(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
 
     # Compute gradient of predictions w.r.t. time_per_node [N,1]
     try:
-        ds_dt = torch.autograd.grad(
+        dC_dt = torch.autograd.grad(
             y_pred.sum(),        # sum to get scalar for gradient computation
             data.time_per_node,      # [N, 1] per-node time features
             create_graph=True,   # needed for second backward pass
             retain_graph=True,   # keep graph for subsequent loss computation
             allow_unused=False   # ERROR if time_per_node is not connected
         )[0]
-        ds_dt = ds_dt.squeeze()
+        dC_dt = dC_dt.squeeze()
     except RuntimeError as e:
         if "not have been used in the graph" in str(e):
             raise ValueError(
@@ -227,31 +227,35 @@ def compute_time_derivative(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
         else:
             raise
 
-    return ds_dt
+    return dC_dt
 
 
 def physics_residual(y_pred: torch.Tensor, data: Data):
     """Compute physics-informed residual term based on sucrose transport equations.
 
-    Implements the governing equation:
-    ds_{st}/dt = J_ax + (F_in - F_out)
+    Implements the governing equation for concentration:
+    vol_ST * dC_ST/dt = J_ax + (F_in - F_out)
+
+    Rearranged as:
+    dC_ST/dt = (J_ax + F_in - F_out) / vol_ST
 
     where:
     - J_ax is the axial sucrose flux
     - F_in is the phloem loading rate
     - F_out is the sucrose outflow
+    - vol_ST is the sieve-tube volume
 
     IMPORTANT: y_pred MUST come from a model forward pass using the same data object,
     so that data.time_per_node is properly connected to y_pred in the computation graph.
-    Without this connection, ds/dt cannot be computed and the physics constraint is meaningless.
+    Without this connection, dC_ST/dt cannot be computed and the physics constraint is meaningless.
 
     Args:
-        y_pred: Predicted sucrose content [N, 1] - MUST be connected to data.time_per_node
+        y_pred: Predicted sucrose concentration [N, 1] - MUST be connected to data.time_per_node
         data: Graph data containing topology, features, simulation parameters, and node fields
 
     Returns:
         tuple: (residual_loss, physics_components_dict) where physics_components_dict contains
-            {'J_ax', 'F_in', 'F_out', 'ds_dt', 'dS_dt_from_flux'}
+            {'J_ax', 'F_in', 'F_out', 'dC_dt', 'dS_dt_from_flux'}
 
     Raises:
         ValueError: If y_pred is not connected to data.time_per_node in the computation graph
@@ -259,6 +263,10 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
     device = y_pred.device
     batch_vec = getattr(data, "batch", None)
     N = y_pred.size(0)
+
+    # Get vol_ST for concentration-to-content conversion
+    node_feat = data.node_feat.to(device)
+    vol_ST = node_feat[:, 1]
 
     # TEMPORARY: Use true values for testing coherence of physics calculations
     if DEBUG:
@@ -278,10 +286,11 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
     F_out = compute_sucrose_outflow(y_pred, data, params, node_fields, device)
 
     # Compute time derivative from model
-    ds_dt = compute_time_derivative(y_pred, data)
+    dC_dt = compute_time_derivative(y_pred, data)
 
-    # Total rate of change from physics
+    # Total rate of change from physics: (J_ax + F_in - F_out) / vol_ST = dC_ST/dt
     dS_dt_from_physics = dS_dt_from_flux + F_in - F_out
+    dC_dt_from_physics = dS_dt_from_physics / vol_ST
 
     if DEBUG:
         J_ax_true = compute_axial_flux(y_true, data, device)
@@ -293,8 +302,8 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
         print(f"\nNumber of graphs in batch: {torch.bincount(batch_vec).size(0)}")
         print(f"Number of nodes per graph: {torch.bincount(batch_vec).detach().cpu().numpy()}")
 
-        print(f"\nQ_ST_true:\n{y_true[batch_vec == 0].squeeze(-1).detach().cpu().numpy()[:10]}")
-        print(f"Q_ST:\n{y_pred[batch_vec == 0].squeeze(-1).detach().cpu().numpy()[:10]}")
+        print(f"\nC_ST_true:\n{y_true[batch_vec == 0].squeeze(-1).detach().cpu().numpy()[:10]}")
+        print(f"C_ST:\n{y_pred[batch_vec == 0].squeeze(-1).detach().cpu().numpy()[:10]}")
 
         print(f"\ndS_dt_from_flux_true:\n{dS_dt_from_flux_true[batch_vec == 0].detach().cpu().numpy()[:10]}")
         print(f"dS_dt_from_flux:\n{dS_dt_from_flux[batch_vec == 0].detach().cpu().numpy()[:10]}")
@@ -305,10 +314,10 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
         print(f"\nF_out_true:\n{F_out_true[batch_vec == 0].detach().cpu().numpy()[:10]}")
         print(f"F_out:\n{F_out[batch_vec == 0].detach().cpu().numpy()[:10]}")
 
-        print(f"ds_dt:\n{ds_dt[batch_vec == 0].detach().cpu().numpy()[:10]}")
+        print(f"dC_dt:\n{dC_dt[batch_vec == 0].detach().cpu().numpy()[:10]}")
 
     # Compute residual as difference between model derivative and physics derivative
-    residual_node = (ds_dt.squeeze() - dS_dt_from_physics).pow(2)
+    residual_node = (dC_dt.squeeze() - dC_dt_from_physics).pow(2)
 
     # Average per graph first, then across graphs
     if batch_vec is not None:
@@ -324,9 +333,9 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
         # Node-level quantities: average per graph, then across graphs
         F_in_per_graph = scatter_mean(F_in.detach(), batch_vec, dim=0)
         F_out_per_graph = scatter_mean(F_out.detach(), batch_vec, dim=0)
-        ds_dt_per_graph = scatter_mean(ds_dt.detach().abs(), batch_vec, dim=0)
+        dC_dt_per_graph = scatter_mean(dC_dt.detach().abs(), batch_vec, dim=0)
         dS_dt_from_flux_per_graph = scatter_mean(dS_dt_from_flux.detach().abs(), batch_vec, dim=0)
-        dS_dt_from_physics_per_graph = scatter_mean(dS_dt_from_physics.detach(), batch_vec, dim=0)
+        dC_dt_from_physics_per_graph = scatter_mean(dC_dt_from_physics.detach(), batch_vec, dim=0)
 
         # Edge-level quantities: need edge-to-graph mapping
         if J_ax.size(0) > 0:
@@ -341,9 +350,9 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
             'J_ax': J_ax_avg,
             'F_in': F_in_per_graph.mean(),
             'F_out': F_out_per_graph.mean(),
-            'ds_dt': ds_dt_per_graph.mean(),
+            'ds_dt': dC_dt_per_graph.mean(),
             'dS_dt_from_flux': dS_dt_from_flux_per_graph.mean(),
-            'dS_dt_from_physics': dS_dt_from_physics_per_graph.mean()
+            'dS_dt_from_physics': dC_dt_from_physics_per_graph.mean()
         }
     else:
         # Single graph case: simple mean across nodes/edges
@@ -351,9 +360,9 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
             'J_ax': J_ax.detach().abs().mean() if J_ax.size(0) > 0 else torch.tensor(0.0, device=device),
             'F_in': F_in.detach().mean(),
             'F_out': F_out.detach().mean(),
-            'ds_dt': ds_dt.detach().abs().mean(),
+            'ds_dt': dC_dt.detach().abs().mean(),
             'dS_dt_from_flux': dS_dt_from_flux.detach().abs().mean(),
-            'dS_dt_from_physics': dS_dt_from_physics.detach().mean()
+            'dS_dt_from_physics': dC_dt_from_physics.detach().mean()
         }
 
     return loss, loss_dict

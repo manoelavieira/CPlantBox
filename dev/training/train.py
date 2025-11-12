@@ -354,14 +354,24 @@ def train_epoch(
             mean_y = data.y.mean().item()
             mean_pred = pred.mean().item()
 
+            # Calculate sucrose content (concentration * volume)
+            vol_ST = data.node_feat[:, 1]  # sieve-tube volume per node
+            content_true = data.y.squeeze() * vol_ST
+            content_pred = pred.squeeze() * vol_ST
+            mean_content_true = content_true.mean().item()
+            mean_content_pred = content_pred.mean().item()
+
             log_path = "results/debug_output.txt"
             with open(log_path, "a") as f:
                 if batch_idx == 0 or batch_idx == len(loader) - 1:
                     msg = (
                         f"\nEpoch {epoch:03d} | Batch {batch_idx} | Number of nodes: {data.y.shape[0]}\n"
-                        f"C_ST true:\n{data.y.detach().cpu().numpy()}\n"
-                        f"C_ST pred:\n{pred.detach().cpu().numpy()}\n"
-                        f"Mean C_ST true: {mean_y:.6e}, Mean C_ST pred: {mean_pred:.6e}"
+                        f"C_ST true:\n{data.y.detach().cpu().numpy()[:10]}\n"
+                        f"C_ST pred:\n{pred.detach().cpu().numpy()[:10]}\n"
+                        f"Mean C_ST true: {mean_y:.6e}, Mean C_ST pred: {mean_pred:.6e}\n"
+                        f"S_ST true:\n{content_true.detach().cpu().numpy()[:10]}\n"
+                        f"S_ST pred:\n{content_pred.detach().cpu().numpy()[:10]}\n"
+                        f"Mean content true: {mean_content_true:.6e}, Mean content pred: {mean_content_pred:.6e}"
                     )
                     # print(msg)
                     f.write(msg + "\n")

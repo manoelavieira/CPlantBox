@@ -48,9 +48,9 @@ def _to_physics_metrics(physics_res) -> Optional[PhysicsMetrics]:
             J_ax=float(physics_res['J_ax']),
             F_in=float(physics_res['F_in']),
             F_out=float(physics_res['F_out']),
-            ds_dt=float(physics_res['ds_dt']),
+            dC_dt=float(physics_res['dC_dt']),
             dS_dt_from_flux=float(physics_res['dS_dt_from_flux']),
-            dS_dt_from_physics=float(physics_res['dS_dt_from_physics'])
+            dC_dt_from_physics=float(physics_res['dC_dt_from_physics'])
         )
     else:
         return None

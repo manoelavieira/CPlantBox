@@ -207,8 +207,11 @@ def load_graph_data(h5_file: h5py.File, timestep: int, initial_node_count: int =
     # Load target values (sucrose concentration)
     y = torch.tensor(h5_file[f'{step_key}/nodes/C_ST_np'][:], dtype=torch.float64).view(-1, 1)
 
-    # Use timestep as time feature
-    time = torch.tensor(timestep, dtype=torch.float64)
+    # Use physical time (plant_age) as time feature instead of timestep index
+    # This is CRITICAL for physics-informed learning: dC/dt must be computed with respect to
+    # actual physical time, not arbitrary timestep indices
+    plant_age = h5_file[f'{step_key}'].attrs['plant_age']
+    time = torch.tensor(plant_age, dtype=torch.float64)
 
     # Load physics constants from parameters
     sim_params = h5_file['parameters/sieve_tube'].attrs

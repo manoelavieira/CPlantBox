@@ -298,6 +298,7 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
         F_in_true = compute_phloem_loading(y_true, data, params, node_fields, device)
         F_out_true = compute_sucrose_outflow(y_true, data, params, node_fields, device)
         dS_dt_from_physics_true = dS_dt_from_flux_true + F_in_true - F_out_true
+        dC_dt_from_physics_true = dS_dt_from_physics_true / vol_ST
 
         print(f"\nNumber of graphs in batch: {torch.bincount(batch_vec).size(0)}")
         print(f"Number of nodes per graph: {torch.bincount(batch_vec).detach().cpu().numpy()}")
@@ -314,7 +315,10 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
         print(f"\nF_out_true:\n{F_out_true[batch_vec == 0].detach().cpu().numpy()[:10]}")
         print(f"F_out:\n{F_out[batch_vec == 0].detach().cpu().numpy()[:10]}")
 
-        print(f"dC_dt:\n{dC_dt[batch_vec == 0].detach().cpu().numpy()[:10]}")
+        print(f"\ndC_dt_from_physics_true:\n{dC_dt_from_physics_true[batch_vec == 0].detach().cpu().numpy()[:10]}")
+        print(f"dC_dt_from_physics:\n{dC_dt_from_physics[batch_vec == 0].detach().cpu().numpy()[:10]}")
+
+        print(f"\ndC_dt:\n{dC_dt[batch_vec == 0].detach().cpu().numpy()[:10]}")
 
     # Compute residual as difference between model derivative and physics derivative
     residual_node = (dC_dt.squeeze() - dC_dt_from_physics).pow(2)
@@ -350,9 +354,9 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
             'J_ax': J_ax_avg,
             'F_in': F_in_per_graph.mean(),
             'F_out': F_out_per_graph.mean(),
-            'ds_dt': dC_dt_per_graph.mean(),
+            'dC_dt': dC_dt_per_graph.mean(),
             'dS_dt_from_flux': dS_dt_from_flux_per_graph.mean(),
-            'dS_dt_from_physics': dC_dt_from_physics_per_graph.mean()
+            'dC_dt_from_physics': dC_dt_from_physics_per_graph.mean()
         }
     else:
         # Single graph case: simple mean across nodes/edges
@@ -360,9 +364,9 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
             'J_ax': J_ax.detach().abs().mean() if J_ax.size(0) > 0 else torch.tensor(0.0, device=device),
             'F_in': F_in.detach().mean(),
             'F_out': F_out.detach().mean(),
-            'ds_dt': dC_dt.detach().abs().mean(),
+            'dC_dt': dC_dt.detach().abs().mean(),
             'dS_dt_from_flux': dS_dt_from_flux.detach().abs().mean(),
-            'dS_dt_from_physics': dC_dt_from_physics.detach().mean()
+            'dC_dt_from_physics': dC_dt_from_physics.detach().mean()
         }
 
     return loss, loss_dict

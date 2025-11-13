@@ -105,13 +105,13 @@ class PhysicsMetrics:
     J_ax: float = 0.0               # Axial flux magnitude
     F_in: float = 0.0               # Phloem loading rate
     F_out: float = 0.0              # Sucrose outflow rate
-    ds_dt: float = 0.0              # Model-predicted time derivative magnitude
+    dC_dt: float = 0.0              # Model-predicted time derivative magnitude
     dS_dt_from_flux: float = 0.0    # Flux divergence magnitude
-    dS_dt_from_physics: float = 0.0 # Total physics-based rate of change
+    dC_dt_from_physics: float = 0.0 # Total physics-based rate of change
 
     def __str__(self) -> str:
         return (f"J_ax={self.J_ax:.3e} F_in={self.F_in:.3e} F_out={self.F_out:.3e} "
-                f"ds_dt={self.ds_dt:.3e} flux_div={self.dS_dt_from_flux:.3e}")
+                f"dS_dt={self.dC_dt:.3e} flux_div={self.dS_dt_from_flux:.3e}")
 
 
 @dataclass

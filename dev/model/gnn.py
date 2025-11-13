@@ -125,7 +125,7 @@ class PhloemNNConv(nn.Module):
 
         # Learnable output gain for softplus scaling; init near target magnitude
         # self.log_alpha = nn.Parameter(torch.tensor(math.log(5e-5), dtype=torch.float64))  # for conntent
-        self.log_alpha = nn.Parameter(torch.tensor(math.log(1e-3), dtype=torch.float64))  # for concentration
+        self.log_alpha = nn.Parameter(torch.tensor(math.log(1e-1), dtype=torch.float64))  # for concentration
 
         self.dropout = nn.Dropout(cfg.dropout)
         self._init_weights()

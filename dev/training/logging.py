@@ -77,16 +77,16 @@ def log_physics_components(
     writer.add_scalar(f'{prefix}/J_ax', physics_metrics.J_ax, step)
     writer.add_scalar(f'{prefix}/F_in', physics_metrics.F_in, step)
     writer.add_scalar(f'{prefix}/F_out', physics_metrics.F_out, step)
-    writer.add_scalar(f'{prefix}/ds_dt', physics_metrics.ds_dt, step)
+    writer.add_scalar(f'{prefix}/dC_dt', physics_metrics.dC_dt, step)
     writer.add_scalar(f'{prefix}/dS_dt_from_flux', physics_metrics.dS_dt_from_flux, step)
-    writer.add_scalar(f'{prefix}/dS_dt_from_physics', physics_metrics.dS_dt_from_physics, step)
+    writer.add_scalar(f'{prefix}/dC_dt_from_physics', physics_metrics.dC_dt_from_physics, step)
 
     # Also log as a scalar group for easy comparison
     writer.add_scalars(f'{prefix}_components', {
         'J_ax': physics_metrics.J_ax,
         'F_in': physics_metrics.F_in,
         'F_out': physics_metrics.F_out,
-        'ds_dt': physics_metrics.ds_dt,
+        'dC_dt': physics_metrics.dC_dt,
         'flux_div': physics_metrics.dS_dt_from_flux
     }, step)
 

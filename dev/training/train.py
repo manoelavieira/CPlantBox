@@ -122,22 +122,27 @@ def compute_initial_condition_loss(
     Returns:
         torch.Tensor: Initial condition loss (MSE over initial nodes only if t=0)
     """
-    # Check if this is actually timestep 0
-    # For batched data, check if any graph in the batch is at t=0
-    if hasattr(data, 'time') and data.time is not None:
-        is_t0_batch = (data.time == 0.0).any()
+    # Check if this is actually the first timestep
+    # Since we use physical time (plant_age) instead of timestep indices, we need to compare
+    # with min_time (the time at the first timestep) instead of checking time == 0
+    # For batched data, check if any graph in the batch is at the initial time
+    if hasattr(data, 'time') and data.time is not None and hasattr(data, 'min_time') and data.min_time is not None:
+        # Use a small tolerance for floating point comparison
+        tolerance = 1e-6
+        is_t0_batch = (torch.abs(data.time - data.min_time) < tolerance).any()
     else:
         # Fallback: assume this is not t=0 if no time information
         is_t0_batch = False
 
-    # Only apply initial condition loss for timestep 0
+    # Only apply initial condition loss for the first timestep
     if not is_t0_batch or not is_initial_node.any():
         return torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
 
     # For batched data, we need to identify which nodes belong to t=0 graphs
     if hasattr(data, 'batch') and data.batch is not None:
-        # Find which graphs are at t=0
-        t0_graph_mask = (data.time == 0.0)
+        # Find which graphs are at the initial time
+        tolerance = 1e-6
+        t0_graph_mask = (torch.abs(data.time - data.min_time) < tolerance)
         t0_graph_indices = torch.where(t0_graph_mask)[0]
 
         if len(t0_graph_indices) == 0:

@@ -240,6 +240,16 @@ def load_graph_data(h5_file: h5py.File, timestep: int, initial_node_count: int =
     plant_age = h5_file[f'{step_key}'].attrs['plant_age']
     time = torch.tensor(plant_age, dtype=torch.float64)
 
+    # Store the minimum time (time at first timestep) to identify initial graphs
+    # This is needed because plant_age doesn't start at 0, so we can't use time==0
+    # to identify the first timestep
+    try:
+        min_time = h5_file['step_000'].attrs['plant_age']
+    except KeyError as e:
+        print(f"[WARN] Could not find plant_age in step_000: {str(e)}")
+        raise
+    min_time_tensor = torch.tensor(min_time, dtype=torch.float64)
+
     # Load physics constants from parameters
     sim_params = h5_file['parameters/sieve_tube'].attrs
 
@@ -296,6 +306,7 @@ def load_graph_data(h5_file: h5py.File, timestep: int, initial_node_count: int =
         edge_org=edge_org,      # Edge organ types [E]
         y=y,                    # Target values [N, 1]
         time=time,              # Graph-level time feature [1]
+        min_time=min_time_tensor,  # Minimum time in the sequence (for identifying first timestep)
         num_nodes=num_nodes,    # Explicitly set number of nodes
         sim_params=sim_params,                      # [1,K]
         sim_params_names=list(sim_params_names),    # list[str] (not used in math; for reference)

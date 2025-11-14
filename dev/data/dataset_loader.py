@@ -144,8 +144,53 @@ def load_graph_data(h5_file: h5py.File, timestep: int, initial_node_count: int =
     Q_Exudmax = torch.tensor(h5_file[f'{step_key}/nodes/Q_Exudmax'][:], dtype=torch.float64)
     Temp = step_params[0, step_params_names.index("Tair")].repeat(psi.shape[0])
 
-    node_feat = torch.stack([psi, vol, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp], dim=1)  # [N, 7]
     num_nodes = psi.shape[0]  # get actual number of nodes
+
+    # Load segment organ types to derive node organ types
+    # CPlantBox convention: organTypes[node_index - 1] gives the organ type for node_index
+    # CPlantBox: ot_organ=0, ot_seed=1, ot_root=2, ot_stem=3, ot_leaf=4
+    org_types_raw = torch.tensor(h5_file[f'{step_key}/segments/organ_types'][:], dtype=torch.long)
+
+    # Derive node organ types from segment organ types
+    # Node 0 is typically the collar/base - assign it the organ type of the first segment
+    node_org_types_raw = torch.zeros(num_nodes, dtype=torch.long)
+    node_org_types_raw[0] = org_types_raw[0] if len(org_types_raw) > 0 else 2  # Default to root if no segments
+
+    # For nodes 1 to N-1: node i gets organ type from segment i-1
+    # This follows the CPlantBox convention where segment index = node_index - 1
+    for node_idx in range(1, num_nodes):
+        seg_idx = node_idx - 1
+        if seg_idx < len(org_types_raw):
+            node_org_types_raw[node_idx] = org_types_raw[seg_idx]
+        else:
+            # Fallback: if segment doesn't exist, inherit from previous node
+            node_org_types_raw[node_idx] = node_org_types_raw[node_idx - 1]
+
+    # Remap node organ types to GNN indices: 2->0 (root), 3->1 (stem), 4->2 (leaf)
+    node_org_types = torch.tensor([CPLANTBOX_TO_GNN_MAPPING.get(t.item(), 0) for t in node_org_types_raw],
+                                   dtype=torch.long)
+
+    # Convert to one-hot encoding for node features [N, 3]
+    node_org_onehot = torch.nn.functional.one_hot(node_org_types, num_classes=3).to(torch.float64)
+
+    # Validate node organ types
+    if node_org_types.numel() > 0:
+        min_node_org, max_node_org = node_org_types.min().item(), node_org_types.max().item()
+        if min_node_org < 0 or max_node_org > 2:
+            print(f"[WARN] Step {timestep}: Node organ types outside range [0,2]: min={min_node_org}, max={max_node_org}")
+
+        # Print node organ type distribution for debugging (only first timestep)
+        if timestep == 0:
+            unique_node_types, node_counts = torch.unique(node_org_types, return_counts=True)
+            node_type_dist = {GNN_ORGAN_TYPES.get(t.item(), f"unknown_{t.item()}"): c.item()
+                            for t, c in zip(unique_node_types, node_counts)}
+            print(f"Node organ type distribution: {node_type_dist}")
+
+    # Stack node features including one-hot encoded organ types
+    node_feat = torch.cat([
+        torch.stack([psi, vol, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp], dim=1),  # [N, 7]
+        node_org_onehot  # [N, 3]
+    ], dim=1)  # [N, 10]
 
     # Load additional features needed physics residual calculation
     node_fields_names = [
@@ -178,31 +223,22 @@ def load_graph_data(h5_file: h5py.File, timestep: int, initial_node_count: int =
     r_st = torch.tensor(h5_file[f'{step_key}/segments/r_ST'][:], dtype=torch.float64)
     edge_feat = r_st.view(-1, 1)  # [E, 1]
 
-    # Load organ types and remap to GNN indices
-    # CPlantBox: ot_organ=0, ot_seed=1, ot_root=2, ot_stem=3, ot_leaf=4
-    # GNN model: ot_root=0, ot_stem=1, ot_leaf=2 (only effective types)
-    org_types_raw = torch.tensor(h5_file[f'{step_key}/segments/organ_types'][:], dtype=torch.long)
-
-    # Filter out unused organ types (0=organ, 1=seed) and remap the rest
-    valid_mask = (org_types_raw >= 2)  # Only keep root(2), stem(3), leaf(4)
-    if not valid_mask.all():
-        print(f"[WARN] Step {timestep}: Found {(~valid_mask).sum()} edges with organ types 0 or 1, filtering them out")
-
-    # Remap organ types: 2->0, 3->1, 4->2
+    # Remap edge/segment organ types to GNN indices: 2->0, 3->1, 4->2
+    # (org_types_raw was already loaded above when computing node organ types)
     edge_org = torch.tensor([CPLANTBOX_TO_GNN_MAPPING.get(t.item(), -1) for t in org_types_raw], dtype=torch.long)
 
     # Validate remapped organ types are within expected range [0, 2]
     if edge_org.numel() > 0:
         min_org_type, max_org_type = edge_org.min().item(), edge_org.max().item()
         if min_org_type < 0 or max_org_type > 2:
-            raise ValueError(f"Step {timestep}: Remapped organ types outside range [0,2]: min={min_org_type}, max={max_org_type}")
+            raise ValueError(f"Step {timestep}: Remapped edge organ types outside range [0,2]: min={min_org_type}, max={max_org_type}")
 
-        # Print organ type distribution for debugging (only first timestep)
+        # Print edge organ type distribution for debugging (only first timestep)
         if timestep == 0:
             unique_types, counts = torch.unique(edge_org, return_counts=True)
             type_dist = {GNN_ORGAN_TYPES.get(t.item(), f"unknown_{t.item()}"): c.item()
                         for t, c in zip(unique_types, counts)}
-            print(f"GNN organ type distribution: {type_dist}")
+            print(f"Edge organ type distribution: {type_dist}")
 
     # Load target values
     # Support multiple modes:
@@ -300,7 +336,7 @@ def load_graph_data(h5_file: h5py.File, timestep: int, initial_node_count: int =
 
     # Create PyG Data object with explicit num_nodes
     data = Data(
-        node_feat=node_feat,    # Node features [N, 3] - [psi, vol_ST, len_leaf]
+        node_feat=node_feat,    # Node features [N, 10] - [psi, vol_ST, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp, org_type_onehot(3)]
         edge_index=edge_index,  # Graph connectivity [2, E]
         edge_feat=edge_feat,    # Edge features [E, 1]
         edge_org=edge_org,      # Edge organ types [E]

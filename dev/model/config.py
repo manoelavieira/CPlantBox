@@ -10,7 +10,7 @@ class ModelConfig:
     """Configuration for PhloemNNConv model.
 
     Attributes:
-        node_feat_dim: Dimension of continuous node features
+        node_feat_dim: Dimension of continuous node features (including one-hot encoded organ types)
         num_org_types: Number of organ types [ROOT, STEM, LEAF] (remapped from CPlantBox indices 2,3,4 to 0,1,2)
         hidden_size: Dimension of hidden layers in NNConv/MLPs
         num_layers: Number of NNConv layers
@@ -18,7 +18,7 @@ class ModelConfig:
         aggr: NNConv aggregator type ("add", "mean", or "max")
         dropout: Dropout probability
     """
-    node_feat_dim: int = 7  # [psi, vol_st, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp]
+    node_feat_dim: int = 10  # [psi, vol_st, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp, organ_type_onehot(3)]
     edge_feat_dim: int = 1  # [r_st]
     num_org_types: int = 3  # ot_root=0, ot_stem=1, ot_leaf=2 (remapped from CPlantBox 2,3,4)
     hidden_size: int = 64

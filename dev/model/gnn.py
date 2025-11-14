@@ -3,7 +3,8 @@ Phloem GNN (baseline) — NNConv with edge features
 -------------------------------------------------
 Predicts sucrose concentration per node at timestep t, given:
 - Plant topology (edge_index)
-- Node features at time t: water potential (psi), sieve-tube volume (vol_st), leaf length (len_leaf)
+- Node features at time t: water potential (psi), sieve-tube volume (vol_st), leaf length (len_leaf),
+  metabolic rates (Q_Rmmax, Q_Grmax, Q_Exudmax), temperature (Temp), and organ type (one-hot encoded)
 - Edge features at time t: sieve-tube resistance (r_st), organ type (categorical)
 
 
@@ -11,7 +12,7 @@ Expected `Data` fields per graph (per timestep)
 ----------------------------------------------
 - data.edge_index: LongTensor  [2, E]
 - data.edge_feat:  FloatTensor [E, 1]      # r_st (resistance)
-- data.node_feat:  FloatTensor [N, 3]      # [psi, vol_st, len_leaf]
+- data.node_feat:  FloatTensor [N, 10]     # [psi, vol_st, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp, organ_type_onehot(3)]
 - data.time:       FloatTensor [1]         # time in days (graph-level)
 - data.y:          FloatTensor [N, 1]      # target sucrose concentration at t
 - Optional: data.batch for mini-batching multiple graphs

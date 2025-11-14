@@ -8,7 +8,9 @@ from torch_geometric.data import Data
 from . import utils
 from . import config
 
-DEBUG = False  # Set to True for detailed physics debug output
+# Debug flag - set to True to enable detailed physics loss debugging
+DEBUG = False
+PREDICT_CONTENT = False  # If True, predict S_ST (content) instead of C_ST (concentration)
 
 def compute_axial_flux(y_pred: torch.Tensor, data: Data, device: torch.device) -> torch.Tensor:
     """Compute axial sucrose flux J_ax along edges.
@@ -20,7 +22,7 @@ def compute_axial_flux(y_pred: torch.Tensor, data: Data, device: torch.device) -
     4. Compute sugar flux JS_ST = JW_ST * C_upstream
 
     Args:
-        y_pred: Predicted sucrose concentration [N, 1]
+        y_pred: Predicted sucrose concentration [N, 1] or content [N, 1] (depending on PREDICT_CONTENT)
         data: Graph data containing topology and features
         device: Target device for computations
 
@@ -43,8 +45,30 @@ def compute_axial_flux(y_pred: torch.Tensor, data: Data, device: torch.device) -
     vol_ST = node_feat[:, 1]  # sieve-tube volume per node
     Temp = node_feat[:, 6]  # temperature [°C]
 
-    # ---- Step 1: Get concentrations directly from predictions
-    C_ST = y_pred.squeeze(-1)
+    # ---- Step 1: Get concentrations from predictions
+    # Support two modes:
+    # 1. Content: predictions are S_ST (normalized), need to denormalize and divide by vol_ST
+    # 2. Concentration (default): predictions are C_ST directly
+
+    if PREDICT_CONTENT:
+        # Denormalize: predictions are in range [0,1], multiply by scale to get actual S_ST
+        target_scale = getattr(data, 'target_scale', torch.tensor(1.0, device=device, dtype=y_pred.dtype)).to(device)
+
+        # Handle batched case: target_scale is [B] but we need [N]
+        batch_vec = getattr(data, "batch", None)
+        if batch_vec is not None and target_scale.numel() > 1:
+            # Expand per-graph scale to per-node scale
+            target_scale_per_node = target_scale[batch_vec]
+        else:
+            # Single graph or scalar scale
+            target_scale_per_node = target_scale
+
+        S_ST_normalized = y_pred.squeeze(-1)
+        S_ST = S_ST_normalized * target_scale_per_node
+        C_ST = S_ST / vol_ST  # Convert content to concentration
+    else:
+        # Direct concentration prediction
+        C_ST = y_pred.squeeze(-1)
 
     # Osmotic pressure P_ST = C_ST * RT
     # In C++, TairK_phloem is global, but in batched case we need per-graph temperature
@@ -119,7 +143,7 @@ def compute_phloem_loading(y_pred: torch.Tensor, data: Data, params: dict, node_
     """Compute phloem loading rate F_in per node.
 
     Args:
-        y_pred: Predicted sucrose concentration [N, 1]
+        y_pred: Predicted sucrose concentration [N, 1] or content [N, 1] (depending on PREDICT_CONTENT)
         data: Graph data containing node features
         params: Simulation and step parameters
         node_fields: Node field values
@@ -132,8 +156,23 @@ def compute_phloem_loading(y_pred: torch.Tensor, data: Data, params: dict, node_
     vol_ST = node_feat[:, 1]
     len_leaf = node_feat[:, 2]
 
-    # Sucrose concentration directly from predictions
-    CSTi = y_pred.squeeze(-1)
+    # Convert to concentration based on prediction mode
+    if PREDICT_CONTENT:
+        target_scale = getattr(data, 'target_scale', torch.tensor(1.0, device=device, dtype=y_pred.dtype)).to(device)
+
+        # Handle batched case: target_scale is [B] but we need [N]
+        batch_vec = getattr(data, "batch", None)
+        if batch_vec is not None and target_scale.numel() > 1:
+            target_scale_per_node = target_scale[batch_vec]
+        else:
+            target_scale_per_node = target_scale
+
+        S_ST_normalized = y_pred.squeeze(-1)
+        S_ST = S_ST_normalized * target_scale_per_node
+        CSTi = S_ST / vol_ST
+    else:
+        CSTi = y_pred.squeeze(-1)
+
     CSTi_positive = torch.clamp(CSTi, min=0.0)
 
     # Phloem loading with feedback inhibition
@@ -148,7 +187,7 @@ def compute_sucrose_outflow(y_pred: torch.Tensor, data: Data, params: dict, node
     """Compute sucrose outflow F_out per node.
 
     Args:
-        y_pred: Predicted sucrose concentration [N, 1]
+        y_pred: Predicted sucrose concentration [N, 1] or content [N, 1] (depending on PREDICT_CONTENT)
         data: Graph data containing node features
         params: Simulation and step parameters
         node_fields: Node field values
@@ -164,8 +203,23 @@ def compute_sucrose_outflow(y_pred: torch.Tensor, data: Data, params: dict, node
     Q_Exudmax = node_feat[:, 5]
     Temp = node_feat[:, 6]
 
-    # Sucrose concentration directly from predictions
-    CSTi = y_pred.squeeze(-1)
+    # Convert to concentration based on prediction mode
+    if PREDICT_CONTENT:
+        target_scale = getattr(data, 'target_scale', torch.tensor(1.0, device=device, dtype=y_pred.dtype)).to(device)
+
+        # Handle batched case: target_scale is [B] but we need [N]
+        batch_vec = getattr(data, "batch", None)
+        if batch_vec is not None and target_scale.numel() > 1:
+            target_scale_per_node = target_scale[batch_vec]
+        else:
+            target_scale_per_node = target_scale
+
+        S_ST_normalized = y_pred.squeeze(-1)
+        S_ST = S_ST_normalized * target_scale_per_node
+        CSTi = S_ST / vol_ST
+    else:
+        CSTi = y_pred.squeeze(-1)
+
     CSTi_positive = torch.clamp(CSTi, min=0.0)
 
     # Apply CSTimin threshold for usage
@@ -286,11 +340,21 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
     F_out = compute_sucrose_outflow(y_pred, data, params, node_fields, device)
 
     # Compute time derivative from model
-    dC_dt = compute_time_derivative(y_pred, data)
+    dy_dt = compute_time_derivative(y_pred, data)
 
-    # Total rate of change from physics: (J_ax + F_in - F_out) / vol_ST = dC_ST/dt
+    # Compute physics-based derivative (always compute dC/dt from physics)
     dS_dt_from_physics = dS_dt_from_flux + F_in - F_out
     dC_dt_from_physics = dS_dt_from_physics / vol_ST
+
+    # Convert model's dy_dt to dC/dt based on prediction mode and compute residual
+    if PREDICT_CONTENT:
+        # Content mode: compare dS/dt directly (more stable!)
+        dy_dt_from_physics = dS_dt_from_physics
+        dC_dt = dy_dt / vol_ST  # for logging only
+    else:
+        # Concentration mode: dy_dt is already dC/dt
+        dC_dt = dy_dt
+        dy_dt_from_physics = dC_dt_from_physics
 
     if DEBUG:
         J_ax_true = compute_axial_flux(y_true, data, device)
@@ -321,7 +385,25 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
         print(f"\ndC_dt:\n{dC_dt[batch_vec == 0].detach().cpu().numpy()[:10]}")
 
     # Compute residual as difference between model derivative and physics derivative
-    residual_node = (dC_dt.squeeze() - dC_dt_from_physics).pow(2)
+    # KEY BENEFIT OF CONTENT MODE:
+    # - Content: dS/dt has NO division by vol_ST → all terms are O(1e-5) mol/day
+    # - Concentration: dC/dt divides by vol_ST → amplifies errors by ~10,000x
+    #
+    # In content mode, physics equations are much more numerically stable because:
+    # 1. All terms (flux_div, F_in, F_out) are naturally in mol/day units
+    # 2. No division that amplifies prediction errors
+    # 3. Direct conservation of mass is easier for physics to learn
+    #
+    # Use adaptive normalization based on current residual scale
+    diff = dy_dt.squeeze() - dy_dt_from_physics
+
+    # Compute characteristic scale from this batch (robust to outliers using median-like measure)
+    with torch.no_grad():
+        # Use 90th percentile of absolute differences as scale (more robust than max)
+        scale = diff.abs().quantile(0.9).clamp(min=0.1, max=10000.0)
+
+    # Normalize residual by adaptive scale
+    residual_node = (diff / scale).pow(2)
 
     # Average per graph first, then across graphs
     if batch_vec is not None:

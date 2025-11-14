@@ -4,6 +4,7 @@ import torch.nn.functional as F
 
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
+from torch_scatter import scatter_mean
 
 from typing import Tuple, Optional
 
@@ -229,8 +230,6 @@ def compute_loss_and_metrics(
     Returns:
         Tuple of (total_loss, mse, mae, rmse, rel_error, ic_loss)
     """
-    from torch_scatter import scatter_mean
-
     # Squeeze predictions and targets to [N]
     pred_flat = pred.squeeze(-1)
     y_flat = y.squeeze(-1)

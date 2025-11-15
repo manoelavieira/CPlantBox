@@ -99,6 +99,37 @@ def get_edge_index_from_topology(
     return edge_index
 
 
+def detect_boundary_nodes(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
+    """Detect boundary nodes (nodes with degree = 1).
+
+    Boundary nodes are leaves and root tips - they have only one connection.
+    These are critical for physics-based learning as they represent sources/sinks.
+
+    Args:
+        edge_index: Edge connectivity [2, E]
+        num_nodes: Total number of nodes in the graph
+
+    Returns:
+        is_boundary_node: Boolean mask [N] indicating boundary nodes
+    """
+    # Compute node degree (treating graph as undirected)
+    # Count how many times each node appears in edge_index
+    degree = torch.zeros(num_nodes, dtype=torch.long)
+
+    # Count appearances in source nodes
+    src_nodes, src_counts = torch.unique(edge_index[0], return_counts=True)
+    degree[src_nodes] += src_counts
+
+    # Count appearances in target nodes
+    dst_nodes, dst_counts = torch.unique(edge_index[1], return_counts=True)
+    degree[dst_nodes] += dst_counts
+
+    # Boundary nodes have degree = 1 (only one connection)
+    is_boundary_node = (degree == 1)
+
+    return is_boundary_node
+
+
 def load_graph_data(h5_file: h5py.File, timestep: int, initial_node_count: int = None) -> Data:
     """Load graph data for a specific timestep.
 
@@ -316,7 +347,8 @@ def load_graph_data(h5_file: h5py.File, timestep: int, initial_node_count: int =
         node_fields_names=list(node_fields_names),  # list[str] (not used in math; for reference)
         node_pos=node_pos,                          # Node positions [N, 3] (optional; for visualization)
         is_initial_node=is_initial_node,            # Boolean mask indicating nodes present at t=0 [N]
-        target_scale=torch.tensor(target_scale, dtype=torch.float64)  # Normalization scale for targets
+        is_boundary_node=detect_boundary_nodes(edge_index, num_nodes),  # Boolean mask for boundary nodes (degree=1) [N]
+        target_scale=torch.tensor(target_scale, dtype=torch.float64)    # Normalization scale for targets
     )
 
     return data

@@ -35,6 +35,8 @@ def parse_arguments() -> TrainingConfig:
                         help='Weight for physics loss term (only used with "combined" or "physics_ic" loss)')
     parser.add_argument('--lambda-ic', type=float, default=1.0,
                         help='Weight for initial condition loss term (only used with physics_ic loss)')
+    parser.add_argument('--lambda-bc', type=float, default=1.0,
+                        help='Weight for boundary condition loss term (used with physics_ic loss)')
     parser.add_argument('--loss-type', type=str, default='physics_ic',
                         choices=['data', 'physics', 'physics_ic', 'combined'],
                         help='Type of loss to use: data (MSE), physics, physics_ic (lambda_phys * physics + lambda_ic * IC), or combined (MSE + lambda_phys * physics)')
@@ -55,6 +57,7 @@ def parse_arguments() -> TrainingConfig:
         seed=args.seed,
         lambda_phys=args.lambda_phys,
         lambda_ic=args.lambda_ic,
+        lambda_bc=args.lambda_bc,
         loss_type=LossType(args.loss_type),
         tensorboard_log_dir=args.tensorboard_log_dir
     )

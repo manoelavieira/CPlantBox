@@ -35,6 +35,7 @@ class TrainingConfig:
     # Loss configuration
     loss_type: LossType = LossType.PHYSICS_WITH_IC
     lambda_ic: float = 1.0  # Weight for initial condition term (only used with PHYSICS_WITH_IC)
+    lambda_bc: float = 1.0  # Weight for boundary condition term (optional, applies to all physics-based losses)
 
     # Reproducibility
     seed: int = 42
@@ -124,12 +125,15 @@ class TrainingMetrics:
     rel_error: float
     physics: float
     ic_loss: float = 0.0  # Initial condition loss
+    bc_loss: float = 0.0  # Boundary condition loss
     physics_details: Optional['PhysicsMetrics'] = None
 
     def __str__(self) -> str:
         base_str = f"loss={self.loss:.3e} MSE={self.mse:.3e} RMSE={self.rmse:.3e} MAE={self.mae:.3e} RelErr={self.rel_error:.3e} physics={self.physics:.3e}"
         if self.ic_loss > 0:
             base_str += f" IC={self.ic_loss:.4f}"
+        if self.bc_loss > 0:
+            base_str += f" BC={self.bc_loss:.4f}"
         if self.physics_details is not None:
             base_str += f" | {self.physics_details}"
         return base_str

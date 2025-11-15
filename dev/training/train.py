@@ -25,6 +25,7 @@ def accumulate_epoch_stats(
     rel_error: float,
     phys: float,
     ic: float,
+    bc: float,
     last_phys: Optional[PhysicsMetrics]
 ):
     totals["loss"] += float(loss)
@@ -34,6 +35,7 @@ def accumulate_epoch_stats(
     totals["rel_error"] += float(rel_error)
     totals["phys"] += float(phys)
     totals["ic"] += float(ic)
+    totals["bc"] += float(bc)
     totals["n_batches"] += 1
     totals["last_phys_metrics"] = last_phys
 
@@ -176,8 +178,58 @@ def compute_initial_condition_loss(
     return ic_loss
 
 
+def compute_boundary_condition_loss(
+    pred: torch.Tensor,
+    y: torch.Tensor,
+    is_boundary_node: torch.Tensor,
+    data,
+) -> torch.Tensor:
+    """Compute boundary condition supervision loss.
+
+    Compares predicted vs true sucrose values only for boundary nodes (degree=1).
+    Boundary nodes are leaves and root tips - they represent sources and sinks
+    and are critical for constraining physics-based solutions.
+
+    Unlike IC loss which only applies at t=0, BC loss applies at ALL timesteps,
+    providing spatiotemporal constraints throughout the simulation.
+
+    NOTE: Boundary nodes are detected PER-TIMESTEP during data loading, so each
+    graph in the batch has its own boundary nodes based on its topology at that timestep.
+    This correctly handles dynamic graph growth over time.
+
+    Args:
+        pred: Model predictions [N, 1]
+        y: Target values [N, 1]
+        is_boundary_node: Boolean mask indicating boundary nodes [N] (concatenated across batch)
+        data: Graph data (for potential batched handling)
+
+    Returns:
+        torch.Tensor: Boundary condition loss (MSE over boundary nodes)
+    """
+    if not is_boundary_node.any():
+        return torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
+
+    # For batched data, apply BC loss to all boundary nodes across all graphs
+    # Note: is_boundary_node is already correctly per-timestep since it was
+    # computed during data loading for each graph's topology
+    if hasattr(data, 'batch') and data.batch is not None:
+        # Extract predictions and targets for boundary nodes
+        pred_boundary = pred[is_boundary_node]
+        y_boundary = y[is_boundary_node]
+    else:
+        # Single graph case
+        pred_boundary = pred[is_boundary_node]
+        y_boundary = y[is_boundary_node]
+
+    # Compute MSE loss over boundary nodes
+    bc_loss = F.mse_loss(pred_boundary, y_boundary, reduction='mean')
+
+    return bc_loss
+
+
 def compute_loss(loss_mse: torch.Tensor, loss_phys: torch.Tensor, loss_type: LossType,
                  lambda_phys: float = 1.0, loss_ic: torch.Tensor = None, lambda_ic: float = 1.0,
+                 loss_bc: torch.Tensor = None, lambda_bc: float = 1.0,
                  use_adaptive_weighting: bool = True) -> torch.Tensor:
     """Compute loss based on the specified loss type configuration.
 
@@ -188,6 +240,8 @@ def compute_loss(loss_mse: torch.Tensor, loss_phys: torch.Tensor, loss_type: Los
         lambda_phys: Physics term weight (only used for COMBINED loss)
         loss_ic: Initial condition loss term (only used for PHYSICS_WITH_IC loss)
         lambda_ic: Initial condition term weight (only used for PHYSICS_WITH_IC loss)
+        loss_bc: Boundary condition loss term (added to all physics-based losses)
+        lambda_bc: Boundary condition term weight
         use_adaptive_weighting: If True, adaptively balance physics loss to be ~50% of data loss
 
     Returns:
@@ -196,11 +250,19 @@ def compute_loss(loss_mse: torch.Tensor, loss_phys: torch.Tensor, loss_type: Los
     if loss_type == LossType.DATA_ONLY:
         return loss_mse
     elif loss_type == LossType.PHYSICS_ONLY:
-        return loss_phys
+        total_loss = loss_phys
+        # Add boundary condition loss if provided
+        if loss_bc is not None:
+            total_loss = total_loss + lambda_bc * loss_bc
+        return total_loss
     elif loss_type == LossType.PHYSICS_WITH_IC:
         if loss_ic is None:
             raise ValueError("loss_ic must be provided for PHYSICS_WITH_IC loss type")
-        return loss_phys + lambda_ic * loss_ic
+        total_loss = loss_phys + lambda_ic * loss_ic
+        # Add boundary condition loss if provided
+        if loss_bc is not None:
+            total_loss = total_loss + lambda_bc * loss_bc
+        return total_loss
     elif loss_type == LossType.COMBINED:
         # === LOSS REFINEMENT 3: Adaptive weighting to auto-balance data vs physics losses ===
         # Problem: Physics loss can be 100-300x larger than data loss, making manual lambda_phys tuning fragile
@@ -215,7 +277,11 @@ def compute_loss(loss_mse: torch.Tensor, loss_phys: torch.Tensor, loss_type: Los
         else:
             effective_lambda = lambda_phys
 
-        return loss_mse + effective_lambda * loss_phys
+        total_loss = loss_mse + effective_lambda * loss_phys
+        # Add boundary condition loss if provided
+        if loss_bc is not None:
+            total_loss = total_loss + lambda_bc * loss_bc
+        return total_loss
     else:
         raise ValueError(f"Unknown loss type: {loss_type}")
 
@@ -228,6 +294,8 @@ def compute_loss_and_metrics(
     lambda_phys: float = 1.0,
     is_initial_node: torch.Tensor = None,
     lambda_ic: float = 1.0,
+    is_boundary_node: torch.Tensor = None,
+    lambda_bc: float = 1.0,
     batch_vec: torch.Tensor = None,
     data = None,
 ):
@@ -245,11 +313,13 @@ def compute_loss_and_metrics(
         lambda_phys: Physics term weight
         is_initial_node: Boolean mask for initial nodes (required for PHYSICS_WITH_IC)
         lambda_ic: Initial condition term weight
+        is_boundary_node: Boolean mask for boundary nodes (optional, for BC supervision)
+        lambda_bc: Boundary condition term weight
         batch_vec: Batch assignment for each node [N] (None for single graph)
         data: Graph data object (required for PHYSICS_WITH_IC to check timesteps)
 
     Returns:
-        Tuple of (total_loss, mse, mae, rmse, rel_error, ic_loss)
+        Tuple of (total_loss, mse, mae, rmse, rel_error, ic_loss, bc_loss)
     """
     # Squeeze predictions and targets to [N]
     pred_flat = pred.squeeze(-1)
@@ -338,10 +408,15 @@ def compute_loss_and_metrics(
             raise ValueError("data must be provided for PHYSICS_WITH_IC loss type to check timestep")
         loss_ic = compute_initial_condition_loss(pred, y, is_initial_node, data)
 
-    # Compute total loss based on configuration
-    total_loss = compute_loss(loss_mse, loss_phys, loss_type, lambda_phys, loss_ic, lambda_ic)
+    # Compute boundary condition loss if boundary nodes are provided
+    loss_bc = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
+    if is_boundary_node is not None and is_boundary_node.any():
+        loss_bc = compute_boundary_condition_loss(pred, y, is_boundary_node, data)
 
-    return total_loss, loss_mse, mae, rmse, rel_error, loss_ic
+    # Compute total loss based on configuration
+    total_loss = compute_loss(loss_mse, loss_phys, loss_type, lambda_phys, loss_ic, lambda_ic, loss_bc, lambda_bc)
+
+    return total_loss, loss_mse, mae, rmse, rel_error, loss_ic, loss_bc
 
 
 def train_epoch(
@@ -353,8 +428,9 @@ def train_epoch(
         clip_grad_norm: float = 1.0,
         loss_type: LossType = LossType.COMBINED,
         lambda_phys: float = 1.0,
-        lambda_ic: float = 1.0
-    ) -> Tuple[float, float, float, float, float, float, float, Optional[PhysicsMetrics]]:
+        lambda_ic: float = 1.0,
+        lambda_bc: float = 1.0
+    ) -> Tuple[float, float, float, float, float, float, float, float, Optional[PhysicsMetrics]]:
     """Train model for one epoch.
 
     Args:
@@ -367,6 +443,12 @@ def train_epoch(
         loss_type: Type of loss to compute (data_only, physics_only, physics_ic, or combined)
         lambda_phys: Weight for physics term (only used with combined loss)
         lambda_ic: Weight for initial condition term (only used with physics_ic loss)
+        lambda_bc: Weight for boundary condition term (optional supervision)
+
+    Returns:
+        Tuple of (average_loss, average_mae, average_mse, average_rmse, average_rel_error,
+                  average_physics, average_ic_loss, average_bc_loss, last_physics_metrics)
+        lambda_ic: Weight for initial condition term (only used with physics_ic loss)
 
     Returns:
         Tuple of (average_loss, average_mae, average_mse, average_rmse, average_rel_error,
@@ -376,7 +458,7 @@ def train_epoch(
         RuntimeError: If no training samples are processed
     """
     model.train()
-    totals = {"loss": 0.0, "mse": 0.0, "mae": 0.0, "rmse": 0.0, "rel_error": 0.0, "phys": 0.0, "ic": 0.0, "n_batches": 0, "last_phys_metrics": None}
+    totals = {"loss": 0.0, "mse": 0.0, "mae": 0.0, "rmse": 0.0, "rel_error": 0.0, "phys": 0.0, "ic": 0.0, "bc": 0.0, "n_batches": 0, "last_phys_metrics": None}
 
     for batch_idx, data in enumerate(loader):
         optimizer.zero_grad(set_to_none=True)
@@ -403,7 +485,7 @@ def train_epoch(
             )
 
         # Compute loss and metrics (no physics scaling needed)
-        loss, mse, mae, rmse, rel_error, ic_loss = compute_loss_and_metrics(
+        loss, mse, mae, rmse, rel_error, ic_loss, bc_loss = compute_loss_and_metrics(
             pred,
             data.y,
             phys_res,
@@ -411,6 +493,8 @@ def train_epoch(
             lambda_phys,
             getattr(data, 'is_initial_node', None),
             lambda_ic,
+            getattr(data, 'is_boundary_node', None),
+            lambda_bc,
             getattr(data, 'batch', None),
             data
         )
@@ -454,7 +538,7 @@ def train_epoch(
         # Accumulate metrics for epoch averaging
         with torch.no_grad():
             # Accumulate the physics residual (no normalization needed)
-            accumulate_epoch_stats(totals, loss, mse, mae, rmse, rel_error, phys_res, ic_loss, phys_res_metrics)
+            accumulate_epoch_stats(totals, loss, mse, mae, rmse, rel_error, phys_res, ic_loss, bc_loss, phys_res_metrics)
 
             # Log physics metrics
             if writer is not None and batch_idx % 10 == 0:
@@ -480,6 +564,7 @@ def train_epoch(
             totals["rel_error"] / totals["n_batches"],
             totals["phys"] / totals["n_batches"],
             totals["ic"] / totals["n_batches"],
+            totals["bc"] / totals["n_batches"],
             totals["last_phys_metrics"])
 
 
@@ -516,7 +601,7 @@ def train_model(
         training_state.current_epoch = epoch
 
         # Training
-        tr_loss, tr_mae, tr_mse, tr_rmse, tr_rel_error, tr_phys, tr_ic, tr_phys_metrics = train_epoch(
+        tr_loss, tr_mae, tr_mse, tr_rmse, tr_rel_error, tr_phys, tr_ic, tr_bc, tr_phys_metrics = train_epoch(
             model_setup.model,
             train_loader,
             optimizer,
@@ -525,11 +610,12 @@ def train_model(
             clip_grad_norm=config.clip_grad_norm,
             loss_type=config.loss_type,
             lambda_phys=config.lambda_phys,
-            lambda_ic=config.lambda_ic
+            lambda_ic=config.lambda_ic,
+            lambda_bc=config.lambda_bc
         )
 
         # Validation
-        val_loss, val_mse, val_mae, val_rmse, val_rel_error, val_phys, val_ic, val_phys_metrics = eval_model(
+        val_loss, val_mse, val_mae, val_rmse, val_rel_error, val_phys, val_ic, val_bc, val_phys_metrics = eval_model(
             model_setup.model,
             val_loader,
             writer,
@@ -537,7 +623,8 @@ def train_model(
             phase='val',
             loss_type=config.loss_type,
             lambda_phys=config.lambda_phys,
-            lambda_ic=config.lambda_ic
+            lambda_ic=config.lambda_ic,
+            lambda_bc=config.lambda_bc
         )
 
         # Learning rate scheduling (use combined validation loss)
@@ -545,8 +632,8 @@ def train_model(
         current_lr = optimizer.param_groups[0]['lr']
 
         # Create metrics objects
-        tr_metrics = TrainingMetrics(tr_loss, tr_mse, tr_mae, tr_rmse, tr_rel_error, tr_phys, tr_ic, tr_phys_metrics)
-        val_metrics = TrainingMetrics(val_loss, val_mse, val_mae, val_rmse, val_rel_error, val_phys, val_ic, val_phys_metrics)
+        tr_metrics = TrainingMetrics(tr_loss, tr_mse, tr_mae, tr_rmse, tr_rel_error, tr_phys, tr_ic, tr_bc, tr_phys_metrics)
+        val_metrics = TrainingMetrics(val_loss, val_mse, val_mae, val_rmse, val_rel_error, val_phys, val_ic, val_bc, val_phys_metrics)
 
         # Log metrics to TensorBoard
         logging.log_epoch_metrics(writer, epoch, tr_metrics, val_metrics, current_lr)
@@ -559,10 +646,17 @@ def train_model(
         if tr_ic > 0:
             base_log += f" train_ic={tr_ic:.3e}"
 
+        # Add BC loss if it's meaningful (> 0)
+        if tr_bc > 0:
+            base_log += f" train_bc={tr_bc:.3e}"
+
         base_log += (f" | val_tot={val_loss:.3e} val_mse={val_mse:.3e} val_phys={val_phys:.3e} val_rmse={val_rmse:.3e} val_relerr={val_rel_error:.3e}")
 
         if val_ic > 0:
             base_log += f" val_ic={val_ic:.3e}"
+
+        if val_bc > 0:
+            base_log += f" val_bc={val_bc:.3e}"
 
         # Add physics details to console output if available
         if tr_phys_metrics is not None:
@@ -623,7 +717,7 @@ def test_model(
     utils.load_best_model(model_setup, config.model_save_path, model_setup.device)
 
     # Final evaluation on test set
-    test_loss, test_mse, test_mae, test_rmse, test_rel_error, test_phys, test_ic, test_phys_metrics = eval_model(
+    test_loss, test_mse, test_mae, test_rmse, test_rel_error, test_phys, test_ic, test_bc, test_phys_metrics = eval_model(
         model_setup.model,
         test_loader,
         writer,
@@ -631,7 +725,8 @@ def test_model(
         phase='test',
         loss_type=config.loss_type,
         lambda_phys=config.lambda_phys,
-        lambda_ic=config.lambda_ic
+        lambda_ic=config.lambda_ic,
+        lambda_bc=config.lambda_bc
     )
 
     # Log final test metrics
@@ -642,6 +737,7 @@ def test_model(
     writer.add_scalar('final/test_rel_error', test_rel_error, training_state.best_epoch)
     writer.add_scalar('final/test_physics', test_phys, training_state.best_epoch)
     writer.add_scalar('final/test_ic_loss', test_ic, training_state.best_epoch)
+    writer.add_scalar('final/test_bc_loss', test_bc, training_state.best_epoch)
 
     # Create final summary
     final_summary = (f"Final Results:\n"
@@ -652,6 +748,7 @@ def test_model(
                     f"Test Rel Error: {test_rel_error:.3e}\n"
                     f"Test Physics: {test_phys:.3e}\n"
                     f"Test IC Loss: {test_ic:.3e}\n"
+                    f"Test BC Loss: {test_bc:.3e}\n"
                     f"Best epoch: {training_state.best_epoch}")
 
     if test_phys_metrics is not None:
@@ -659,7 +756,7 @@ def test_model(
 
     writer.add_text('final/results', final_summary)
 
-    print(f"\nFinal test metrics - Loss: {test_loss:.3e}, MSE: {test_mse:.3e}, RMSE: {test_rmse:.3e}, MAE: {test_mae:.3e}, RelErr: {test_rel_error:.3e}, Physics: {test_phys:.3e}, IC Loss: {test_ic:.3e}")
+    print(f"\nFinal test metrics - Loss: {test_loss:.3e}, MSE: {test_mse:.3e}, RMSE: {test_rmse:.3e}, MAE: {test_mae:.3e}, RelErr: {test_rel_error:.3e}, Physics: {test_phys:.3e}, IC Loss: {test_ic:.3e}, BC Loss: {test_bc:.3e}")
     if test_phys_metrics is not None:
         print(f"Test Physics Details: {test_phys_metrics}")
 
@@ -672,8 +769,9 @@ def eval_model(
         phase: str = 'val',
         loss_type: LossType = LossType.COMBINED,
         lambda_phys: float = 1.0,
-        lambda_ic: float = 1.0
-    ) -> Tuple[float, float, float, float, float, float, float, Optional[PhysicsMetrics]]:
+        lambda_ic: float = 1.0,
+        lambda_bc: float = 1.0
+    ) -> Tuple[float, float, float, float, float, float, float, float, Optional[PhysicsMetrics]]:
     """Evaluate model on a dataset.
 
     Args:
@@ -685,13 +783,14 @@ def eval_model(
         loss_type: Type of loss to compute (data, physics, physics_ic, or combined)
         lambda_phys: Weight for physics term (only used with combined loss)
         lambda_ic: Weight for initial condition term (only used with physics_ic loss)
+        lambda_bc: Weight for boundary condition term (used with physics_ic loss)
 
     Returns:
         Tuple of (average_loss, average_mse, average_mae, average_rmse, average_rel_error,
-                  average_physics, average_ic_loss, last_physics_metrics)
+                  average_physics, average_ic_loss, average_bc_loss, last_physics_metrics)
     """
     model.eval()
-    totals = {"loss": 0.0, "mse": 0.0, "mae": 0.0, "rmse": 0.0, "rel_error": 0.0, "phys": 0.0, "ic": 0.0, "n_batches": 0, "last_phys_metrics": None}
+    totals = {"loss": 0.0, "mse": 0.0, "mae": 0.0, "rmse": 0.0, "rel_error": 0.0, "phys": 0.0, "ic": 0.0, "bc": 0.0, "n_batches": 0, "last_phys_metrics": None}
 
     with torch.no_grad():
         for batch_idx, data in enumerate(loader):
@@ -717,7 +816,7 @@ def eval_model(
                 )
 
             # Compute loss and metrics (no physics scaling needed)
-            loss, mse, mae, rmse, rel_error, ic_loss = compute_loss_and_metrics(
+            loss, mse, mae, rmse, rel_error, ic_loss, bc_loss = compute_loss_and_metrics(
                 pred,
                 data.y,
                 phys_res,
@@ -725,12 +824,14 @@ def eval_model(
                 lambda_phys,
                 getattr(data, 'is_initial_node', None),
                 lambda_ic,
+                getattr(data, 'is_boundary_node', None),
+                lambda_bc,
                 getattr(data, 'batch', None),
                 data
             )
 
             # Accumulate metrics
-            accumulate_epoch_stats(totals, loss, mse, mae, rmse, rel_error, phys_res, ic_loss, phys_res_metrics)
+            accumulate_epoch_stats(totals, loss, mse, mae, rmse, rel_error, phys_res, ic_loss, bc_loss, phys_res_metrics)
 
             # Log distribution of predictions and targets (first batch only, every 5 epochs)
             if writer is not None and batch_idx == 0 and epoch % 5 == 0:
@@ -761,4 +862,5 @@ def eval_model(
             totals["rel_error"] / denom,
             totals["phys"] / denom,
             totals["ic"] / denom,
+            totals["bc"] / denom,
             totals["last_phys_metrics"])

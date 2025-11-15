@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 import warnings
 import os
 from pathlib import Path
-
+from model import physics
 
 # CPlantBox organ type constants for reference
 CPLANTBOX_ORGAN_TYPES = {
@@ -236,32 +236,18 @@ def load_graph_data(h5_file: h5py.File, timestep: int, initial_node_count: int =
             print(f"GNN organ type distribution: {type_dist}")
 
     # Load target values
-    # Support multiple modes:
-    # 1. Concentration (C_ST) - default
-    # 2. Content (S_ST = C_ST × vol_ST) - if PREDICT_CONTENT=True
-    from model import physics
+    S_ST_raw = C_ST = h5_file[f'{step_key}/nodes/Q_ST'][:]
 
-    C_ST = h5_file[f'{step_key}/nodes/C_ST_np'][:]
+    # CRITICAL: Normalize S_ST to prevent gradient vanishing
+    # S_ST is ~1e-5 which is 10,000x smaller than C_ST ~0.2
+    # This causes weak gradients during backpropagation
+    # Solution: Normalize by max value to get range [0, 1]
+    S_ST_max = np.abs(S_ST_raw).max()
+    if S_ST_max < 1e-15:
+        S_ST_max = 1.0
 
-    if physics.PREDICT_CONTENT:
-        # Predict content: S_ST = C_ST × vol_ST
-        vol_ST = h5_file[f'{step_key}/nodes/vol_ST'][:]
-        S_ST_raw = C_ST * vol_ST
-
-        # CRITICAL: Normalize S_ST to prevent gradient vanishing
-        # S_ST is ~1e-5 which is 10,000x smaller than C_ST ~0.2
-        # This causes weak gradients during backpropagation
-        # Solution: Normalize by max value to get range [0, 1]
-        S_ST_max = np.abs(S_ST_raw).max()
-        if S_ST_max < 1e-15:
-            S_ST_max = 1.0
-
-        target_values = S_ST_raw / S_ST_max
-        target_scale = S_ST_max  # Store for denormalization during physics
-    else:
-        # Predict concentration (default)
-        target_values = C_ST
-        target_scale = 1.0
+    target_values = S_ST_raw / S_ST_max
+    target_scale = S_ST_max  # store for denormalization during physics
 
     y = torch.tensor(target_values, dtype=torch.float64).view(-1, 1)
 

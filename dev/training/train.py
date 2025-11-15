@@ -10,7 +10,6 @@ from typing import Tuple, Optional
 
 from model.config import ModelConfig
 from model.physics import physics_residual
-from model.physics import PREDICT_CONTENT
 from .config import TrainingConfig, TrainingState, TrainingMetrics, ModelSetup, LossType, PhysicsMetrics
 
 import training.utils as utils
@@ -530,10 +529,10 @@ def compute_loss_and_metrics(
     y_flat = y.squeeze(-1)
 
     # IMPORTANT: Denormalize predictions and targets for relative error calculation
-    # When PREDICT_CONTENT=True, pred and y are normalized [0,1], so relative error
-    # computed in normalized space is misleading (tiny values → huge percentages)
+    # pred and y are normalized [0,1], so relative error
+    # computed in normalized space is misleading (tiny values -> huge percentages)
     # We need to compute relative error in PHYSICAL space!
-    if PREDICT_CONTENT and data is not None and hasattr(data, 'target_scale'):
+    if data is not None and hasattr(data, 'target_scale'):
         target_scale = data.target_scale.to(concentration_pred.device)
         # Handle batched case
         if batch_vec is not None and target_scale.numel() > 1:
@@ -544,10 +543,6 @@ def compute_loss_and_metrics(
         # Denormalize to physical space for relative error computation
         pred_physical = pred_flat * target_scale_per_node
         y_physical = y_flat * target_scale_per_node
-    else:
-        # Already in physical space (concentration mode) or can't denormalize
-        pred_physical = pred_flat
-        y_physical = y_flat
 
     # Compute per-node errors (MSE/MAE in normalized space for loss, physical for rel_error)
     squared_errors = (pred_flat - y_flat).pow(2)

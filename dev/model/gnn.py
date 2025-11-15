@@ -28,7 +28,6 @@ from torch_geometric.nn import NNConv
 from torch_geometric.nn.norm import GraphNorm  # per-graph normalization
 
 from .config import ModelConfig
-from .physics import PREDICT_CONTENT
 
 import math
 
@@ -268,15 +267,8 @@ class PhloemNNConv(nn.Module):
         out_concentration = self.head_concentration(node_feat)
         out_flux = self.head_flux(node_feat)
 
-        # Output activation depends on prediction mode
-        if PREDICT_CONTENT:
-            # Content mode: outputs are normalized [0,1]
-            out_concentration = torch.sigmoid(out_concentration)
-        else:
-            # Concentration mode: outputs are positive physical values, use softplus with learnable scale
-            out_concentration = torch.exp(self.log_alpha) * F.softplus(out_concentration)
-            # For sharper non-negativity barrier, put the scale inside Softplus
-            # out_concentration = F.softplus(torch.exp(self.log_alpha) * out_concentration)
+        # Content mode: outputs are normalized [0,1]
+        out_concentration = torch.sigmoid(out_concentration)
 
         # Flux divergence can be positive or negative (no activation)
         # Return both predictions as a tuple

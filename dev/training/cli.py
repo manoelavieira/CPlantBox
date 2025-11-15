@@ -32,14 +32,14 @@ def parse_arguments() -> TrainingConfig:
     parser.add_argument('--seed', type=int, default=42,
                        help='Random seed for reproducibility')
     parser.add_argument('--lambda-phys', type=float, default=1.0,
-                        help='Weight for physics loss term (only used with "combined" or "physics_ic" loss)')
+                        help='Weight for physics loss term (only used with "combined" or "physics" loss)')
     parser.add_argument('--lambda-ic', type=float, default=1.0,
-                        help='Weight for initial condition loss term (only used with physics_ic loss)')
+                        help='Weight for initial condition loss term (only used with physics loss)')
     parser.add_argument('--lambda-bc', type=float, default=1.0,
-                        help='Weight for boundary condition loss term (used with physics_ic loss)')
-    parser.add_argument('--loss-type', type=str, default='physics_ic',
-                        choices=['data', 'physics', 'physics_ic', 'combined'],
-                        help='Type of loss to use: data (MSE), physics, physics_ic (lambda_phys * physics + lambda_ic * IC), or combined (MSE + lambda_phys * physics)')
+                        help='Weight for boundary condition loss term (used with physics loss)')
+    parser.add_argument('--loss-type', type=str, default='physics',
+                        choices=['data', 'physics', 'combined'],
+                        help='Type of loss to use: data (MSE), physics, or combined (data + physics)')
     parser.add_argument('--tensorboard-log-dir', type=str, default='results/tensorboard_logs',
                         help='Directory for TensorBoard logs')
 

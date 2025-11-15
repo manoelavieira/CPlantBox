@@ -11,8 +11,7 @@ import torch
 class LossType(Enum):
     """Enumeration for different loss configurations."""
     DATA_ONLY = "data"              # MSE only
-    PHYSICS_ONLY = "physics"        # Physics term only
-    PHYSICS_WITH_IC = "physics_ic"  # Physics term + initial condition supervision
+    PHYSICS_WITH_IC_BC = "physics"  # Physics term + initial condition supervision + boundary condition
     COMBINED = "combined"           # Both MSE and physics terms
 
 
@@ -33,8 +32,8 @@ class TrainingConfig:
     lambda_phys: float = 1.0
 
     # Loss configuration
-    loss_type: LossType = LossType.PHYSICS_WITH_IC
-    lambda_ic: float = 1.0  # Weight for initial condition term (only used with PHYSICS_WITH_IC)
+    loss_type: LossType = LossType.PHYSICS_WITH_IC_BC
+    lambda_ic: float = 1.0  # Weight for initial condition term (only used with PHYSICS_WITH_IC_BC)
     lambda_bc: float = 1.0  # Weight for boundary condition term (optional, applies to all physics-based losses)
 
     # Reproducibility

@@ -302,8 +302,8 @@ def compute_loss(loss_mse: torch.Tensor, loss_phys: torch.Tensor, loss_type: Los
         loss_phys: Physics residual term
         loss_type: Type of loss to compute
         lambda_phys: Physics term weight (only used for COMBINED loss)
-        loss_ic: Initial condition loss term (only used for PHYSICS_WITH_IC loss)
-        lambda_ic: Initial condition term weight (only used for PHYSICS_WITH_IC loss)
+        loss_ic: Initial condition loss term (only used for PHYSICS_WITH_IC_BC loss)
+        lambda_ic: Initial condition term weight (only used for PHYSICS_WITH_IC_BC loss)
         loss_bc: Boundary condition loss term (added to all physics-based losses)
         lambda_bc: Boundary condition term weight
         use_adaptive_weighting: If True, adaptively balance physics loss to be ~50% of data loss
@@ -313,19 +313,13 @@ def compute_loss(loss_mse: torch.Tensor, loss_phys: torch.Tensor, loss_type: Los
     """
     if loss_type == LossType.DATA_ONLY:
         return loss_mse
-    elif loss_type == LossType.PHYSICS_ONLY:
-        total_loss = loss_phys
-        # Add boundary condition loss if provided
-        if loss_bc is not None:
-            total_loss = total_loss + lambda_bc * loss_bc
-        return total_loss
-    elif loss_type == LossType.PHYSICS_WITH_IC:
+    elif loss_type == LossType.PHYSICS_WITH_IC_BC:
         if loss_ic is None:
-            raise ValueError("loss_ic must be provided for PHYSICS_WITH_IC loss type")
+            raise ValueError("loss_ic must be provided for PHYSICS_WITH_IC_BC loss type")
         total_loss = loss_phys + lambda_ic * loss_ic
-        # Add boundary condition loss if provided
-        if loss_bc is not None:
-            total_loss = total_loss + lambda_bc * loss_bc
+        if loss_bc is None:
+            raise ValueError("loss_bc must be provided for PHYSICS_WITH_IC_BC loss type")
+        total_loss = total_loss + lambda_bc * loss_bc
         return total_loss
     elif loss_type == LossType.COMBINED:
         # === LOSS REFINEMENT 3: Adaptive weighting to auto-balance data vs physics losses ===
@@ -340,11 +334,7 @@ def compute_loss(loss_mse: torch.Tensor, loss_phys: torch.Tensor, loss_type: Los
             effective_lambda = lambda_phys * adaptive_weight
         else:
             effective_lambda = lambda_phys
-
         total_loss = loss_mse + effective_lambda * loss_phys
-        # Add boundary condition loss if provided
-        if loss_bc is not None:
-            total_loss = total_loss + lambda_bc * loss_bc
         return total_loss
     else:
         raise ValueError(f"Unknown loss type: {loss_type}")
@@ -375,12 +365,12 @@ def compute_loss_and_metrics(
         loss_phys: Precomputed physics residual (already properly averaged per-graph)
         loss_type: Type of loss to compute
         lambda_phys: Physics term weight
-        is_initial_node: Boolean mask for initial nodes (required for PHYSICS_WITH_IC)
+        is_initial_node: Boolean mask for initial nodes (required for PHYSICS_WITH_IC_BC)
         lambda_ic: Initial condition term weight
         is_boundary_node: Boolean mask for boundary nodes (optional, for BC supervision)
         lambda_bc: Boundary condition term weight
         batch_vec: Batch assignment for each node [N] (None for single graph)
-        data: Graph data object (required for PHYSICS_WITH_IC to check timesteps)
+        data: Graph data object (required for PHYSICS_WITH_IC_BC to check timesteps)
 
     Returns:
         Tuple of (total_loss, mse, mae, rmse, rel_error, ic_loss, bc_loss)
@@ -459,19 +449,17 @@ def compute_loss_and_metrics(
         epsilon = 1e-12
         rel_error = absolute_errors_physical.mean() / (torch.abs(y_physical).mean() + epsilon)
 
-    # Compute initial condition loss if needed
+    # Compute initial condition and boundary condition loss if needed
     loss_ic = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
-    if loss_type == LossType.PHYSICS_WITH_IC:
-        if is_initial_node is None:
-            raise ValueError("is_initial_node must be provided for PHYSICS_WITH_IC loss type")
-        if data is None:
-            raise ValueError("data must be provided for PHYSICS_WITH_IC loss type to check timestep")
-        loss_ic = compute_initial_condition_loss(pred, y, is_initial_node, data)
-
-    # Compute boundary condition loss if boundary nodes are provided
     loss_bc = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
-    if is_boundary_node is not None and is_boundary_node.any():
-        loss_bc = compute_boundary_condition_loss(pred, y, is_boundary_node, data)
+    if loss_type == LossType.PHYSICS_WITH_IC_BC:
+        if is_initial_node is None:
+            raise ValueError("is_initial_node must be provided for PHYSICS_WITH_IC_BC loss type")
+        if data is None:
+            raise ValueError("data must be provided for PHYSICS_WITH_IC_BC loss type to check timestep")
+        loss_ic = compute_initial_condition_loss(pred, y, is_initial_node, data)
+        if is_boundary_node is not None and is_boundary_node.any():
+            loss_bc = compute_boundary_condition_loss(pred, y, is_boundary_node, data)
 
     # Compute physical constraint penalties (positivity, conservation)
     loss_constraints = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
@@ -481,7 +469,7 @@ def compute_loss_and_metrics(
 
     # Compute total loss based on configuration
     # Add constraint losses with fixed weights
-    lambda_constraints = 0.1  # Weight for physical constraints
+    lambda_constraints = 0.5  # Weight for physical constraints
 
     base_loss = compute_loss(loss_mse, loss_phys, loss_type, lambda_phys, loss_ic, lambda_ic, loss_bc, lambda_bc)
 
@@ -515,15 +503,15 @@ def train_epoch(
         writer: TensorBoard writer for logging
         epoch: Current epoch number
         clip_grad_norm: Maximum norm for gradient clipping
-        loss_type: Type of loss to compute (data_only, physics_only, physics_ic, or combined)
+        loss_type: Type of loss to compute (data_only, physics, or combined)
         lambda_phys: Weight for physics term (only used with combined loss)
-        lambda_ic: Weight for initial condition term (only used with physics_ic loss)
+        lambda_ic: Weight for initial condition term (only used with physics loss)
         lambda_bc: Weight for boundary condition term (optional supervision)
 
     Returns:
         Tuple of (average_loss, average_mae, average_mse, average_rmse, average_rel_error,
                   average_physics, average_ic_loss, average_bc_loss, last_physics_metrics)
-        lambda_ic: Weight for initial condition term (only used with physics_ic loss)
+        lambda_ic: Weight for initial condition term (only used with physics loss)
 
     Returns:
         Tuple of (average_loss, average_mae, average_mse, average_rmse, average_rel_error,
@@ -845,10 +833,10 @@ def eval_model(
         writer: TensorBoard writer for logging
         epoch: Current epoch number
         phase: Phase name ('val' or 'test')
-        loss_type: Type of loss to compute (data, physics, physics_ic, or combined)
+        loss_type: Type of loss to compute (data, physics, or combined)
         lambda_phys: Weight for physics term (only used with combined loss)
-        lambda_ic: Weight for initial condition term (only used with physics_ic loss)
-        lambda_bc: Weight for boundary condition term (used with physics_ic loss)
+        lambda_ic: Weight for initial condition term (only used with physics loss)
+        lambda_bc: Weight for boundary condition term (used with physics loss)
 
     Returns:
         Tuple of (average_loss, average_mse, average_mae, average_rmse, average_rel_error,

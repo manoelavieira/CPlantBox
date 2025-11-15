@@ -10,6 +10,7 @@ from typing import Tuple, Optional
 
 from model.config import ModelConfig
 from model.physics import physics_residual
+from model.physics import PREDICT_CONTENT
 from .config import TrainingConfig, TrainingState, TrainingMetrics, ModelSetup, LossType, PhysicsMetrics
 
 import training.utils as utils
@@ -176,7 +177,8 @@ def compute_initial_condition_loss(
 
 
 def compute_loss(loss_mse: torch.Tensor, loss_phys: torch.Tensor, loss_type: LossType,
-                 lambda_phys: float = 1.0, loss_ic: torch.Tensor = None, lambda_ic: float = 1.0) -> torch.Tensor:
+                 lambda_phys: float = 1.0, loss_ic: torch.Tensor = None, lambda_ic: float = 1.0,
+                 use_adaptive_weighting: bool = True) -> torch.Tensor:
     """Compute loss based on the specified loss type configuration.
 
     Args:
@@ -186,6 +188,7 @@ def compute_loss(loss_mse: torch.Tensor, loss_phys: torch.Tensor, loss_type: Los
         lambda_phys: Physics term weight (only used for COMBINED loss)
         loss_ic: Initial condition loss term (only used for PHYSICS_WITH_IC loss)
         lambda_ic: Initial condition term weight (only used for PHYSICS_WITH_IC loss)
+        use_adaptive_weighting: If True, adaptively balance physics loss to be ~50% of data loss
 
     Returns:
         Computed loss tensor
@@ -199,7 +202,20 @@ def compute_loss(loss_mse: torch.Tensor, loss_phys: torch.Tensor, loss_type: Los
             raise ValueError("loss_ic must be provided for PHYSICS_WITH_IC loss type")
         return loss_phys + lambda_ic * loss_ic
     elif loss_type == LossType.COMBINED:
-        return loss_mse + lambda_phys * loss_phys
+        # === LOSS REFINEMENT 3: Adaptive weighting to auto-balance data vs physics losses ===
+        # Problem: Physics loss can be 100-300x larger than data loss, making manual lambda_phys tuning fragile
+        # Solution: Compute adaptive weight to make physics contribute ~50% of data loss magnitude
+        if use_adaptive_weighting and loss_phys > 1e-8:  # Avoid division by near-zero
+            # Compute ratio: how much to scale physics so it's ~50% of data loss
+            adaptive_weight = (loss_mse / loss_phys) * 0.5
+            # Clamp for stability: don't let it go too small or too large
+            adaptive_weight = torch.clamp(adaptive_weight, min=0.001, max=1.0)
+            # Effective lambda = base lambda * adaptive weight
+            effective_lambda = lambda_phys * adaptive_weight
+        else:
+            effective_lambda = lambda_phys
+
+        return loss_mse + effective_lambda * loss_phys
     else:
         raise ValueError(f"Unknown loss type: {loss_type}")
 
@@ -239,34 +255,79 @@ def compute_loss_and_metrics(
     pred_flat = pred.squeeze(-1)
     y_flat = y.squeeze(-1)
 
-    # Compute per-node errors
+    # IMPORTANT: Denormalize predictions and targets for relative error calculation
+    # When PREDICT_CONTENT=True, pred and y are normalized [0,1], so relative error
+    # computed in normalized space is misleading (tiny values → huge percentages)
+    # We need to compute relative error in PHYSICAL space!
+    if PREDICT_CONTENT and data is not None and hasattr(data, 'target_scale'):
+        target_scale = data.target_scale.to(pred.device)
+        # Handle batched case
+        if batch_vec is not None and target_scale.numel() > 1:
+            target_scale_per_node = target_scale[batch_vec]
+        else:
+            target_scale_per_node = target_scale
+
+        # Denormalize to physical space for relative error computation
+        pred_physical = pred_flat * target_scale_per_node
+        y_physical = y_flat * target_scale_per_node
+    else:
+        # Already in physical space (concentration mode) or can't denormalize
+        pred_physical = pred_flat
+        y_physical = y_flat
+
+    # Compute per-node errors (MSE/MAE in normalized space for loss, physical for rel_error)
     squared_errors = (pred_flat - y_flat).pow(2)
     absolute_errors = torch.abs(pred_flat - y_flat)
+    absolute_errors_physical = torch.abs(pred_physical - y_physical)
+
+    # === LOSS REFINEMENT 1: Weighted MSE by target magnitude ===
+    # Weight errors by target magnitude to focus on high-concentration regions
+    # This prevents the model from ignoring nodes with high values
+    weights = torch.abs(y_flat) + 0.1  # Add small constant to avoid zero weights
+    weights = weights / weights.mean()  # Normalize to keep loss scale similar
+    weighted_squared_errors = weights * squared_errors
+
+    # === LOSS REFINEMENT 2: Relative MSE component ===
+    # Add a relative error term to the loss to better handle varying magnitudes
+    epsilon = 1e-6
+    relative_squared_errors = ((pred_flat - y_flat) / (torch.abs(y_flat) + epsilon)).pow(2)
 
     # Compute per-graph metrics using scatter_mean (same as physics residual)
     if batch_vec is not None:
         # Average errors per graph first
         mse_per_graph = scatter_mean(squared_errors, batch_vec, dim=0)
+        weighted_mse_per_graph = scatter_mean(weighted_squared_errors, batch_vec, dim=0)
+        rel_mse_per_graph = scatter_mean(relative_squared_errors, batch_vec, dim=0)
         mae_per_graph = scatter_mean(absolute_errors, batch_vec, dim=0)
 
-        # Then average across graphs in batch
-        loss_mse = mse_per_graph.mean()
-        mae = mae_per_graph.mean()
-        rmse = torch.sqrt(mse_per_graph).mean()  # RMSE per graph, then average
+        # Combine absolute and relative MSE (70% absolute, 30% relative)
+        combined_mse_per_graph = 0.7 * weighted_mse_per_graph + 0.3 * rel_mse_per_graph
 
-        # Relative error: per-graph MAE / per-graph mean target
-        y_abs_per_graph = scatter_mean(torch.abs(y_flat), batch_vec, dim=0)
+        # Then average across graphs in batch
+        loss_mse = combined_mse_per_graph.mean()
+        mae = mae_per_graph.mean()
+        rmse = torch.sqrt(mse_per_graph).mean()  # RMSE per graph, then average (for logging)
+
+        # Relative error in PHYSICAL space: per-graph MAE / per-graph mean target
+        mae_physical_per_graph = scatter_mean(absolute_errors_physical, batch_vec, dim=0)
+        y_abs_physical_per_graph = scatter_mean(torch.abs(y_physical), batch_vec, dim=0)
         epsilon = 1e-12
-        rel_error_per_graph = mae_per_graph / (y_abs_per_graph + epsilon)
+        rel_error_per_graph = mae_physical_per_graph / (y_abs_physical_per_graph + epsilon)
         rel_error = rel_error_per_graph.mean()
     else:
         # Single graph case: simple average across nodes
-        loss_mse = squared_errors.mean()
-        mae = absolute_errors.mean()
-        rmse = torch.sqrt(loss_mse)
+        mse_base = squared_errors.mean()
+        weighted_mse = weighted_squared_errors.mean()
+        rel_mse = relative_squared_errors.mean()
 
+        # Combine absolute and relative MSE
+        loss_mse = 0.7 * weighted_mse + 0.3 * rel_mse
+        mae = absolute_errors.mean()
+        rmse = torch.sqrt(mse_base)  # Use base MSE for RMSE logging
+
+        # Relative error in PHYSICAL space
         epsilon = 1e-12
-        rel_error = mae / (torch.abs(y_flat).mean() + epsilon)
+        rel_error = absolute_errors_physical.mean() / (torch.abs(y_physical).mean() + epsilon)
 
     # Compute initial condition loss if needed
     loss_ic = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)

@@ -28,6 +28,8 @@ from torch_geometric.nn import NNConv
 from torch_geometric.nn.norm import GraphNorm  # per-graph normalization
 
 from .config import ModelConfig
+from .physics import PREDICT_CONTENT
+
 import math
 
 class EdgeNet(nn.Module):
@@ -257,10 +259,13 @@ class PhloemNNConv(nn.Module):
         # Final MLP head to produce scalar output per node
         out = self.head(node_feat)
 
-        # Positive output with learnable scale
-        out = torch.exp(self.log_alpha) * F.softplus(out)
-
-        # For sharper non-negativity barrier, put the scale inside Softplus
-        # out = F.softplus(torch.exp(self.log_alpha) * out)
-
+        # Output activation depends on prediction mode
+        if PREDICT_CONTENT:
+            # Content mode: outputs are normalized [0,1]
+            out = torch.sigmoid(out)
+        else:
+            # Concentration mode: outputs are positive physical values, use softplus with learnable scale
+            out = torch.exp(self.log_alpha) * F.softplus(out)
+            # For sharper non-negativity barrier, put the scale inside Softplus
+            # out = F.softplus(torch.exp(self.log_alpha) * out)
         return out

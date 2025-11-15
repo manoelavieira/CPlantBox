@@ -39,11 +39,11 @@ def accumulate_epoch_stats(
     totals["last_phys_metrics"] = last_phys
 
 
-def run_forward(model: nn.Module, data) -> Tuple[torch.Tensor, torch.Tensor]:
+def run_forward(model: nn.Module, data) -> torch.Tensor:
     """Forward pass on inputs.
 
     Returns:
-        Tuple of (concentration_pred, flux_pred) for multi-task learning
+        Content predictions
     """
     return model(data)
 
@@ -66,7 +66,7 @@ def _to_physics_metrics(physics_res) -> Optional[PhysicsMetrics]:
 def compute_physics_residual_step(
     model: nn.Module,
     data,
-    pred: Optional[Tuple[torch.Tensor, torch.Tensor]],
+    pred: Optional[torch.Tensor],
     require_time_grad: bool,
 ) -> Tuple[torch.Tensor, Optional[PhysicsMetrics]]:
     """
@@ -81,9 +81,7 @@ def compute_physics_residual_step(
     """
     if require_time_grad:
         # Training path: pred must already be computed under grad; time_per_node should require grad.
-        # Extract concentration from multi-task output
-        concentration_pred, _ = pred
-        phys_res, phys_res_dict = physics_residual(concentration_pred, data)
+        phys_res, phys_res_dict = physics_residual(pred, data)
     else:
         # Eval path: re-enable grad for a one-off forward, then detach result.
         original_time = data.time_per_node
@@ -92,9 +90,7 @@ def compute_physics_residual_step(
                 time_leaf = original_time.detach().clone().requires_grad_(True)
                 data.time_per_node = time_leaf
                 pred_eval = model(data)
-                # Extract concentration from multi-task output
-                concentration_pred_eval, _ = pred_eval
-                phys_res, phys_res_dict = physics_residual(concentration_pred_eval, data)
+                phys_res, phys_res_dict = physics_residual(pred_eval, data)
         finally:
             # Restore original attribute to avoid side effects
             data.time_per_node = original_time
@@ -371,60 +367,6 @@ def compute_physical_constraint_loss(
     return total_constraint_loss
 
 
-def compute_flux_divergence_loss(
-    flux_pred: torch.Tensor,
-    data,
-    concentration_pred: torch.Tensor,
-) -> torch.Tensor:
-    """Compute auxiliary task loss for flux divergence prediction.
-
-    Multi-task learning: predict the net flux divergence (dS_dt_from_flux)
-    and supervise it with the physics-computed value.
-
-    This provides additional supervision signal and helps the model learn
-    the relationship between concentrations and fluxes.
-
-    Args:
-        flux_pred: Predicted flux divergence [N, 1]
-        data: Graph data containing topology and features
-        concentration_pred: Predicted concentrations [N, 1] (used to compute physics flux)
-
-    Returns:
-        torch.Tensor: MSE between predicted and physics-computed flux divergence
-    """
-    from model.physics import compute_axial_flux, compute_flux_divergence
-
-    device = flux_pred.device
-    N = flux_pred.size(0)
-
-    # Compute true flux divergence from physics using predicted concentrations
-    with torch.no_grad():
-        # Use predicted concentrations to compute what the flux SHOULD be
-        J_ax = compute_axial_flux(concentration_pred, data, device)
-        dS_dt_from_flux_target = compute_flux_divergence(
-            J_ax,
-            data.edge_index.to(device),
-            N,
-            device
-        )
-
-    # Flatten predictions
-    flux_pred_flat = flux_pred.squeeze(-1)
-
-    # MSE between predicted and physics-computed flux divergence
-    flux_mse = (flux_pred_flat - dS_dt_from_flux_target).pow(2)
-
-    # Average per-graph for consistency with other losses
-    batch_vec = getattr(data, 'batch', None)
-    if batch_vec is not None:
-        flux_loss_per_graph = scatter_mean(flux_mse, batch_vec, dim=0)
-        flux_loss = flux_loss_per_graph.mean()
-    else:
-        flux_loss = flux_mse.mean()
-
-    return flux_loss
-
-
 def compute_loss(loss_mse: torch.Tensor, loss_phys: torch.Tensor, loss_type: LossType,
                  lambda_phys: float = 1.0, loss_ic: torch.Tensor = None, lambda_ic: float = 1.0,
                  loss_bc: torch.Tensor = None, lambda_bc: float = 1.0,
@@ -485,7 +427,7 @@ def compute_loss(loss_mse: torch.Tensor, loss_phys: torch.Tensor, loss_type: Los
 
 
 def compute_loss_and_metrics(
-    pred: Tuple[torch.Tensor, torch.Tensor],  # Now a tuple: (concentration, flux)
+    pred: torch.Tensor,
     y: torch.Tensor,
     loss_phys: torch.Tensor,
     loss_type: LossType,
@@ -499,15 +441,13 @@ def compute_loss_and_metrics(
 ):
     """Compute loss and metrics with per-graph aggregation (consistent with physics residual).
 
-    NOW SUPPORTS MULTI-TASK LEARNING: pred is a tuple of (concentration_pred, flux_pred).
-
     Computes metrics per-graph first, then averages across graphs in the batch.
     This ensures equal weight per graph regardless of graph size, matching the
     physics residual computation strategy.
 
     Args:
-        pred: Tuple of (concentration_pred, flux_pred) for multi-task learning [N, 1] each
-        y: Target values (in original space) [N, 1]
+        pred: Model predictions [N, 1]
+        y: Target values [N, 1]
         loss_phys: Precomputed physics residual (already properly averaged per-graph)
         loss_type: Type of loss to compute
         lambda_phys: Physics term weight
@@ -521,11 +461,8 @@ def compute_loss_and_metrics(
     Returns:
         Tuple of (total_loss, mse, mae, rmse, rel_error, ic_loss, bc_loss)
     """
-    # Unpack multi-task predictions
-    concentration_pred, flux_pred = pred
-
     # Squeeze predictions and targets to [N]
-    pred_flat = concentration_pred.squeeze(-1)
+    pred_flat = pred.squeeze(-1)
     y_flat = y.squeeze(-1)
 
     # IMPORTANT: Denormalize predictions and targets for relative error calculation
@@ -533,7 +470,7 @@ def compute_loss_and_metrics(
     # computed in normalized space is misleading (tiny values -> huge percentages)
     # We need to compute relative error in PHYSICAL space!
     if data is not None and hasattr(data, 'target_scale'):
-        target_scale = data.target_scale.to(concentration_pred.device)
+        target_scale = data.target_scale.to(pred.device)
         # Handle batched case
         if batch_vec is not None and target_scale.numel() > 1:
             target_scale_per_node = target_scale[batch_vec]
@@ -599,30 +536,30 @@ def compute_loss_and_metrics(
         rel_error = absolute_errors_physical.mean() / (torch.abs(y_physical).mean() + epsilon)
 
     # Compute initial condition loss if needed
-    loss_ic = torch.tensor(0.0, device=concentration_pred.device, dtype=concentration_pred.dtype)
+    loss_ic = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
     if loss_type == LossType.PHYSICS_WITH_IC:
         if is_initial_node is None:
             raise ValueError("is_initial_node must be provided for PHYSICS_WITH_IC loss type")
         if data is None:
             raise ValueError("data must be provided for PHYSICS_WITH_IC loss type to check timestep")
-        loss_ic = compute_initial_condition_loss(concentration_pred, y, is_initial_node, data)
+        loss_ic = compute_initial_condition_loss(pred, y, is_initial_node, data)
 
     # Compute boundary condition loss if boundary nodes are provided
-    loss_bc = torch.tensor(0.0, device=concentration_pred.device, dtype=concentration_pred.dtype)
+    loss_bc = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
     if is_boundary_node is not None and is_boundary_node.any():
-        loss_bc = compute_boundary_condition_loss(concentration_pred, y, is_boundary_node, data)
+        loss_bc = compute_boundary_condition_loss(pred, y, is_boundary_node, data)
 
     # Compute temporal consistency loss (encourages smooth predictions over time)
-    loss_temporal = torch.tensor(0.0, device=concentration_pred.device, dtype=concentration_pred.dtype)
+    loss_temporal = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
     if data is not None and loss_type != LossType.DATA_ONLY:
         # Only apply temporal consistency for physics-based losses
-        loss_temporal = compute_temporal_consistency_loss(concentration_pred, data)
+        loss_temporal = compute_temporal_consistency_loss(pred, data)
 
     # Compute physical constraint penalties (positivity, conservation)
-    loss_constraints = torch.tensor(0.0, device=concentration_pred.device, dtype=concentration_pred.dtype)
+    loss_constraints = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
     if data is not None and loss_type != LossType.DATA_ONLY:
         # Only apply physical constraints for physics-based losses
-        loss_constraints = compute_physical_constraint_loss(concentration_pred, data)
+        loss_constraints = compute_physical_constraint_loss(pred, data)
 
     # Compute total loss based on configuration
     # Add temporal and constraint losses with fixed weights
@@ -696,9 +633,7 @@ def train_epoch(
 
         # Compute physics residual
         if loss_type == LossType.DATA_ONLY:
-            # Extract concentration from multi-task output for device
-            concentration_pred, _ = pred
-            phys_res, phys_res_metrics = torch.tensor(0.0, device=concentration_pred.device), None
+            phys_res, phys_res_metrics = torch.tensor(0.0, device=pred.device), None
         else:
             phys_res, phys_res_metrics = compute_physics_residual_step(
                 model=model,
@@ -723,29 +658,17 @@ def train_epoch(
         )
 
         if loss_type == LossType.DATA_ONLY:
-            # Extract concentration from multi-task output
-            concentration_pred, _ = pred
             mean_y = data.y.mean().item()
-            mean_pred = concentration_pred.mean().item()
-
-            # Calculate sucrose content (concentration * volume)
-            vol_ST = data.node_feat[:, 1]  # sieve-tube volume per node
-            content_true = data.y.squeeze() * vol_ST
-            content_pred = concentration_pred.squeeze() * vol_ST
-            mean_content_true = content_true.mean().item()
-            mean_content_pred = content_pred.mean().item()
+            mean_pred = pred.mean().item()
 
             log_path = "results/debug_output.txt"
             with open(log_path, "a") as f:
                 if batch_idx == 0 or batch_idx == len(loader) - 1:
                     msg = (
                         f"\nEpoch {epoch:03d} | Batch {batch_idx} | Number of nodes: {data.y.shape[0]}\n"
-                        f"C_ST true:\n{data.y.detach().cpu().numpy()[:10]}\n"
-                        f"C_ST pred:\n{concentration_pred.detach().cpu().numpy()[:10]}\n"
-                        f"Mean C_ST true: {mean_y:.6e}, Mean C_ST pred: {mean_pred:.6e}\n"
-                        f"S_ST true:\n{content_true.detach().cpu().numpy()[:10]}\n"
-                        f"S_ST pred:\n{content_pred.detach().cpu().numpy()[:10]}\n"
-                        f"Mean content true: {mean_content_true:.6e}, Mean content pred: {mean_content_pred:.6e}"
+                        f"S_ST true:\n{data.y.detach().cpu().numpy()[:10]}\n"
+                        f"S_ST pred:\n{pred.detach().cpu().numpy()[:10]}\n"
+                        f"Mean S_ST true: {mean_y:.6e}, Mean S_ST pred: {mean_pred:.6e}\n"
                     )
                     # print(msg)
                     f.write(msg + "\n")
@@ -1031,9 +954,7 @@ def eval_model(
 
             # Compute physics residual (eval path re-enables grad internally)
             if loss_type == LossType.DATA_ONLY:
-                # Extract concentration from multi-task output for device
-                concentration_pred, _ = pred
-                phys_res, phys_res_metrics = torch.tensor(0.0, device=concentration_pred.device), None
+                phys_res, phys_res_metrics = torch.tensor(0.0, device=pred.device), None
             else:
                 phys_res, phys_res_metrics = compute_physics_residual_step(
                     model=model,
@@ -1062,10 +983,8 @@ def eval_model(
 
             # Log distribution of predictions and targets (first batch only, every 5 epochs)
             if writer is not None and batch_idx == 0 and epoch % 5 == 0:
-                # Extract concentration from multi-task output
-                concentration_pred, _ = pred
                 # pred is already in original space (no standardization)
-                logging.log_evaluation_histograms(writer, phase, epoch, concentration_pred, data.y)
+                logging.log_evaluation_histograms(writer, phase, epoch, pred, data.y)
 
                 # Log individual loss components for debugging
                 writer.add_scalar(f'{phase}/mse', float(mse), epoch)

@@ -119,14 +119,7 @@ class PhloemNNConv(nn.Module):
         self.convs = nn.ModuleList(conv_layers)
         self.norms = nn.ModuleList(norm_layers)
 
-        # Multi-task learning: predict both concentration AND flux divergence
-        # This provides additional physics-based supervision
-        self.head_concentration = nn.Sequential(
-            nn.Linear(cfg.hidden_size, cfg.hidden_size), nn.ReLU(),
-            nn.Linear(cfg.hidden_size, 1)
-        )
-
-        self.head_flux = nn.Sequential(
+        self.head = nn.Sequential(
             nn.Linear(cfg.hidden_size, cfg.hidden_size), nn.ReLU(),
             nn.Linear(cfg.hidden_size, 1)
         )
@@ -262,14 +255,10 @@ class PhloemNNConv(nn.Module):
             else:
                 node_feat = h
 
-        # Final MLP heads to produce outputs per node
-        # Multi-task: predict both concentration and flux divergence
-        out_concentration = self.head_concentration(node_feat)
-        out_flux = self.head_flux(node_feat)
+        # Final MLP heads to produce scalar output per node
+        out = self.head(node_feat)
 
-        # Content mode: outputs are normalized [0,1]
-        out_concentration = torch.sigmoid(out_concentration)
+        # Outputs (sucrose content) are normalized [0,1]
+        out = torch.sigmoid(out)
 
-        # Flux divergence can be positive or negative (no activation)
-        # Return both predictions as a tuple
-        return out_concentration, out_flux
+        return out

@@ -30,11 +30,20 @@ def main():
     # Create TensorBoard writer
     writer = logging.create_tensorboard_writer(config)
 
-    # Get data loaders
-    train_loader, val_loader, test_loader = utils.get_dataloaders(config)
-    print(f"Train batches: {len(train_loader)}, "
-          f"Validation batches: {len(val_loader)}, "
-          f"Test batches: {len(test_loader)}")
+    # Get data loaders (curriculum-aware)
+    if config.use_curriculum:
+        # For curriculum learning, get raw train graphs
+        train_graphs, val_loader, test_loader, collate_fn = utils.get_dataloaders_with_train_graphs(config)
+        print(f"Train graphs: {len(train_graphs)}, "
+              f"Validation batches: {len(val_loader)}, "
+              f"Test batches: {len(test_loader)}")
+    else:
+        # Normal training with dataloaders
+        train_loader, val_loader, test_loader = utils.get_dataloaders(config)
+        print(f"Train batches: {len(train_loader)}, "
+              f"Validation batches: {len(val_loader)}, "
+              f"Test batches: {len(test_loader)}")
+        collate_fn = None  # Not needed for normal training
 
     # Setup model
     model_setup = setup.setup_model(device)
@@ -52,11 +61,17 @@ def main():
     # Setup training components
     optimizer, scheduler = setup.setup_training_components(model_setup.model, config)
 
-    # Run training loop
-    training_state = train.train_model(
-        model_setup, train_loader, val_loader, optimizer, scheduler,
-        writer, config, model_cfg
-    )
+    # Run training loop (curriculum-aware)
+    if config.use_curriculum:
+        training_state = train.train_model_with_curriculum(
+            model_setup, train_graphs, val_loader, test_loader, optimizer, scheduler,
+            writer, config, model_cfg, collate_fn
+        )
+    else:
+        training_state = train.train_model(
+            model_setup, train_loader, val_loader, optimizer, scheduler,
+            writer, config, model_cfg
+        )
 
     # Run final evaluation and reporting
     train.test_model(model_setup, test_loader, writer, training_state, config)

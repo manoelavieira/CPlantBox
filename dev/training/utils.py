@@ -58,6 +58,62 @@ def get_dataloaders(config: TrainingConfig) -> Tuple[DataLoader, DataLoader, Dat
     return train_loader, val_loader, test_loader
 
 
+def get_dataloaders_with_train_graphs(config: TrainingConfig):
+    """Get train graphs list and validation/test loaders for curriculum learning.
+
+    Returns train graphs as a list instead of DataLoader to enable curriculum filtering.
+
+    Args:
+        config: Training configuration containing dataset parameters
+
+    Returns:
+        Tuple of (train_graphs_list, val_loader, test_loader, collate_fn)
+    """
+    from data.dataset_loader import load_phloem_data, load_graphs_from_file, train_test_split, collate_graphs
+    from pathlib import Path
+
+    # Validate split ratios
+    validate_split_ratios(config.train_ratio, config.val_ratio)
+
+    # Load all graphs from file
+    path = Path(config.data_path)
+    if path.is_file():
+        print(f"Loading data from single file: {config.data_path}")
+        graphs = load_graphs_from_file(str(config.data_path), None)
+    else:
+        raise RuntimeError(f"Curriculum learning currently only supports single file input")
+
+    # Split into train/val/test
+    import torch
+    from torch.utils.data import DataLoader
+
+    n_samples = len(graphs)
+    n_train = int(config.train_ratio * n_samples)
+    n_val = int(config.val_ratio * n_samples)
+
+    # Shuffle with fixed seed
+    generator = torch.Generator().manual_seed(config.seed)
+    indices = torch.randperm(n_samples, generator=generator)
+
+    train_idx = indices[:n_train]
+    val_idx = indices[n_train:n_train + n_val]
+    test_idx = indices[n_train + n_val:]
+
+    # Get train graphs as list (for curriculum filtering)
+    train_graphs = [graphs[i] for i in train_idx]
+
+    # Create val/test loaders normally
+    val_graphs = [graphs[i] for i in val_idx]
+    test_graphs = [graphs[i] for i in test_idx]
+
+    val_loader = DataLoader(val_graphs, batch_size=config.batch_size,
+                            shuffle=False, collate_fn=collate_graphs)
+    test_loader = DataLoader(test_graphs, batch_size=config.batch_size,
+                             shuffle=False, collate_fn=collate_graphs)
+
+    return train_graphs, val_loader, test_loader, collate_graphs
+
+
 def save_checkpoint(
     model_setup: ModelSetup,
     model_cfg: ModelConfig,

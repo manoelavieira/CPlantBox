@@ -2,7 +2,7 @@
 Configuration classes for GNN training
 """
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, List
 from pathlib import Path
 from enum import Enum
 import torch
@@ -52,6 +52,12 @@ class TrainingConfig:
     model_filename: str = "best_model.pt"
     tensorboard_log_dir: str = "results/tensorboard_logs"
 
+    # Curriculum learning
+    use_curriculum: bool = False
+    curriculum_stages: int = 3
+    curriculum_thresholds: Optional[List[float]] = None  # Node count thresholds for each stage
+    curriculum_epochs: Optional[List[int]] = None  # Epochs per stage (if None, distributes equally)
+
     @property
     def model_save_path(self) -> str:
         """Get the full path for saving the model."""
@@ -70,6 +76,19 @@ class TrainingConfig:
             )
         if self.data_path is None:
             raise ValueError("data_path is required")
+
+        # Validate curriculum parameters
+        if self.use_curriculum:
+            if self.curriculum_thresholds and len(self.curriculum_thresholds) != self.curriculum_stages:
+                raise ValueError(
+                    f"Number of curriculum thresholds ({len(self.curriculum_thresholds)}) "
+                    f"must match curriculum_stages ({self.curriculum_stages})"
+                )
+            if self.curriculum_epochs and len(self.curriculum_epochs) != self.curriculum_stages:
+                raise ValueError(
+                    f"Number of curriculum epochs ({len(self.curriculum_epochs)}) "
+                    f"must match curriculum_stages ({self.curriculum_stages})"
+                )
 
 
 @dataclass

@@ -230,82 +230,6 @@ def compute_boundary_condition_loss(
     return bc_loss
 
 
-def compute_temporal_consistency_loss(
-    pred: torch.Tensor,
-    data,
-) -> torch.Tensor:
-    """Compute temporal consistency loss to encourage smooth predictions over time.
-
-    Penalizes large jumps between consecutive timesteps for the same nodes.
-    This is only computed for nodes that exist in consecutive timesteps (initial nodes).
-
-    Args:
-        pred: Model predictions [N, 1] for current batch
-        data: Graph data with batch information
-
-    Returns:
-        torch.Tensor: Temporal consistency loss (penalizes large temporal jumps)
-    """
-    if not hasattr(data, 'batch') or data.batch is None:
-        # Single graph case - no temporal comparison possible
-        return torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
-
-    # Get the number of graphs in batch
-    batch_size = data.batch.max().item() + 1
-
-    if batch_size < 2:
-        # Need at least 2 graphs to compute temporal consistency
-        return torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
-
-    # For consecutive timesteps, compute difference in predictions for overlapping nodes
-    # We use is_initial_node to identify nodes that exist across timesteps
-    if not hasattr(data, 'is_initial_node'):
-        return torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
-
-    is_initial = data.is_initial_node
-
-    # Split predictions by graph
-    temporal_losses = []
-    node_ptr = 0
-    graph_preds = []
-    graph_initial_masks = []
-
-    for graph_idx in range(batch_size):
-        graph_mask = (data.batch == graph_idx)
-        graph_pred = pred[graph_mask]
-        graph_initial = is_initial[graph_mask]
-
-        graph_preds.append(graph_pred)
-        graph_initial_masks.append(graph_initial)
-
-    # Compute temporal differences for consecutive graphs
-    for i in range(batch_size - 1):
-        pred_t = graph_preds[i]
-        pred_t_plus_1 = graph_preds[i + 1]
-
-        initial_t = graph_initial_masks[i]
-        initial_t_plus_1 = graph_initial_masks[i + 1]
-
-        # Only compare initial nodes (nodes present in both timesteps)
-        if initial_t.any() and initial_t_plus_1.any():
-            # Get overlapping initial nodes
-            n_overlap = min(initial_t.sum(), initial_t_plus_1.sum())
-
-            if n_overlap > 0:
-                # Compare first n_overlap initial nodes from each graph
-                pred_t_initial = pred_t[initial_t][:n_overlap]
-                pred_t_plus_1_initial = pred_t_plus_1[initial_t_plus_1][:n_overlap]
-
-                # Compute temporal difference
-                temporal_diff = pred_t_plus_1_initial - pred_t_initial
-                temporal_losses.append(temporal_diff.pow(2).mean())
-
-    if len(temporal_losses) == 0:
-        return torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
-
-    return torch.stack(temporal_losses).mean()
-
-
 def compute_physical_constraint_loss(
     pred: torch.Tensor,
     data,
@@ -549,12 +473,6 @@ def compute_loss_and_metrics(
     if is_boundary_node is not None and is_boundary_node.any():
         loss_bc = compute_boundary_condition_loss(pred, y, is_boundary_node, data)
 
-    # Compute temporal consistency loss (encourages smooth predictions over time)
-    loss_temporal = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
-    if data is not None and loss_type != LossType.DATA_ONLY:
-        # Only apply temporal consistency for physics-based losses
-        loss_temporal = compute_temporal_consistency_loss(pred, data)
-
     # Compute physical constraint penalties (positivity, conservation)
     loss_constraints = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
     if data is not None and loss_type != LossType.DATA_ONLY:
@@ -562,15 +480,14 @@ def compute_loss_and_metrics(
         loss_constraints = compute_physical_constraint_loss(pred, data)
 
     # Compute total loss based on configuration
-    # Add temporal and constraint losses with fixed weights
-    lambda_temporal = 0.1  # Weight for temporal consistency
+    # Add constraint losses with fixed weights
     lambda_constraints = 0.1  # Weight for physical constraints
 
     base_loss = compute_loss(loss_mse, loss_phys, loss_type, lambda_phys, loss_ic, lambda_ic, loss_bc, lambda_bc)
 
     # Add regularization terms for physics-based losses
     if loss_type != LossType.DATA_ONLY:
-        total_loss = base_loss + lambda_temporal * loss_temporal + lambda_constraints * loss_constraints
+        total_loss = base_loss + lambda_constraints * loss_constraints
     else:
         total_loss = base_loss
 

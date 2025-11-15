@@ -211,7 +211,7 @@ class CurriculumScheduler:
             else:
                 # Starting new stage
                 print(f"\n{'='*60}")
-                print(f"🎓 ADVANCING TO CURRICULUM STAGE {self.current_stage + 1}/{self.num_stages}")
+                print(f"ADVANCING TO CURRICULUM STAGE {self.current_stage + 1}/{self.num_stages}")
                 print(f"{'='*60}")
                 stage_info = self.get_current_stage_info()
                 print(f"Training graphs: {stage_info['num_graphs']}")

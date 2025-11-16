@@ -42,15 +42,6 @@ def parse_arguments() -> TrainingConfig:
                         help='Type of loss to use: data (MSE), physics, or combined (data + physics)')
     parser.add_argument('--tensorboard-log-dir', type=str, default='results/tensorboard_logs',
                         help='Directory for TensorBoard logs')
-    # Curriculum learning arguments
-    parser.add_argument('--curriculum', action='store_true',
-                        help='Enable curriculum learning (progressive training on increasingly complex graphs)')
-    parser.add_argument('--curriculum-stages', type=int, default=3,
-                        help='Number of curriculum stages (default: 3)')
-    parser.add_argument('--curriculum-thresholds', type=str, default=None,
-                        help='Comma-separated difficulty thresholds (e.g., "40,60,100"). If not specified, uses defaults.')
-    parser.add_argument('--curriculum-epochs', type=str, default=None,
-                        help='Comma-separated epochs per stage (e.g., "20,20,50"). If not specified, distributes epochs equally.')
 
     args = parser.parse_args()
 
@@ -69,12 +60,7 @@ def parse_arguments() -> TrainingConfig:
         lambda_ic=args.lambda_ic,
         lambda_bc=args.lambda_bc,
         loss_type=LossType(args.loss_type),
-        tensorboard_log_dir=args.tensorboard_log_dir,
-        # Curriculum learning
-        use_curriculum=args.curriculum,
-        curriculum_stages=args.curriculum_stages,
-        curriculum_thresholds=[float(x) for x in args.curriculum_thresholds.split(',')] if args.curriculum_thresholds else None,
-        curriculum_epochs=[int(x) for x in args.curriculum_epochs.split(',')] if args.curriculum_epochs else None
+        tensorboard_log_dir=args.tensorboard_log_dir
     )
 
     # Validate configuration

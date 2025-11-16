@@ -33,8 +33,12 @@ class TrainingConfig:
 
     # Loss configuration
     loss_type: LossType = LossType.PHYSICS_WITH_IC_BC
-    lambda_ic: float = 1.0  # Weight for initial condition term (only used with PHYSICS_WITH_IC_BC)
-    lambda_bc: float = 1.0  # Weight for boundary condition term (optional, applies to all physics-based losses)
+    lambda_ic: float = 10.0  # Weight for initial condition term (increased for better supervision)
+    lambda_bc: float = 10.0  # Weight for boundary condition term (increased for better supervision)
+
+    # Adaptive loss balancing for physics mode
+    use_adaptive_physics_weighting: bool = True # Balance physics vs IC/BC dynamically
+    target_physics_ratio: float = 0.5           # Target ratio of physics loss to supervision loss
 
     # Reproducibility
     seed: int = 42

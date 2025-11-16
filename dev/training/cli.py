@@ -42,7 +42,6 @@ def parse_arguments() -> TrainingConfig:
                         help='Type of loss to use: data (MSE), physics, or combined (data + physics)')
     parser.add_argument('--tensorboard-log-dir', type=str, default='results/tensorboard_logs',
                         help='Directory for TensorBoard logs')
-
     # Curriculum learning arguments
     parser.add_argument('--curriculum', action='store_true',
                         help='Enable curriculum learning (progressive training on increasingly complex graphs)')

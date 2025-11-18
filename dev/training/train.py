@@ -244,67 +244,6 @@ def compute_boundary_condition_loss(
     return bc_loss
 
 
-def compute_physical_constraint_loss(
-    pred: torch.Tensor,
-    data,
-) -> torch.Tensor:
-    """Compute physical constraint penalties to ensure predictions are physically valid.
-
-    Enforces:
-    1. Positivity: Concentrations must be non-negative
-    2. Mass conservation: Total sucrose should be reasonably conserved
-
-    Args:
-        pred: Model predictions [N, 1]
-        data: Graph data
-
-    Returns:
-        torch.Tensor: Physical constraint violation penalty
-    """
-    # 1. Positivity constraint: Penalize negative predictions
-    # Use ReLU to only penalize negative values
-    positivity_loss = F.relu(-pred).mean()
-
-    # 2. Mass conservation (soft constraint)
-    # For batched data, check conservation per graph
-    if hasattr(data, 'batch') and data.batch is not None:
-        batch_size = data.batch.max().item() + 1
-        conservation_losses = []
-
-        for graph_idx in range(batch_size):
-            graph_mask = (data.batch == graph_idx)
-            pred_graph = pred[graph_mask]
-            target_graph = data.y[graph_mask]
-
-            # Penalize large deviation in total mass
-            total_pred = pred_graph.sum()
-            total_target = target_graph.sum()
-
-            # Relative conservation error
-            if total_target.abs() > 1e-6:
-                conservation_error = ((total_pred - total_target) / total_target).abs()
-                conservation_losses.append(conservation_error)
-
-        if len(conservation_losses) > 0:
-            conservation_loss = torch.stack(conservation_losses).mean()
-        else:
-            conservation_loss = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
-    else:
-        # Single graph case
-        total_pred = pred.sum()
-        total_target = data.y.sum()
-
-        if total_target.abs() > 1e-6:
-            conservation_loss = ((total_pred - total_target) / total_target).abs()
-        else:
-            conservation_loss = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
-
-    # Combine constraints (positivity weighted higher as it's a hard constraint)
-    total_constraint_loss = 10.0 * positivity_loss + conservation_loss
-
-    return total_constraint_loss
-
-
 def compute_loss(loss_mse: torch.Tensor, loss_phys: torch.Tensor, loss_type: LossType,
                  lambda_phys: float = 1.0, loss_ic: torch.Tensor = None, lambda_ic: float = 1.0,
                  loss_bc: torch.Tensor = None, lambda_bc: float = 1.0,
@@ -503,27 +442,15 @@ def compute_loss_and_metrics(
         if is_boundary_node is not None and is_boundary_node.any():
             loss_bc = compute_boundary_condition_loss(pred, y, is_boundary_node, data)
 
-    # Compute physical constraint penalties (positivity, conservation)
-    loss_constraints = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
-    if data is not None and loss_type != LossType.DATA_ONLY:
-        # Only apply physical constraints for physics-based losses
-        loss_constraints = compute_physical_constraint_loss(pred, data)
-
     # Compute total loss based on configuration
-    # Add constraint losses with fixed weights
-    lambda_constraints = 0.5  # Weight for physical constraints
-
     base_loss, adaptive_weight, supervision_or_data_weight, phys_contrib_pct, sup_or_data_contrib_pct = compute_loss(
         loss_mse, loss_phys, loss_type, lambda_phys, loss_ic, lambda_ic, loss_bc, lambda_bc,
         use_adaptive_weighting=use_adaptive_physics_weighting,
         target_physics_ratio=target_physics_ratio
     )
 
-    # Add regularization terms for physics-based losses
-    if loss_type != LossType.DATA_ONLY:
-        total_loss = base_loss + lambda_constraints * loss_constraints
-    else:
-        total_loss = base_loss
+    # Use base_loss as total_loss (no constraint penalties)
+    total_loss = base_loss
 
     # Compute BC node statistics
     bc_node_count = 0

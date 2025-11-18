@@ -345,7 +345,6 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
             F_in_true = compute_phloem_loading(y_true, data, params, node_fields, device)
             F_out_true = compute_sucrose_outflow(y_true, data, params, node_fields, device)
             dS_dt_from_physics_true = dS_dt_from_flux_true + F_in_true - F_out_true
-            dC_dt_from_physics_true = dS_dt_from_physics_true / vol_ST
 
             msg = (
                 f"\n{'='*60}\n"

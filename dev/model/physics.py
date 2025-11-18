@@ -8,7 +8,8 @@ from torch_geometric.data import Data
 from . import utils
 from . import config
 
-DEBUG = False  # Debug flag: set to True to enable detailed physics loss debugging
+DEBUG = True  # Debug flag: set to True to enable detailed physics loss debugging
+debug_path = "results/debug_physics_logs.txt"
 
 def denormalize_to_concentration(
     y_pred: torch.Tensor,
@@ -338,81 +339,68 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
     dC_dt = dy_dt / vol_ST  # for logging only
 
     if DEBUG:
-        J_ax_true = compute_axial_flux(y_true, data, device)
-        dS_dt_from_flux_true = compute_flux_divergence(J_ax_true, data.edge_index.to(device), N, device)
-        F_in_true = compute_phloem_loading(y_true, data, params, node_fields, device)
-        F_out_true = compute_sucrose_outflow(y_true, data, params, node_fields, device)
-        dS_dt_from_physics_true = dS_dt_from_flux_true + F_in_true - F_out_true
-        dC_dt_from_physics_true = dS_dt_from_physics_true / vol_ST
+        with open(debug_path, "a") as f:
+            J_ax_true = compute_axial_flux(y_true, data, device)
+            dS_dt_from_flux_true = compute_flux_divergence(J_ax_true, data.edge_index.to(device), N, device)
+            F_in_true = compute_phloem_loading(y_true, data, params, node_fields, device)
+            F_out_true = compute_sucrose_outflow(y_true, data, params, node_fields, device)
+            dS_dt_from_physics_true = dS_dt_from_flux_true + F_in_true - F_out_true
+            dC_dt_from_physics_true = dS_dt_from_physics_true / vol_ST
 
-        print(f"\n{'='*60}")
-        print(f"DEBUG OUTPUT")
-        print(f"{'='*60}")
-        print(f"\nNumber of graphs in batch: {torch.bincount(batch_vec).size(0)}")
-        print(f"Number of nodes per graph: {torch.bincount(batch_vec).detach().cpu().numpy()}")
+            msg = (
+                f"\n{'='*60}\n"
+                f"DEBUG OUTPUT\n"
+                f"{'='*60}\n"
+                f"\nNumber of graphs in batch: {torch.bincount(batch_vec).size(0)}\n"
+                f"Number of nodes per graph: {torch.bincount(batch_vec).detach().cpu().numpy()}\n"
+            )
+            f.write(msg)
 
-        # Get target_scale for denormalization
-        target_scale_debug = getattr(data, 'target_scale', torch.tensor(1.0, device=device, dtype=y_pred.dtype)).to(device)
-        if batch_vec is not None and target_scale_debug.numel() > 1:
-            target_scale_per_node_debug = target_scale_debug[batch_vec]
-        else:
-            target_scale_per_node_debug = target_scale_debug
+            # Get target_scale for denormalization
+            target_scale_debug = getattr(data, 'target_scale', torch.tensor(1.0, device=device, dtype=y_pred.dtype)).to(device)
+            if batch_vec is not None and target_scale_debug.numel() > 1:
+                target_scale_per_node_debug = target_scale_debug[batch_vec]
+            else:
+                target_scale_per_node_debug = target_scale_debug
 
-        # Show predictions in their native units (content)
-        # Show both normalized [0,1] and physical values
-        print(f"\n--- NORMALIZED VALUES [0,1] ---")
-        print(f"y_true (normalized):\n{y_true[batch_vec == 0].squeeze(-1).detach().cpu().numpy()[:10]}")
-        print(f"y_pred (normalized):\n{y_pred[batch_vec == 0].squeeze(-1).detach().cpu().numpy()[:10]}")
+            # Show predictions in their native units (content)
+            # Show both normalized [0,1] and physical values
+            msg = (
+                f"--- NORMALIZED VALUES [0,1] ---\n"
+                f"y_true (normalized):\n{y_true[batch_vec == 0].squeeze(-1).detach().cpu().numpy()}\n"
+                f"y_pred (normalized):\n{y_pred[batch_vec == 0].squeeze(-1).detach().cpu().numpy()}\n"
+            )
+            f.write(msg)
 
-        # Compute physical values
-        S_ST_true_physical = (y_true.squeeze(-1) * target_scale_per_node_debug)[batch_vec == 0]
-        S_ST_pred_physical = (y_pred.squeeze(-1) * target_scale_per_node_debug)[batch_vec == 0]
-        C_ST_true_physical = (S_ST_true_physical / vol_ST[batch_vec == 0])
-        C_ST_pred_physical = (S_ST_pred_physical / vol_ST[batch_vec == 0])
+            # Compute physical values
+            S_ST_true_physical = (y_true.squeeze(-1) * target_scale_per_node_debug)[batch_vec == 0]
+            S_ST_pred_physical = (y_pred.squeeze(-1) * target_scale_per_node_debug)[batch_vec == 0]
 
-        print(f"\n--- PHYSICAL VALUES ---")
-        print(f"S_ST_true (mol):\n{S_ST_true_physical.detach().cpu().numpy()[:10]}")
-        print(f"S_ST_pred (mol):\n{S_ST_pred_physical.detach().cpu().numpy()[:10]}")
-        print(f"C_ST_true (mol/cm³):\n{C_ST_true_physical.detach().cpu().numpy()[:10]}")
-        print(f"C_ST_pred (mol/cm³):\n{C_ST_pred_physical.detach().cpu().numpy()[:10]}")
+            msg = (
+                f"--- PHYSICAL VALUES ---\n"
+                f"S_ST_true (mol):\n{S_ST_true_physical.detach().cpu().numpy()}\n"
+                f"S_ST_pred (mol):\n{S_ST_pred_physical.detach().cpu().numpy()}\n"
 
-        print(f"\n--- PHYSICS TERMS (always in physical units) ---")
-        print(f"dS_dt_from_flux_true (mol/day):\n{dS_dt_from_flux_true[batch_vec == 0].detach().cpu().numpy()[:10]}")
-        print(f"dS_dt_from_flux_pred (mol/day):\n{dS_dt_from_flux[batch_vec == 0].detach().cpu().numpy()[:10]}")
+                f"\n--- PHYSICS TERMS (always in physical units) ---\n"
+                f"dS_dt_from_flux_true (mol/day):\n{dS_dt_from_flux_true[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
+                f"dS_dt_from_flux_pred (mol/day):\n{dS_dt_from_flux[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
 
-        print(f"\nF_in_true (mol/day):\n{F_in_true[batch_vec == 0].detach().cpu().numpy()[:10]}")
-        print(f"F_in_pred (mol/day):\n{F_in[batch_vec == 0].detach().cpu().numpy()[:10]}")
+                f"\nF_in_true (mol/day):\n{F_in_true[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
+                f"F_in_pred (mol/day):\n{F_in[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
 
-        print(f"\nF_out_true (mol/day):\n{F_out_true[batch_vec == 0].detach().cpu().numpy()[:10]}")
-        print(f"F_out_pred (mol/day):\n{F_out[batch_vec == 0].detach().cpu().numpy()[:10]}")
+                f"\nF_out_true (mol/day):\n{F_out_true[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
+                f"F_out_pred (mol/day):\n{F_out[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
 
-        print(f"\ndS_dt_from_physics_true (mol/day):\n{dS_dt_from_physics_true[batch_vec == 0].detach().cpu().numpy()[:10]}")
-        print(f"dS_dt_from_physics_pred (mol/day):\n{dS_dt_from_physics[batch_vec == 0].detach().cpu().numpy()[:10]}")
+                f"\ndS_dt_from_physics_true (mol/day):\n{dS_dt_from_physics_true[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
+                f"dS_dt_from_physics_pred (mol/day):\n{dS_dt_from_physics[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
 
-        print(f"\ndC_dt_from_physics_true (mol/cm³/day):\n{dC_dt_from_physics_true[batch_vec == 0].detach().cpu().numpy()[:10]}")
-        print(f"dC_dt_from_physics_pred (mol/cm³/day):\n{dC_dt_from_physics[batch_vec == 0].detach().cpu().numpy()[:10]}")
+                # Show model's time derivative in the appropriate units (only for predictions)
+                # Note: Cannot compute dy_dt for y_true since it's not connected to time_per_node in computation graph
+                f"\ndS_dt_pred (mol/day) [from model]:\n{dy_dt[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
 
-        # Show model's time derivative in the appropriate units (only for predictions)
-        # Note: Cannot compute dy_dt for y_true since it's not connected to time_per_node in computation graph
-        print(f"\ndS_dt_pred (mol/day) [from model]:\n{dy_dt[batch_vec == 0].detach().cpu().numpy()[:10]}")
-
-        # Compute and show errors
-        print(f"\n--- ERROR METRICS (first graph) ---")
-        graph0_mask = batch_vec == 0
-        # Show errors in normalized space (what the model sees)
-        norm_error = (y_pred[graph0_mask] - y_true[graph0_mask]).squeeze(-1).detach().cpu().numpy()
-        print(f"Normalized error (pred - true) [0,1]:\n  mean={norm_error.mean():.6f}, std={norm_error.std():.6f}")
-        print(f"  min={norm_error.min():.6f}, max={norm_error.max():.6f}")
-
-        # Show errors in physical space (what we care about)
-        S_ST_error = (S_ST_pred_physical - S_ST_true_physical).detach().cpu().numpy()
-        C_ST_error = (C_ST_pred_physical - C_ST_true_physical).detach().cpu().numpy()
-        print(f"\nS_ST error (mol):\n  mean={S_ST_error.mean():.3e}, std={S_ST_error.std():.3e}")
-        print(f"  min={S_ST_error.min():.3e}, max={S_ST_error.max():.3e}")
-        print(f"\nC_ST error (mol/cm³):\n  mean={C_ST_error.mean():.3e}, std={C_ST_error.std():.3e}")
-        print(f"  min={C_ST_error.min():.3e}, max={C_ST_error.max():.3e}")
-
-        print(f"{'='*60}\n")
+                f"{'='*60}\n"
+            )
+            f.write(msg)
 
     # Use adaptive normalization based on current residual scale
     #

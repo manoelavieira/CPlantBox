@@ -464,31 +464,14 @@ def compute_loss_and_metrics(
     absolute_errors = torch.abs(pred_flat - y_flat)
     absolute_errors_physical = torch.abs(pred_physical - y_physical)
 
-    # === LOSS REFINEMENT 1: Weighted MSE by target magnitude ===
-    # Weight errors by target magnitude to focus on high-concentration regions
-    # This prevents the model from ignoring nodes with high values
-    weights = torch.abs(y_flat) + 0.1  # Add small constant to avoid zero weights
-    weights = weights / weights.mean()  # Normalize to keep loss scale similar
-    weighted_squared_errors = weights * squared_errors
-
-    # === LOSS REFINEMENT 2: Relative MSE component ===
-    # Add a relative error term to the loss to better handle varying magnitudes
-    epsilon = 1e-6
-    relative_squared_errors = ((pred_flat - y_flat) / (torch.abs(y_flat) + epsilon)).pow(2)
-
     # Compute per-graph metrics using scatter_mean (same as physics residual)
     if batch_vec is not None:
         # Average errors per graph first
         mse_per_graph = scatter_mean(squared_errors, batch_vec, dim=0)
-        weighted_mse_per_graph = scatter_mean(weighted_squared_errors, batch_vec, dim=0)
-        rel_mse_per_graph = scatter_mean(relative_squared_errors, batch_vec, dim=0)
         mae_per_graph = scatter_mean(absolute_errors, batch_vec, dim=0)
 
-        # Combine absolute and relative MSE (70% absolute, 30% relative)
-        combined_mse_per_graph = 0.7 * weighted_mse_per_graph + 0.3 * rel_mse_per_graph
-
         # Then average across graphs in batch
-        loss_mse = combined_mse_per_graph.mean()
+        loss_mse = mse_per_graph.mean()
         mae = mae_per_graph.mean()
         rmse = torch.sqrt(mse_per_graph).mean()  # RMSE per graph, then average (for logging)
 
@@ -500,14 +483,9 @@ def compute_loss_and_metrics(
         rel_error = rel_error_per_graph.mean()
     else:
         # Single graph case: simple average across nodes
-        mse_base = squared_errors.mean()
-        weighted_mse = weighted_squared_errors.mean()
-        rel_mse = relative_squared_errors.mean()
-
-        # Combine absolute and relative MSE
-        loss_mse = 0.7 * weighted_mse + 0.3 * rel_mse
+        loss_mse = squared_errors.mean()
         mae = absolute_errors.mean()
-        rmse = torch.sqrt(mse_base)  # Use base MSE for RMSE logging
+        rmse = torch.sqrt(squared_errors.mean())
 
         # Relative error in PHYSICAL space
         epsilon = 1e-12

@@ -10,7 +10,10 @@ from typing import Tuple, Optional
 
 from model.config import ModelConfig
 from model.physics import physics_residual
-from .config import TrainingConfig, TrainingState, TrainingMetrics, ModelSetup, LossType, PhysicsMetrics
+from .config import (
+    TrainingConfig, TrainingState, TrainingMetrics, ModelSetup,
+    LossType, PhysicsMetrics, LossConfig, LossResult, EpochResult
+)
 
 import training.utils as utils
 import training.logging as logging
@@ -67,43 +70,37 @@ def _compute_loss_percentages(
 
 
 def accumulate_epoch_stats(
-    totals,
-    loss: float,
-    mse: float,
-    mae: float,
-    rmse: float,
-    rel_error: float,
-    phys: float,
-    ic: float,
-    bc: float,
-    last_phys: Optional[PhysicsMetrics],
-    adaptive_weight: float = 0.0,
-    supervision_weight: float = 0.0,
-    bc_nodes: int = 0,
-    bc_pct: float = 0.0,
-    phys_contrib_pct: float = 0.0,
-    sup_contrib_pct: float = 0.0,
+    totals: dict,
+    result: LossResult,
     weighted_supervision: float = 0.0,
     weighted_physics: float = 0.0
 ):
-    totals["loss"] += float(loss)
-    totals["mse"] += float(mse)
-    totals["mae"] += float(mae)
-    totals["rmse"] += float(rmse)
-    totals["rel_error"] += float(rel_error)
-    totals["phys"] += float(phys)
-    totals["ic"] += float(ic)
-    totals["bc"] += float(bc)
-    totals["n_batches"] += 1
-    totals["last_phys_metrics"] = last_phys
+    """Accumulate statistics from a LossResult into totals dictionary.
 
-    # Accumulate new statistics
-    totals["adaptive_weight"] += adaptive_weight
-    totals["supervision_weight"] += supervision_weight
-    totals["bc_nodes"] += bc_nodes
-    totals["bc_pct"] += bc_pct
-    totals["phys_contrib_pct"] += phys_contrib_pct
-    totals["sup_contrib_pct"] += sup_contrib_pct
+    Args:
+        totals: Dictionary to accumulate statistics
+        result: LossResult containing all metrics from current batch
+        weighted_supervision: Actual weighted supervision component
+        weighted_physics: Actual weighted physics component
+    """
+    totals["loss"] += result.total_loss
+    totals["mse"] += result.mse
+    totals["mae"] += result.mae
+    totals["rmse"] += result.rmse
+    totals["rel_error"] += result.rel_error
+    totals["phys"] += result.phys
+    totals["ic"] += result.ic
+    totals["bc"] += result.bc
+    totals["n_batches"] += 1
+    totals["last_phys_metrics"] = result.physics_metrics
+
+    # Accumulate statistics
+    totals["adaptive_weight"] += result.adaptive_weight
+    totals["supervision_weight"] += 0.0  # Deprecated, kept for compatibility
+    totals["bc_nodes"] += result.bc_nodes
+    totals["bc_pct"] += result.bc_pct
+    totals["phys_contrib_pct"] += result.phys_contrib_pct
+    totals["sup_contrib_pct"] += result.sup_or_data_contrib_pct
 
     # Track actual weighted components
     totals["weighted_supervision"] += weighted_supervision
@@ -402,17 +399,13 @@ def compute_loss_and_metrics(
     pred: torch.Tensor,
     y: torch.Tensor,
     loss_phys: torch.Tensor,
-    loss_type: LossType,
-    lambda_data: float = 1.0,
+    loss_config: LossConfig,
     is_initial_node: torch.Tensor = None,
-    lambda_ic: float = 1.0,
     is_boundary_node: torch.Tensor = None,
-    lambda_bc: float = 1.0,
     batch_vec: torch.Tensor = None,
     data = None,
-    use_adaptive_physics_weighting: bool = True,
-    target_physics_ratio: float = 0.5,
-):
+    phys_metrics: Optional[PhysicsMetrics] = None,
+) -> LossResult:
     """Compute loss and metrics with per-graph aggregation (consistent with physics residual).
 
     Computes metrics per-graph first, then averages across graphs in the batch.
@@ -423,20 +416,15 @@ def compute_loss_and_metrics(
         pred: Model predictions [N, 1]
         y: Target values [N, 1]
         loss_phys: Precomputed physics residual (already properly averaged per-graph)
-        loss_type: Type of loss to compute
-        lambda_data: Data loss weight (for COMBINED mode)
+        loss_config: Loss configuration containing all loss-related parameters
         is_initial_node: Boolean mask for initial nodes (required for PHYSICS_WITH_IC_BC)
-        lambda_ic: Initial condition term weight
         is_boundary_node: Boolean mask for boundary nodes (optional, for BC supervision)
-        lambda_bc: Boundary condition term weight
         batch_vec: Batch assignment for each node [N] (None for single graph)
         data: Graph data object (required for PHYSICS_WITH_IC_BC to check timesteps)
-        use_adaptive_physics_weighting: If True, balance physics loss adaptively
-        target_physics_ratio: Target ratio of physics to supervision loss
+        phys_metrics: Optional physics metrics for detailed tracking
 
     Returns:
-        Tuple of (total_loss, mse, mae, rmse, rel_error, ic_loss, bc_loss, adaptive_weight,
-                  bc_node_count, bc_node_percentage, phys_contrib_pct, sup_or_data_contrib_pct)
+        LossResult containing all computed metrics
     """
     # Squeeze predictions and targets to [N]
     pred_flat = pred.squeeze(-1)
@@ -452,20 +440,35 @@ def compute_loss_and_metrics(
 
     # Compute physics-specific losses (IC and BC)
     loss_ic, loss_bc, bc_node_count, bc_node_pct = _compute_physics_losses(
-        pred, y, loss_type, is_initial_node, is_boundary_node, data
+        pred, y, loss_config.loss_type, is_initial_node, is_boundary_node, data
     )
 
     # Compute total loss based on configuration
     # Returns: (total_loss, adaptive_weight, phys_%, ref_%)
     total_loss, adaptive_weight, phys_contrib_pct, ref_contrib_pct = compute_loss(
-        loss_mse, loss_phys, loss_type, lambda_data, loss_ic, lambda_ic, loss_bc, lambda_bc,
-        use_adaptive_weighting=use_adaptive_physics_weighting,
-        target_physics_ratio=target_physics_ratio
+        loss_mse, loss_phys, loss_config.loss_type,
+        loss_config.lambda_data, loss_ic, loss_config.lambda_ic,
+        loss_bc, loss_config.lambda_bc,
+        use_adaptive_weighting=loss_config.use_adaptive_physics_weighting,
+        target_physics_ratio=loss_config.target_physics_ratio
     )
 
-    return (total_loss, loss_mse, mae, rmse, rel_error, loss_ic, loss_bc,
-            adaptive_weight, bc_node_count, bc_node_pct,
-            phys_contrib_pct, ref_contrib_pct)
+    return LossResult(
+        total_loss=utils.to_float(total_loss),
+        mse=utils.to_float(loss_mse),
+        mae=utils.to_float(mae),
+        rmse=utils.to_float(rmse),
+        rel_error=utils.to_float(rel_error),
+        phys=utils.to_float(loss_phys),
+        ic=utils.to_float(loss_ic),
+        bc=utils.to_float(loss_bc),
+        adaptive_weight=adaptive_weight,
+        bc_nodes=bc_node_count,
+        bc_pct=bc_node_pct,
+        phys_contrib_pct=phys_contrib_pct,
+        sup_or_data_contrib_pct=ref_contrib_pct,
+        physics_metrics=phys_metrics
+    )
 
 
 def _denormalize_for_metrics(
@@ -607,37 +610,24 @@ def train_epoch(
         model: nn.Module,
         loader: DataLoader,
         optimizer: torch.optim.Optimizer,
+        loss_config: LossConfig,
         writer: Optional[SummaryWriter] = None,
         epoch: int = 0,
         clip_grad_norm: float = 1.0,
-        loss_type: LossType = LossType.COMBINED,
-        lambda_data: float = 1.0,
-        lambda_ic: float = 1.0,
-        lambda_bc: float = 1.0,
-        use_adaptive_physics_weighting: bool = True,
-        target_physics_ratio: float = 0.5
-    ) -> Tuple[float, float, float, float, float, float, float, float, Optional[PhysicsMetrics], float, float, float, float, float, float]:
+    ) -> EpochResult:
     """Train model for one epoch.
 
     Args:
         model: The neural network model
         loader: DataLoader containing training data
         optimizer: Optimizer for updating model parameters
+        loss_config: Configuration for loss computation
         writer: TensorBoard writer for logging
         epoch: Current epoch number
         clip_grad_norm: Maximum norm for gradient clipping
-        loss_type: Type of loss to compute (data_only, physics, or combined)
-        lambda_data: Weight for data MSE term (only used with COMBINED loss)
-        lambda_ic: Weight for initial condition term (only used with physics loss)
-        lambda_bc: Weight for boundary condition term (optional supervision)
-        use_adaptive_physics_weighting: If True, balance physics loss adaptively
-        target_physics_ratio: Target ratio of physics to supervision loss
 
     Returns:
-        Tuple of (average_loss, average_mae, average_mse, average_rmse, average_rel_error,
-                  average_physics, average_ic_loss, average_bc_loss, last_physics_metrics,
-                  average_adaptive_weight, average_supervision_weight, average_bc_nodes, average_bc_pct,
-                  average_phys_contrib_pct, average_sup_contrib_pct)
+        EpochResult containing averaged metrics from the epoch
 
     Raises:
         RuntimeError: If no training samples are processed
@@ -663,7 +653,7 @@ def train_epoch(
         pred = run_forward(model, data)
 
         # Compute physics residual
-        if loss_type == LossType.DATA_ONLY:
+        if loss_config.loss_type == LossType.DATA_ONLY:
             phys_res, phys_res_metrics = torch.tensor(0.0, device=pred.device), None
         else:
             phys_res, phys_res_metrics = compute_physics_residual_step(
@@ -674,23 +664,19 @@ def train_epoch(
             )
 
         # Compute loss and metrics (no physics scaling needed)
-        loss, mse, mae, rmse, rel_error, ic_loss, bc_loss, adaptive_weight, bc_nodes, bc_pct, phys_contrib_pct, sup_contrib_pct = compute_loss_and_metrics(
+        result = compute_loss_and_metrics(
             pred,
             data.y,
             phys_res,
-            loss_type,
-            lambda_data,
+            loss_config,
             getattr(data, 'is_initial_node', None),
-            lambda_ic,
             getattr(data, 'is_boundary_node', None),
-            lambda_bc,
             getattr(data, 'batch', None),
             data,
-            use_adaptive_physics_weighting,
-            target_physics_ratio
+            phys_res_metrics
         )
 
-        if loss_type == LossType.DATA_ONLY:
+        if loss_config.loss_type == LossType.DATA_ONLY:
             mean_y = data.y.mean().item()
             mean_pred = pred.mean().item()
 
@@ -706,7 +692,38 @@ def train_epoch(
                     # print(msg)
                     f.write(msg + "\n")
 
-        loss.backward()
+        # Convert LossResult.total_loss back to tensor for backward
+        loss_tensor = torch.tensor(result.total_loss, device=pred.device, requires_grad=True)
+
+        # Re-compute loss tensor properly for backprop
+        if loss_config.loss_type == LossType.DATA_ONLY:
+            loss_tensor = F.mse_loss(pred.squeeze(-1), data.y.squeeze(-1))
+        else:
+            # Recompute actual loss tensor (not the float)
+            pred_flat = pred.squeeze(-1)
+            y_flat = data.y.squeeze(-1)
+            squared_error = (pred_flat - y_flat).pow(2)
+            if getattr(data, 'batch', None) is not None:
+                from torch_scatter import scatter_mean
+                mse_per_graph = scatter_mean(squared_error, data.batch, dim=0)
+                loss_mse_tensor = mse_per_graph.mean()
+            else:
+                loss_mse_tensor = squared_error.mean()
+
+            # Compute physics-specific losses as tensors
+            loss_ic_tensor = compute_initial_condition_loss(pred, data.y, getattr(data, 'is_initial_node', None), data) if loss_config.loss_type == LossType.PHYSICS_WITH_IC_BC else torch.tensor(0.0, device=pred.device)
+            loss_bc_tensor = compute_boundary_condition_loss(pred, data.y, getattr(data, 'is_boundary_node', None), data) if getattr(data, 'is_boundary_node', None) is not None else torch.tensor(0.0, device=pred.device)
+
+            # Recompute total loss as tensor
+            loss_tensor, _, _, _ = compute_loss(
+                loss_mse_tensor, phys_res, loss_config.loss_type,
+                loss_config.lambda_data, loss_ic_tensor, loss_config.lambda_ic,
+                loss_bc_tensor, loss_config.lambda_bc,
+                use_adaptive_weighting=loss_config.use_adaptive_physics_weighting,
+                target_physics_ratio=loss_config.target_physics_ratio
+            )
+
+        loss_tensor.backward()
 
         # Log gradient norms (first batch only to avoid clutter)
         if writer is not None and batch_idx == 0:
@@ -719,30 +736,30 @@ def train_epoch(
         # Accumulate metrics for epoch averaging
         with torch.no_grad():
             # Calculate actual weighted components for this batch
-            if loss_type == LossType.PHYSICS_WITH_IC_BC:
-                batch_weighted_sup = float((lambda_ic * ic_loss) + (lambda_bc * bc_loss))
-                batch_weighted_phys = float(adaptive_weight * phys_res)
-            elif loss_type == LossType.COMBINED:
-                batch_weighted_sup = float(lambda_data * mse)
-                batch_weighted_phys = float(adaptive_weight * phys_res)
+            if loss_config.loss_type == LossType.PHYSICS_WITH_IC_BC:
+                batch_weighted_sup = (loss_config.lambda_ic * result.ic) + (loss_config.lambda_bc * result.bc)
+                batch_weighted_phys = result.adaptive_weight * result.phys
+            elif loss_config.loss_type == LossType.COMBINED:
+                batch_weighted_sup = loss_config.lambda_data * result.mse
+                batch_weighted_phys = result.adaptive_weight * result.phys
             else:
                 batch_weighted_sup = 0.0
                 batch_weighted_phys = 0.0
 
             # Accumulate the physics residual (no normalization needed)
-            accumulate_epoch_stats(totals, loss, mse, mae, rmse, rel_error, phys_res, ic_loss, bc_loss, phys_res_metrics,
-                                   adaptive_weight, 0.0, bc_nodes, bc_pct, phys_contrib_pct, sup_contrib_pct,
-                                   batch_weighted_sup, batch_weighted_phys)
+            accumulate_epoch_stats(totals, result, batch_weighted_sup, batch_weighted_phys)
 
             # Log physics metrics
             if writer is not None and batch_idx % 10 == 0:
                 step = epoch * len(loader) + batch_idx
-                writer.add_scalar('training/batch_physics', float(phys_res), step)
+                writer.add_scalar('training/batch_physics', result.phys, step)
 
             # Log batch-level metrics (every 10 batches to avoid clutter)
             if writer is not None and batch_idx % 10 == 0:
                 logging.log_batch_metrics(writer, epoch, batch_idx, len(loader),
-                                          loss, mse, mae, rmse, rel_error, phys_res, ic_loss, bc_loss, bc_nodes, bc_pct)
+                                          result.total_loss, result.mse, result.mae, result.rmse,
+                                          result.rel_error, result.phys, result.ic, result.bc,
+                                          result.bc_nodes, result.bc_pct)
 
                 # Log detailed physics components if available
                 if phys_res_metrics is not None:
@@ -752,23 +769,7 @@ def train_epoch(
     if totals["n_batches"] == 0:
         raise RuntimeError("No training samples this epoch.")
 
-    return (totals["loss"] / totals["n_batches"],
-            totals["mae"] / totals["n_batches"],
-            totals["mse"] / totals["n_batches"],
-            totals["rmse"] / totals["n_batches"],
-            totals["rel_error"] / totals["n_batches"],
-            totals["phys"] / totals["n_batches"],
-            totals["ic"] / totals["n_batches"],
-            totals["bc"] / totals["n_batches"],
-            totals["last_phys_metrics"],
-            totals["adaptive_weight"] / totals["n_batches"],
-            totals["supervision_weight"] / totals["n_batches"],
-            totals["bc_nodes"] / totals["n_batches"],
-            totals["bc_pct"] / totals["n_batches"],
-            totals["phys_contrib_pct"] / totals["n_batches"],
-            totals["sup_contrib_pct"] / totals["n_batches"],
-            totals["weighted_supervision"] / totals["n_batches"],
-            totals["weighted_physics"] / totals["n_batches"])
+    return EpochResult.from_totals(totals)
 
 
 def train_model(
@@ -799,51 +800,49 @@ def train_model(
     # Initialize training state
     training_state = TrainingState()
 
+    # Create loss configuration from training config
+    loss_config = LossConfig.from_training_config(config)
+
     print(f"\nStarting training with loss type: {config.loss_type.value}")
     for epoch in range(1, config.epochs + 1):
         training_state.current_epoch = epoch
 
-        # Use configured loss type directly
-        current_loss_type = config.loss_type
-
         # Training
-        tr_loss, tr_mae, tr_mse, tr_rmse, tr_rel_error, tr_phys, tr_ic, tr_bc, tr_phys_metrics, tr_adap_w, tr_sup_w, tr_bc_nodes, tr_bc_pct, tr_phys_pct, tr_sup_pct, tr_weighted_sup, tr_weighted_phys = train_epoch(
+        tr_result = train_epoch(
             model_setup.model,
             train_loader,
             optimizer,
+            loss_config,
             writer,
             epoch,
-            clip_grad_norm=config.clip_grad_norm,
-            loss_type=current_loss_type,
-            lambda_data=config.lambda_data,
-            lambda_ic=config.lambda_ic,
-            lambda_bc=config.lambda_bc,
-            use_adaptive_physics_weighting=config.use_adaptive_physics_weighting,
-            target_physics_ratio=config.target_physics_ratio
+            clip_grad_norm=config.clip_grad_norm
         )
 
         # Validation
-        val_loss, val_mse, val_mae, val_rmse, val_rel_error, val_phys, val_ic, val_bc, val_phys_metrics, val_adap_w, val_sup_w, val_bc_nodes, val_bc_pct, val_phys_pct, val_sup_pct = eval_model(
+        val_result = eval_model(
             model_setup.model,
             val_loader,
+            loss_config,
             writer,
             epoch,
-            phase='val',
-            loss_type=current_loss_type,
-            lambda_data=config.lambda_data,
-            lambda_ic=config.lambda_ic,
-            lambda_bc=config.lambda_bc,
-            use_adaptive_physics_weighting=config.use_adaptive_physics_weighting,
-            target_physics_ratio=config.target_physics_ratio
+            phase='val'
         )
 
         # Learning rate scheduling (use combined validation loss)
-        scheduler.step(val_loss)
+        scheduler.step(val_result.loss)
         current_lr = optimizer.param_groups[0]['lr']
 
         # Create metrics objects
-        tr_metrics = TrainingMetrics(tr_loss, tr_mse, tr_mae, tr_rmse, tr_rel_error, tr_phys, tr_ic, tr_bc, tr_bc_nodes, tr_bc_pct, tr_phys_metrics)
-        val_metrics = TrainingMetrics(val_loss, val_mse, val_mae, val_rmse, val_rel_error, val_phys, val_ic, val_bc, val_bc_nodes, val_bc_pct, val_phys_metrics)
+        tr_metrics = TrainingMetrics(
+            tr_result.loss, tr_result.mse, tr_result.mae, tr_result.rmse,
+            tr_result.rel_error, tr_result.phys, tr_result.ic, tr_result.bc,
+            tr_result.bc_nodes, tr_result.bc_pct, tr_result.physics_metrics
+        )
+        val_metrics = TrainingMetrics(
+            val_result.loss, val_result.mse, val_result.mae, val_result.rmse,
+            val_result.rel_error, val_result.phys, val_result.ic, val_result.bc,
+            val_result.bc_nodes, val_result.bc_pct, val_result.physics_metrics
+        )
 
         # Log metrics to TensorBoard
         logging.log_epoch_metrics(writer, epoch, tr_metrics, val_metrics, current_lr)
@@ -851,43 +850,48 @@ def train_model(
         # Console logging
         # Only print BC nodes info on first epoch (since it remains constant)
         if epoch == 1:
-            base_log = f"BC nodes = {tr_bc_nodes:.1f}({tr_bc_pct:.1f}%)\n"
+            base_log = f"BC nodes = {tr_result.bc_nodes:.1f}({tr_result.bc_pct:.1f}%)\n"
         else:
             base_log = ""
 
         base_log += (f"\nEpoch {epoch:03d} | "
-                    f"train_tot={tr_loss:.3e} train_mse={tr_mse:.3e} train_phys={tr_phys:.3e} train_rmse={tr_rmse:.3e} train_relerr={tr_rel_error:.3e}")
-        base_log += f" train_ic={tr_ic:.3e} train_bc={tr_bc:.3e}"
+                    f"train_tot={tr_result.loss:.3e} train_mse={tr_result.mse:.3e} "
+                    f"train_phys={tr_result.phys:.3e} train_rmse={tr_result.rmse:.3e} "
+                    f"train_relerr={tr_result.rel_error:.3e}")
+        base_log += f" train_ic={tr_result.ic:.3e} train_bc={tr_result.bc:.3e}"
 
         # Add weighted component info if using adaptive weighting
-        if config.use_adaptive_physics_weighting and current_loss_type == LossType.PHYSICS_WITH_IC_BC:
-            base_log += (f" | sup_w={tr_weighted_sup:.3e}({tr_sup_pct:.1f}%) "
-                        f"phys_w={tr_weighted_phys:.3e}({tr_phys_pct:.1f}%)")
-        elif current_loss_type == LossType.COMBINED:
-            base_log += (f" | data_w={tr_weighted_sup:.3e}({tr_sup_pct:.1f}%) "
-                        f"phys_w={tr_weighted_phys:.3e}({tr_phys_pct:.1f}%)")
+        if config.use_adaptive_physics_weighting and config.loss_type == LossType.PHYSICS_WITH_IC_BC:
+            base_log += (f" | sup_w={tr_result.weighted_supervision:.3e}({tr_result.sup_contrib_pct:.1f}%) "
+                        f"phys_w={tr_result.weighted_physics:.3e}({tr_result.phys_contrib_pct:.1f}%)")
+        elif config.loss_type == LossType.COMBINED:
+            base_log += (f" | data_w={tr_result.weighted_supervision:.3e}({tr_result.sup_contrib_pct:.1f}%) "
+                        f"phys_w={tr_result.weighted_physics:.3e}({tr_result.phys_contrib_pct:.1f}%)")
 
-        base_log += (f" | val_tot={val_loss:.3e} val_mse={val_mse:.3e} val_phys={val_phys:.3e} val_rmse={val_rmse:.3e} val_relerr={val_rel_error:.3e}")
-        base_log += f" val_ic={val_ic:.3e} val_bc={val_bc:.3e}"
+        base_log += (f" | val_tot={val_result.loss:.3e} val_mse={val_result.mse:.3e} "
+                    f"val_phys={val_result.phys:.3e} val_rmse={val_result.rmse:.3e} "
+                    f"val_relerr={val_result.rel_error:.3e}")
+        base_log += f" val_ic={val_result.ic:.3e} val_bc={val_result.bc:.3e}"
 
         # Add physics details to console output if available
-        if tr_phys_metrics is not None:
-            physics_log = f" | {tr_phys_metrics}"
+        if tr_result.physics_metrics is not None:
+            physics_log = f" | {tr_result.physics_metrics}"
             print(base_log + physics_log)
         else:
             print(base_log)
 
         # Model saving and early stopping (use combined validation loss)
-        if training_state.update_best(val_loss, epoch):
+        if training_state.update_best(val_result.loss, epoch):
             # Log best model achievement
             writer.add_scalar('best_model/epoch', epoch, epoch)
-            writer.add_scalar('best_model/val_loss', val_loss, epoch)
-            writer.add_scalar('best_model/val_mse', val_mse, epoch)
+            writer.add_scalar('best_model/val_loss', val_result.loss, epoch)
+            writer.add_scalar('best_model/val_mse', val_result.mse, epoch)
 
             # Save model checkpoint
             utils.save_checkpoint(
                 model_setup, model_cfg, optimizer, scheduler,
-                epoch, val_loss, val_mse, val_phys, val_rel_error, config.model_save_path
+                epoch, val_result.loss, val_result.mse, val_result.phys,
+                val_result.rel_error, config.model_save_path
             )
         else:
             if training_state.should_stop(config.patience):
@@ -928,112 +932,99 @@ def test_model(
     # Load the best model for testing
     utils.load_best_model(model_setup, config.model_save_path, model_setup.device)
 
+    # Create loss configuration from training config
+    loss_config = LossConfig.from_training_config(config)
+
     # Final evaluation on test set
-    test_loss, test_mse, test_mae, test_rmse, test_rel_error, test_phys, test_ic, test_bc, test_phys_metrics, test_adap_w, test_sup_w, test_bc_nodes, test_bc_pct, test_phys_pct, test_sup_pct = eval_model(
+    test_result = eval_model(
         model_setup.model,
         test_loader,
+        loss_config,
         writer,
         training_state.best_epoch,
-        phase='test',
-        loss_type=config.loss_type,
-        lambda_data=config.lambda_data,
-        lambda_ic=config.lambda_ic,
-        lambda_bc=config.lambda_bc,
-        use_adaptive_physics_weighting=config.use_adaptive_physics_weighting,
-        target_physics_ratio=config.target_physics_ratio
+        phase='test'
     )
 
     # Log final test metrics
-    writer.add_scalar('final/test_loss', test_loss, training_state.best_epoch)
-    writer.add_scalar('final/test_mse', test_mse, training_state.best_epoch)
-    writer.add_scalar('final/test_mae', test_mae, training_state.best_epoch)
-    writer.add_scalar('final/test_rmse', test_rmse, training_state.best_epoch)
-    writer.add_scalar('final/test_rel_error', test_rel_error, training_state.best_epoch)
-    writer.add_scalar('final/test_physics', test_phys, training_state.best_epoch)
-    writer.add_scalar('final/test_ic_loss', test_ic, training_state.best_epoch)
-    writer.add_scalar('final/test_bc_loss', test_bc, training_state.best_epoch)
+    writer.add_scalar('final/test_loss', test_result.loss, training_state.best_epoch)
+    writer.add_scalar('final/test_mse', test_result.mse, training_state.best_epoch)
+    writer.add_scalar('final/test_mae', test_result.mae, training_state.best_epoch)
+    writer.add_scalar('final/test_rmse', test_result.rmse, training_state.best_epoch)
+    writer.add_scalar('final/test_rel_error', test_result.rel_error, training_state.best_epoch)
+    writer.add_scalar('final/test_physics', test_result.phys, training_state.best_epoch)
+    writer.add_scalar('final/test_ic_loss', test_result.ic, training_state.best_epoch)
+    writer.add_scalar('final/test_bc_loss', test_result.bc, training_state.best_epoch)
 
     # Log adaptive weighting metrics if available
     if config.use_adaptive_physics_weighting and config.loss_type == LossType.PHYSICS_WITH_IC_BC:
-        writer.add_scalar('final/test_adaptive_weight', test_adap_w, training_state.best_epoch)
-        writer.add_scalar('final/test_supervision_weight', test_sup_w, training_state.best_epoch)
-        writer.add_scalar('final/test_bc_nodes', test_bc_nodes, training_state.best_epoch)
-        writer.add_scalar('final/test_bc_pct', test_bc_pct, training_state.best_epoch)
+        writer.add_scalar('final/test_adaptive_weight', test_result.adaptive_weight, training_state.best_epoch)
+        writer.add_scalar('final/test_supervision_weight', test_result.supervision_weight, training_state.best_epoch)
+        writer.add_scalar('final/test_bc_nodes', test_result.bc_nodes, training_state.best_epoch)
+        writer.add_scalar('final/test_bc_pct', test_result.bc_pct, training_state.best_epoch)
 
     # Create final summary
     final_summary = (f"Final Results:\n"
-                    f"Test Loss: {test_loss:.3e}\n"
-                    f"Test MSE: {test_mse:.3e}\n"
-                    f"Test MAE: {test_mae:.3e}\n"
-                    f"Test RMSE: {test_rmse:.3e}\n"
-                    f"Test Rel Error: {test_rel_error:.3e}\n"
-                    f"Test Physics: {test_phys:.3e}\n"
-                    f"Test IC Loss: {test_ic:.3e}\n"
-                    f"Test BC Loss: {test_bc:.3e}\n"
+                    f"Test Loss: {test_result.loss:.3e}\n"
+                    f"Test MSE: {test_result.mse:.3e}\n"
+                    f"Test MAE: {test_result.mae:.3e}\n"
+                    f"Test RMSE: {test_result.rmse:.3e}\n"
+                    f"Test Rel Error: {test_result.rel_error:.3e}\n"
+                    f"Test Physics: {test_result.phys:.3e}\n"
+                    f"Test IC Loss: {test_result.ic:.3e}\n"
+                    f"Test BC Loss: {test_result.bc:.3e}\n"
                     f"Best epoch: {training_state.best_epoch}")
 
     # Add adaptive weighting info if available
     if config.use_adaptive_physics_weighting and config.loss_type == LossType.PHYSICS_WITH_IC_BC:
-        final_summary += (f"\nAdaptive Weight: {test_adap_w:.3f}\n"
-                         f"Supervision Weight: {test_sup_w:.3f}\n"
-                         f"Physics Contribution: {test_phys_pct:.1f}%\n"
-                         f"Supervision Contribution: {test_sup_pct:.1f}%\n"
-                         f"BC Nodes: {test_bc_nodes:.1f} ({test_bc_pct:.2f}%)")
+        final_summary += (f"\nAdaptive Weight: {test_result.adaptive_weight:.3f}\n"
+                         f"Supervision Weight: {test_result.supervision_weight:.3f}\n"
+                         f"Physics Contribution: {test_result.phys_contrib_pct:.1f}%\n"
+                         f"Supervision Contribution: {test_result.sup_contrib_pct:.1f}%\n"
+                         f"BC Nodes: {test_result.bc_nodes:.1f} ({test_result.bc_pct:.2f}%)")
 
-    if test_phys_metrics is not None:
-        final_summary += f"\nTest Physics Details: {test_phys_metrics}"
+    if test_result.physics_metrics is not None:
+        final_summary += f"\nTest Physics Details: {test_result.physics_metrics}"
 
     writer.add_text('final/results', final_summary)
 
     # Console output with adaptive weighting info
-    console_msg = (f"\nFinal test metrics!  Loss: {test_loss:.3e}, Physics Loss: {test_phys:.3e}, "
-                   f"IC Loss: {test_ic:.3e}, BC Loss: {test_bc:.3e} | "
-                   f"MSE: {test_mse:.3e}, RMSE: {test_rmse:.3e}, "
-                   f"MAE: {test_mae:.3e}, RelErr: {test_rel_error:.3e}")
+    console_msg = (f"\nFinal test metrics!  Loss: {test_result.loss:.3e}, Physics Loss: {test_result.phys:.3e}, "
+                   f"IC Loss: {test_result.ic:.3e}, BC Loss: {test_result.bc:.3e} | "
+                   f"MSE: {test_result.mse:.3e}, RMSE: {test_result.rmse:.3e}, "
+                   f"MAE: {test_result.mae:.3e}, RelErr: {test_result.rel_error:.3e}")
 
     if config.use_adaptive_physics_weighting and config.loss_type == LossType.PHYSICS_WITH_IC_BC:
-        console_msg += (f"\n  Adaptive Weight: {test_adap_w:.3f}, Supervision Weight: {test_sup_w:.3f}\n"
-                       f"  Physics Contribution: {test_phys_pct:.1f}%, Supervision Contribution: {test_sup_pct:.1f}%\n"
-                       f"  BC Nodes: {test_bc_nodes:.1f} ({test_bc_pct:.2f}%)")
+        console_msg += (f"\n  Adaptive Weight: {test_result.adaptive_weight:.3f}, "
+                       f"Supervision Weight: {test_result.supervision_weight:.3f}\n"
+                       f"  Physics Contribution: {test_result.phys_contrib_pct:.1f}%, "
+                       f"Supervision Contribution: {test_result.sup_contrib_pct:.1f}%\n"
+                       f"  BC Nodes: {test_result.bc_nodes:.1f} ({test_result.bc_pct:.2f}%)")
 
     print(console_msg)
-    if test_phys_metrics is not None:
-        print(f"Test Physics Details: {test_phys_metrics}")
+    if test_result.physics_metrics is not None:
+        print(f"Test Physics Details: {test_result.physics_metrics}")
 
 
 def eval_model(
         model: nn.Module,
         loader: DataLoader,
+        loss_config: LossConfig,
         writer: Optional[SummaryWriter] = None,
         epoch: int = 0,
         phase: str = 'val',
-        loss_type: LossType = LossType.COMBINED,
-        lambda_data: float = 1.0,
-        lambda_ic: float = 1.0,
-        lambda_bc: float = 1.0,
-        use_adaptive_physics_weighting: bool = True,
-        target_physics_ratio: float = 0.5
-    ) -> Tuple[float, float, float, float, float, float, float, float, Optional[PhysicsMetrics], float, float, float, float, float, float]:
+    ) -> EpochResult:
     """Evaluate model on a dataset.
 
     Args:
         model: The neural network model
         loader: DataLoader containing evaluation data
+        loss_config: Configuration for loss computation
         writer: TensorBoard writer for logging
         epoch: Current epoch number
         phase: Phase name ('val' or 'test')
-        loss_type: Type of loss to compute (data, physics, or combined)
-        lambda_data: Weight for data MSE term (only used with COMBINED loss)
-        lambda_ic: Weight for initial condition term (only used with physics loss)
-        lambda_bc: Weight for boundary condition term (used with physics loss)
-        use_adaptive_physics_weighting: If True, balance physics loss adaptively
-        target_physics_ratio: Target ratio of physics to supervision loss
 
     Returns:
-        Tuple of (average_loss, average_mse, average_mae, average_rmse, average_rel_error,
-                  average_physics, average_ic_loss, average_bc_loss, last_physics_metrics,
-                  average_adaptive_weight, average_supervision_weight, average_bc_nodes, average_bc_pct,
-                  average_phys_contrib_pct, average_sup_contrib_pct)
+        EpochResult containing averaged metrics from evaluation
     """
     model.eval()
     totals = {"loss": 0.0, "mse": 0.0, "mae": 0.0, "rmse": 0.0, "rel_error": 0.0, "phys": 0.0, "ic": 0.0, "bc": 0.0,
@@ -1055,7 +1046,7 @@ def eval_model(
             pred = run_forward(model, data)
 
             # Compute physics residual (eval path re-enables grad internally)
-            if loss_type == LossType.DATA_ONLY:
+            if loss_config.loss_type == LossType.DATA_ONLY:
                 phys_res, phys_res_metrics = torch.tensor(0.0, device=pred.device), None
             else:
                 phys_res, phys_res_metrics = compute_physics_residual_step(
@@ -1066,37 +1057,31 @@ def eval_model(
                 )
 
             # Compute loss and metrics (no physics scaling needed)
-            loss, mse, mae, rmse, rel_error, ic_loss, bc_loss, adaptive_weight, bc_nodes, bc_pct, phys_contrib_pct, sup_contrib_pct = compute_loss_and_metrics(
+            result = compute_loss_and_metrics(
                 pred,
                 data.y,
                 phys_res,
-                loss_type,
-                lambda_data,
+                loss_config,
                 getattr(data, 'is_initial_node', None),
-                lambda_ic,
                 getattr(data, 'is_boundary_node', None),
-                lambda_bc,
                 getattr(data, 'batch', None),
                 data,
-                use_adaptive_physics_weighting,
-                target_physics_ratio
+                phys_res_metrics
             )
 
             # Calculate actual weighted components for this batch (for eval)
-            if loss_type == LossType.PHYSICS_WITH_IC_BC:
-                batch_weighted_sup = float((lambda_ic * ic_loss) + (lambda_bc * bc_loss))
-                batch_weighted_phys = float(adaptive_weight * phys_res)
-            elif loss_type == LossType.COMBINED:
-                batch_weighted_sup = float(lambda_data * mse)
-                batch_weighted_phys = float(adaptive_weight * phys_res)
+            if loss_config.loss_type == LossType.PHYSICS_WITH_IC_BC:
+                batch_weighted_sup = (loss_config.lambda_ic * result.ic) + (loss_config.lambda_bc * result.bc)
+                batch_weighted_phys = result.adaptive_weight * result.phys
+            elif loss_config.loss_type == LossType.COMBINED:
+                batch_weighted_sup = loss_config.lambda_data * result.mse
+                batch_weighted_phys = result.adaptive_weight * result.phys
             else:
                 batch_weighted_sup = 0.0
                 batch_weighted_phys = 0.0
 
             # Accumulate metrics
-            accumulate_epoch_stats(totals, loss, mse, mae, rmse, rel_error, phys_res, ic_loss, bc_loss, phys_res_metrics,
-                                   adaptive_weight, 0.0, bc_nodes, bc_pct, phys_contrib_pct, sup_contrib_pct,
-                                   batch_weighted_sup, batch_weighted_phys)
+            accumulate_epoch_stats(totals, result, batch_weighted_sup, batch_weighted_phys)
 
             # Log distribution of predictions and targets (first batch only, every 5 epochs)
             if writer is not None and batch_idx == 0 and epoch % 5 == 0:
@@ -1104,10 +1089,10 @@ def eval_model(
                 logging.log_evaluation_histograms(writer, phase, epoch, pred, data.y)
 
                 # Log individual loss components for debugging
-                writer.add_scalar(f'{phase}/mse', float(mse), epoch)
-                writer.add_scalar(f'{phase}/physics', float(phys_res), epoch)
-                writer.add_scalar(f'{phase}/ic_loss', float(ic_loss), epoch)
-                writer.add_scalar(f'{phase}/loss', float(loss), epoch)
+                writer.add_scalar(f'{phase}/mse', result.mse, epoch)
+                writer.add_scalar(f'{phase}/physics', result.phys, epoch)
+                writer.add_scalar(f'{phase}/ic_loss', result.ic, epoch)
+                writer.add_scalar(f'{phase}/loss', result.total_loss, epoch)
 
                 # Log detailed physics components if available
                 if phys_res_metrics is not None:
@@ -1118,20 +1103,4 @@ def eval_model(
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    # Compute averages per batch
-    denom = max(1, totals["n_batches"])
-    return (totals["loss"] / denom,
-            totals["mse"] / denom,
-            totals["mae"] / denom,
-            totals["rmse"] / denom,
-            totals["rel_error"] / denom,
-            totals["phys"] / denom,
-            totals["ic"] / denom,
-            totals["bc"] / denom,
-            totals["last_phys_metrics"],
-            totals["adaptive_weight"] / denom,
-            totals["supervision_weight"] / denom,
-            totals["bc_nodes"] / denom,
-            totals["bc_pct"] / denom,
-            totals["phys_contrib_pct"] / denom,
-            totals["sup_contrib_pct"] / denom)
+    return EpochResult.from_totals(totals)

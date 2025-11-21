@@ -38,7 +38,7 @@ class TrainingConfig:
 
     # Adaptive loss balancing for physics mode
     use_adaptive_physics_weighting: bool = True # Balance physics vs IC/BC dynamically
-    target_physics_ratio: float = 0.5           # Target ratio of physics loss to supervision loss
+    target_physics_ratio: float = 1             # Target ratio of physics loss to supervision loss
 
     # Reproducibility
     seed: int = 42
@@ -144,6 +144,94 @@ class TrainingMetrics:
         if self.physics_details is not None:
             base_str += f" | {self.physics_details}"
         return base_str
+
+
+@dataclass
+class LossConfig:
+    """Configuration for loss computation."""
+    loss_type: LossType = LossType.PHYSICS_WITH_IC_BC
+    lambda_data: float = 1.0
+    lambda_ic: float = 1.0
+    lambda_bc: float = 1.0
+    use_adaptive_physics_weighting: bool = True
+    target_physics_ratio: float = 0.5
+
+    @classmethod
+    def from_training_config(cls, config: 'TrainingConfig') -> 'LossConfig':
+        """Create LossConfig from TrainingConfig."""
+        return cls(
+            loss_type=config.loss_type,
+            lambda_data=config.lambda_data,
+            lambda_ic=config.lambda_ic,
+            lambda_bc=config.lambda_bc,
+            use_adaptive_physics_weighting=config.use_adaptive_physics_weighting,
+            target_physics_ratio=config.target_physics_ratio
+        )
+
+
+@dataclass
+class LossResult:
+    """Results from loss computation."""
+    total_loss: float
+    mse: float
+    mae: float
+    rmse: float
+    rel_error: float
+    phys: float
+    ic: float
+    bc: float
+    adaptive_weight: float = 0.0
+    bc_nodes: int = 0
+    bc_pct: float = 0.0
+    phys_contrib_pct: float = 0.0
+    sup_or_data_contrib_pct: float = 0.0
+    physics_metrics: Optional[PhysicsMetrics] = None
+
+
+@dataclass
+class EpochResult:
+    """Results from a training or evaluation epoch."""
+    loss: float
+    mse: float
+    mae: float
+    rmse: float
+    rel_error: float
+    phys: float
+    ic: float
+    bc: float
+    physics_metrics: Optional[PhysicsMetrics] = None
+    adaptive_weight: float = 0.0
+    supervision_weight: float = 0.0
+    bc_nodes: float = 0.0
+    bc_pct: float = 0.0
+    phys_contrib_pct: float = 0.0
+    sup_contrib_pct: float = 0.0
+    weighted_supervision: float = 0.0
+    weighted_physics: float = 0.0
+
+    @classmethod
+    def from_totals(cls, totals: dict) -> 'EpochResult':
+        """Create EpochResult from accumulated totals dictionary."""
+        n_batches = max(1, totals["n_batches"])
+        return cls(
+            loss=totals["loss"] / n_batches,
+            mse=totals["mse"] / n_batches,
+            mae=totals["mae"] / n_batches,
+            rmse=totals["rmse"] / n_batches,
+            rel_error=totals["rel_error"] / n_batches,
+            phys=totals["phys"] / n_batches,
+            ic=totals["ic"] / n_batches,
+            bc=totals["bc"] / n_batches,
+            physics_metrics=totals["last_phys_metrics"],
+            adaptive_weight=totals["adaptive_weight"] / n_batches,
+            supervision_weight=totals["supervision_weight"] / n_batches,
+            bc_nodes=totals["bc_nodes"] / n_batches,
+            bc_pct=totals["bc_pct"] / n_batches,
+            phys_contrib_pct=totals["phys_contrib_pct"] / n_batches,
+            sup_contrib_pct=totals["sup_contrib_pct"] / n_batches,
+            weighted_supervision=totals["weighted_supervision"] / n_batches,
+            weighted_physics=totals["weighted_physics"] / n_batches,
+        )
 
 
 @dataclass

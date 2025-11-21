@@ -10,6 +10,12 @@ from model.config import ModelConfig
 from .config import TrainingConfig, ModelSetup
 
 
+def to_float(x):
+    if torch.is_tensor(x):
+        return x.item()
+    return float(x)
+
+
 def validate_split_ratios(train_ratio: float, val_ratio: float) -> None:
     """Validate that dataset split ratios are valid.
 
@@ -122,6 +128,8 @@ def save_checkpoint(
     epoch: int,
     val_loss: float,
     val_mse: float,
+    val_phys: float,
+    val_rel_error: float,
     filepath: str
 ) -> None:
     """Save model checkpoint with all necessary state.
@@ -146,6 +154,8 @@ def save_checkpoint(
         'scheduler': scheduler.state_dict(),
         'val_loss': val_loss,
         'val_mse': val_mse,
+        'val_phys': val_phys,
+        'val_rel_error': val_rel_error,
     }, filepath)
 
 
@@ -172,7 +182,7 @@ def load_best_model(
 
         print(f"Loaded best model from epoch {best_checkpoint['epoch']} "
               f"with validation loss {best_checkpoint['val_loss']:.4e} "
-              f"(MSE: {best_checkpoint['val_mse']:.4e})")
+              f"(MSE: {best_checkpoint['val_mse']:.4e} Physics: {best_checkpoint['val_phys']:.4e} RelErr: {best_checkpoint['val_rel_error']:.4e})")
         return True
 
     except Exception as e:

@@ -31,8 +31,8 @@ def parse_arguments() -> TrainingConfig:
                        help='Maximum number of epochs to train')
     parser.add_argument('--seed', type=int, default=42,
                        help='Random seed for reproducibility')
-    parser.add_argument('--lambda-phys', type=float, default=1.0,
-                        help='Weight for physics loss term (only used with "combined" or "physics" loss)')
+    parser.add_argument('--lambda-data', type=float, default=1.0,
+                        help='Weight for data MSE loss term (only used with "combined" loss)')
     parser.add_argument('--lambda-ic', type=float, default=1.0,
                         help='Weight for initial condition loss term (only used with physics loss)')
     parser.add_argument('--lambda-bc', type=float, default=1.0,
@@ -56,7 +56,7 @@ def parse_arguments() -> TrainingConfig:
         patience=args.patience,
         epochs=args.epochs,
         seed=args.seed,
-        lambda_phys=args.lambda_phys,
+        lambda_data=args.lambda_data,
         lambda_ic=args.lambda_ic,
         lambda_bc=args.lambda_bc,
         loss_type=LossType(args.loss_type),

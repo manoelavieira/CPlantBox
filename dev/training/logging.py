@@ -112,10 +112,16 @@ def log_epoch_metrics(
     writer.add_scalar('loss/train_mse', train_metrics.mse, epoch)
     writer.add_scalar('loss/train_physics', train_metrics.physics, epoch)
     writer.add_scalar('loss/train_ic', train_metrics.ic_loss, epoch)
+    writer.add_scalar('loss/train_bc', train_metrics.bc_loss, epoch)
 
     writer.add_scalar('metrics/train_mae', train_metrics.mae, epoch)
     writer.add_scalar('metrics/train_rmse', train_metrics.rmse, epoch)
     writer.add_scalar('metrics/train_rel_error', train_metrics.rel_error, epoch)
+
+    # Log boundary condition metrics
+    if train_metrics.bc_nodes > 0:
+        writer.add_scalar('metrics/train_bc_nodes', train_metrics.bc_nodes, epoch)
+        writer.add_scalar('metrics/train_bc_pct', train_metrics.bc_pct, epoch)
 
     writer.add_scalar('metrics/val_total', val_metrics.loss, epoch)
     writer.add_scalar('metrics/val_mse', val_metrics.mse, epoch)
@@ -124,6 +130,12 @@ def log_epoch_metrics(
     writer.add_scalar('metrics/val_rel_error', val_metrics.rel_error, epoch)
     writer.add_scalar('metrics/val_physics', val_metrics.physics, epoch)
     writer.add_scalar('metrics/val_ic', val_metrics.ic_loss, epoch)
+    writer.add_scalar('metrics/val_bc', val_metrics.bc_loss, epoch)
+
+    # Log validation boundary condition metrics
+    if val_metrics.bc_nodes > 0:
+        writer.add_scalar('metrics/val_bc_nodes', val_metrics.bc_nodes, epoch)
+        writer.add_scalar('metrics/val_bc_pct', val_metrics.bc_pct, epoch)
 
     writer.add_scalar('learning_rate', current_lr, epoch)
 
@@ -198,7 +210,10 @@ def log_batch_metrics(
     rmse: torch.Tensor,
     rel_error: torch.Tensor,
     physics: torch.Tensor,
-    ic_loss: torch.Tensor = None
+    ic_loss: torch.Tensor = None,
+    bc_loss: torch.Tensor = None,
+    bc_nodes: int = 0,
+    bc_pct: float = 0.0
 ) -> None:
     """Log batch-level metrics to TensorBoard."""
     step = epoch * loader_len + batch_idx
@@ -210,6 +225,11 @@ def log_batch_metrics(
     writer.add_scalar('training/batch_physics', float(physics), step)
     if ic_loss is not None:
         writer.add_scalar('training/batch_ic_loss', float(ic_loss), step)
+    if bc_loss is not None:
+        writer.add_scalar('training/batch_bc_loss', float(bc_loss), step)
+    if bc_nodes > 0:
+        writer.add_scalar('training/batch_bc_nodes', bc_nodes, step)
+        writer.add_scalar('training/batch_bc_pct', bc_pct, step)
 
 
 def log_evaluation_histograms(
@@ -237,7 +257,7 @@ def log_hyperparameters(writer: SummaryWriter, config: TrainingConfig, model_cfg
         'seed': config.seed,
         'train_ratio': config.train_ratio,
         'val_ratio': config.val_ratio,
-        'lambda_phys': config.lambda_phys,
+        'lambda_data': config.lambda_data,
         'loss_type': config.loss_type.value,
 
         # Model architecture

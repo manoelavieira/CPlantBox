@@ -29,12 +29,12 @@ class TrainingConfig:
     weight_decay: float = 1e-5
     epochs: int = 100
     patience: int = 10
-    lambda_phys: float = 1.0
+    lambda_data: float = 1.0
 
     # Loss configuration
     loss_type: LossType = LossType.PHYSICS_WITH_IC_BC
-    lambda_ic: float = 10.0  # Weight for initial condition term (increased for better supervision)
-    lambda_bc: float = 10.0  # Weight for boundary condition term (increased for better supervision)
+    lambda_ic: float = 1.0
+    lambda_bc: float = 1.0
 
     # Adaptive loss balancing for physics mode
     use_adaptive_physics_weighting: bool = True # Balance physics vs IC/BC dynamically
@@ -129,6 +129,8 @@ class TrainingMetrics:
     physics: float
     ic_loss: float = 0.0  # Initial condition loss
     bc_loss: float = 0.0  # Boundary condition loss
+    bc_nodes: float = 0.0  # Average number of boundary nodes
+    bc_pct: float = 0.0  # Average percentage of boundary nodes
     physics_details: Optional['PhysicsMetrics'] = None
 
     def __str__(self) -> str:
@@ -137,6 +139,8 @@ class TrainingMetrics:
             base_str += f" IC={self.ic_loss:.4f}"
         if self.bc_loss > 0:
             base_str += f" BC={self.bc_loss:.4f}"
+        if self.bc_nodes > 0:
+            base_str += f" BC_nodes={self.bc_nodes:.1f}({self.bc_pct:.1f}%)"
         if self.physics_details is not None:
             base_str += f" | {self.physics_details}"
         return base_str

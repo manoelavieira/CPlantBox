@@ -154,7 +154,7 @@ class LossConfig:
     lambda_ic: float = 1.0
     lambda_bc: float = 1.0
     use_adaptive_physics_weighting: bool = True
-    target_physics_ratio: float = 0.5
+    target_physics_ratio: float = 1.0
 
     @classmethod
     def from_training_config(cls, config: 'TrainingConfig') -> 'LossConfig':

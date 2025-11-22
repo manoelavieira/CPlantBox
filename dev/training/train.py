@@ -19,16 +19,12 @@ import training.utils as utils
 import training.logging as logging
 
 EPSILON = 1e-12
-PHYSICS_ADAPTIVE_WEIGHT_MIN = 0.001
-PHYSICS_ADAPTIVE_WEIGHT_MAX = 1.0
 
 
 def _compute_adaptive_weight(
     reference_loss: torch.Tensor,
     physics_loss: torch.Tensor,
     target_ratio: float,
-    min_weight: float,
-    max_weight: float
 ) -> torch.Tensor:
     """Compute adaptive weight to balance physics loss with reference loss.
 
@@ -36,14 +32,12 @@ def _compute_adaptive_weight(
         reference_loss: Reference loss to balance against (supervision or data loss)
         physics_loss: Physics residual loss
         target_ratio: Target ratio of physics to reference loss
-        min_weight: Minimum allowed weight
-        max_weight: Maximum allowed weight
 
     Returns:
-        Adaptive weight (clamped to [min_weight, max_weight])
+        Adaptive weight
     """
     adaptive_weight = (reference_loss / physics_loss) * target_ratio
-    return torch.clamp(adaptive_weight, min=min_weight, max=max_weight)
+    return adaptive_weight
 
 
 def _compute_loss_percentages(
@@ -339,7 +333,7 @@ def compute_loss(loss_mse: torch.Tensor, loss_phys: torch.Tensor, loss_type: Los
         # Compute adaptive weight and effective physics loss
         if use_adaptive_weighting:
             adaptive_weight = _compute_adaptive_weight(
-                supervision_loss, loss_phys, target_physics_ratio, min_weight=0.01, max_weight=10.0
+                supervision_loss, loss_phys, target_physics_ratio
             )
         else:
             adaptive_weight = 1.0
@@ -368,9 +362,7 @@ def compute_loss(loss_mse: torch.Tensor, loss_phys: torch.Tensor, loss_type: Los
         # Compute adaptive weight for physics term
         if use_adaptive_weighting:
             adaptive_weight = _compute_adaptive_weight(
-                weighted_data_loss, loss_phys, target_physics_ratio,
-                min_weight=PHYSICS_ADAPTIVE_WEIGHT_MIN,
-                max_weight=PHYSICS_ADAPTIVE_WEIGHT_MAX
+                weighted_data_loss, loss_phys, target_physics_ratio
             )
         else:
             adaptive_weight = 1.0

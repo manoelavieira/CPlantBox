@@ -235,21 +235,11 @@ def load_graph_data(h5_file: h5py.File, timestep: int, initial_node_count: int =
                         for t, c in zip(unique_types, counts)}
             print(f"GNN organ type distribution: {type_dist}")
 
-    # Load target values
-    S_ST_raw = C_ST = h5_file[f'{step_key}/nodes/Q_ST'][:]
-
-    # CRITICAL: Normalize S_ST to prevent gradient vanishing
-    # S_ST is ~1e-5 which is 10,000x smaller than C_ST ~0.2
-    # This causes weak gradients during backpropagation
-    # Solution: Normalize by max value to get range [0, 1]
-    S_ST_max = np.abs(S_ST_raw).max()
-    if S_ST_max < 1e-15:
-        S_ST_max = 1.0
-
-    target_values = S_ST_raw / S_ST_max
-    target_scale = S_ST_max  # store for denormalization during physics
-
-    y = torch.tensor(target_values, dtype=torch.float64).view(-1, 1)
+    # Load target values (raw sucrose content)
+    # NOTE: Standardization (mean/std normalization) is now handled by the Standardizer
+    # in training/setup.py
+    S_ST_raw = h5_file[f'{step_key}/nodes/Q_ST'][:]
+    y = torch.tensor(S_ST_raw, dtype=torch.float64).view(-1, 1)
 
     # Use physical time (plant_age) as time feature instead of timestep index
     # This is CRITICAL for physics-informed learning: dC/dt must be computed with respect to
@@ -317,7 +307,7 @@ def load_graph_data(h5_file: h5py.File, timestep: int, initial_node_count: int =
 
     # Create PyG Data object with explicit num_nodes
     data = Data(
-        node_feat=node_feat,    # Node features [N, 3] - [psi, vol_ST, len_leaf]
+        node_feat=node_feat,    # Node features [N, 7] - [psi, vol_ST, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp]
         edge_index=edge_index,  # Graph connectivity [2, E]
         edge_feat=edge_feat,    # Edge features [E, 1]
         edge_org=edge_org,      # Edge organ types [E]
@@ -333,8 +323,7 @@ def load_graph_data(h5_file: h5py.File, timestep: int, initial_node_count: int =
         node_fields_names=list(node_fields_names),  # list[str] (not used in math; for reference)
         node_pos=node_pos,                          # Node positions [N, 3] (optional; for visualization)
         is_initial_node=is_initial_node,            # Boolean mask indicating nodes present at t=0 [N]
-        is_boundary_node=detect_boundary_nodes(edge_index, num_nodes),  # Boolean mask for boundary nodes (degree=1) [N]
-        target_scale=torch.tensor(target_scale, dtype=torch.float64)    # Normalization scale for targets
+        is_boundary_node=detect_boundary_nodes(edge_index, num_nodes)  # Boolean mask for boundary nodes (degree=1) [N]
     )
 
     return data

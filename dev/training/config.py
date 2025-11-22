@@ -239,7 +239,19 @@ class ModelSetup:
     """Configuration for model setup."""
     device: torch.device
     model: torch.nn.Module
+    feature_scaler: Optional[object] = None
+    target_scaler: Optional[object] = None
+    time_scaler: Optional[object] = None
+    edge_scaler: Optional[object] = None
 
     def to_device(self) -> None:
-        """Move model to the configured device."""
+        """Move model and scalers to the configured device."""
         self.model.to(self.device)
+        if self.feature_scaler is not None:
+            self.feature_scaler.to(self.device)
+        if self.target_scaler is not None:
+            self.target_scaler.to(self.device)
+        if self.time_scaler is not None:
+            self.time_scaler.to(self.device)
+        if self.edge_scaler is not None:
+            self.edge_scaler.to(self.device)

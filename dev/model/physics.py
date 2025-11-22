@@ -11,48 +11,16 @@ from . import config
 DEBUG = True  # Debug flag: set to True to enable detailed physics loss debugging
 debug_path = "results/debug_physics_logs.txt"
 
-def denormalize_to_concentration(
-    y_pred: torch.Tensor,
-    vol_ST: torch.Tensor,
-    data: Data,
-    device: torch.device
+
+def compute_axial_flux(
+    C_ST: torch.Tensor,
+    node_feat_original: torch.Tensor,
+    edge_feat_original: torch.Tensor,
+    edge_index: torch.Tensor,
+    batch_vec: torch.Tensor,
+    device: torch.device,
+    dtype: torch.dtype
 ) -> torch.Tensor:
-    """Convert normalized predictions to concentrations.
-
-    Handles denormalization and conversion from sucrose content to concentration,
-    accounting for batched graphs where target_scale may vary per graph.
-
-    Args:
-        y_pred: Predicted sucrose content [N, 1] (normalized)
-        vol_ST: Sieve-tube volume per node [N]
-        data: Graph data containing target_scale and batch info
-        device: Target device for computations
-
-    Returns:
-        torch.Tensor: Sucrose concentration C_ST per node [N] (mol/cm³)
-    """
-    # Get target scale for denormalization
-    target_scale = getattr(
-        data, 'target_scale',
-        torch.tensor(1.0, device=device, dtype=y_pred.dtype)
-    ).to(device)
-
-    # Handle batched case: target_scale is [B] but we need [N]
-    batch_vec = getattr(data, "batch", None)
-    if batch_vec is not None and target_scale.numel() > 1:
-        target_scale_per_node = target_scale[batch_vec]
-    else:
-        target_scale_per_node = target_scale
-
-    # Denormalize and convert to concentration
-    S_ST_normalized = y_pred.squeeze(-1)
-    S_ST = S_ST_normalized * target_scale_per_node
-    C_ST = S_ST / vol_ST
-
-    return C_ST
-
-
-def compute_axial_flux(y_pred: torch.Tensor, data: Data, device: torch.device) -> torch.Tensor:
     """Compute axial sucrose flux J_ax along edges.
 
     This implementation follows the C++ PiafMunch algorithm (external/PiafMunch/solve.cpp):
@@ -62,42 +30,39 @@ def compute_axial_flux(y_pred: torch.Tensor, data: Data, device: torch.device) -
     4. Compute sugar flux JS_ST = JW_ST * C_upstream
 
     Args:
-        y_pred: Predicted sucrose content [N, 1]
-        data: Graph data containing topology and features
+        C_ST: Sucrose concentration per node [N] (already denormalized)
+        node_feat_original: Node features in original space [N, D]
+        edge_feat_original: Edge features in original space [E, D]
+        edge_index: Edge connectivity [2, E]
+        batch_vec: Batch assignment vector [N] (None for single graph)
         device: Target device for computations
+        dtype: Data type for computations
 
     Returns:
         torch.Tensor: Axial flux per edge [E]
     """
-    # Get edge topology and features
-    edge_index = data.edge_index.to(device)  # [2, E]
-
     # Handle empty graph case
     if edge_index.size(1) == 0:
-        return torch.zeros(0, device=device, dtype=y_pred.dtype)
+        return torch.zeros(0, device=device, dtype=dtype)
 
     src, dst = edge_index[0], edge_index[1]
-    r_ST = data.edge_feat.to(device).squeeze(-1)  # [E, 1] -> [E]
+    r_ST = edge_feat_original.squeeze(-1)
 
-    # Node features already in original space
-    node_feat = data.node_feat.to(device)
-    psi = node_feat[:, 0]  # hydraulic potential
-    vol_ST = node_feat[:, 1]  # sieve-tube volume per node
-    Temp = node_feat[:, 6]  # temperature [°C]
+    # Extract node features (already in original space)
+    psi = node_feat_original[:, 0]      # hydraulic potential
+    Temp = node_feat_original[:, 6]     # temperature [°C]
 
-    # ---- Step 1: Get concentrations from predictions
-    # Content: predictions are S_ST (normalized), need to denormalize and divide by vol_ST
-    C_ST = denormalize_to_concentration(y_pred, vol_ST, data, device)
+    # ---- Step 1: Compute osmotic pressure from concentrations
+    # C_ST is already denormalized and converted to concentration
 
     # Osmotic pressure P_ST = C_ST * RT
     # In C++, TairK_phloem is global, but in batched case we need per-graph temperature
-    batch_vec = getattr(data, "batch", None)
     RT = utils.compute_RT_per_node(
         Temp=Temp,
         batch_vec=batch_vec,
         R=config.R,
         device=device,
-        dtype=y_pred.dtype,
+        dtype=dtype,
     )
     P_ST_osmotic = C_ST * RT
 
@@ -158,12 +123,18 @@ def compute_flux_divergence(J_ax: torch.Tensor, edge_index: torch.Tensor, N: int
     return dS_dt_from_flux
 
 
-def compute_phloem_loading(y_pred: torch.Tensor, data: Data, params: dict, node_fields: dict, device: torch.device) -> torch.Tensor:
+def compute_phloem_loading(
+    C_ST: torch.Tensor,
+    node_feat_original: torch.Tensor,
+    params: dict,
+    node_fields: dict,
+    device: torch.device
+) -> torch.Tensor:
     """Compute phloem loading rate F_in per node.
 
     Args:
-        y_pred: Predicted sucrose content [N, 1]
-        data: Graph data containing node features
+        C_ST: Sucrose concentration per node [N] (already denormalized)
+        node_feat_original: Node features in original space [N, D]
         params: Simulation and step parameters
         node_fields: Node field values
         device: Target device for computations
@@ -171,14 +142,11 @@ def compute_phloem_loading(y_pred: torch.Tensor, data: Data, params: dict, node_
     Returns:
         torch.Tensor: Phloem loading rate per node [N]
     """
-    node_feat = data.node_feat.to(device)
-    vol_ST = node_feat[:, 1]
-    len_leaf = node_feat[:, 2]
+    # Extract node features (already in original space)
+    len_leaf = node_feat_original[:, 2]
 
-    # Convert to concentration
-    CSTi = denormalize_to_concentration(y_pred, vol_ST, data, device)
-
-    CSTi_positive = torch.clamp(CSTi, min=0.0)
+    # C_ST is already denormalized and in concentration units
+    CSTi_positive = torch.clamp(C_ST, min=0.0)
 
     # Phloem loading with feedback inhibition
     F_in = (params["Vmaxloading"] * len_leaf) * node_fields["C_meso"] / \
@@ -188,12 +156,18 @@ def compute_phloem_loading(y_pred: torch.Tensor, data: Data, params: dict, node_
     return F_in
 
 
-def compute_sucrose_outflow(y_pred: torch.Tensor, data: Data, params: dict, node_fields: dict, device: torch.device) -> torch.Tensor:
+def compute_sucrose_outflow(
+    C_ST: torch.Tensor,
+    node_feat_original: torch.Tensor,
+    params: dict,
+    node_fields: dict,
+    device: torch.device
+) -> torch.Tensor:
     """Compute sucrose outflow F_out per node.
 
     Args:
-        y_pred: Predicted sucrose content [N, 1]
-        data: Graph data containing node features
+        C_ST: Sucrose concentration per node [N] (already denormalized)
+        node_feat_original: Node features in original space [N, D]
         params: Simulation and step parameters
         node_fields: Node field values
         device: Target device for computations
@@ -201,17 +175,14 @@ def compute_sucrose_outflow(y_pred: torch.Tensor, data: Data, params: dict, node
     Returns:
         torch.Tensor: Sucrose outflow rate per node [N]
     """
-    node_feat = data.node_feat.to(device)
-    vol_ST = node_feat[:, 1]
-    Q_Rmmax = node_feat[:, 3]
-    Q_Grmax = node_feat[:, 4]
-    Q_Exudmax = node_feat[:, 5]
-    Temp = node_feat[:, 6]
+    # Extract node features (already in original space)
+    Q_Rmmax = node_feat_original[:, 3]
+    Q_Grmax = node_feat_original[:, 4]
+    Q_Exudmax = node_feat_original[:, 5]
+    Temp = node_feat_original[:, 6]
 
-    # Convert to concentration
-    CSTi = denormalize_to_concentration(y_pred, vol_ST, data, device)
-
-    CSTi_positive = torch.clamp(CSTi, min=0.0)
+    # C_ST is already denormalized and in concentration units
+    CSTi_positive = torch.clamp(C_ST, min=0.0)
 
     # Apply CSTimin threshold for usage
     CSTi_effective = torch.clamp(CSTi_positive - params["CSTimin"], min=0.0)
@@ -305,45 +276,75 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
     batch_vec = getattr(data, "batch", None)
     N = y_pred.size(0)
 
-    # Get vol_ST for concentration-to-content conversion
-    node_feat = data.node_feat.to(device)
-    vol_ST = node_feat[:, 1]
+    # Inverse-transform node/edge features and targets
+    node_feat_standardized = data.node_feat.to(device)
+    node_feat_original = data.feature_scaler.inv_transform(node_feat_standardized)
 
-    # TEMPORARY: Use true values for testing coherence of physics calculations
+    edge_feat_standardized = data.edge_feat.to(device)
+    edge_feat_original = data.edge_scaler.inv_transform(edge_feat_standardized)
+
+    edge_index = data.edge_index.to(device)
+    vol_ST = node_feat_original[:, 1]
+
+    S_ST = data.target_scaler.inv_transform(y_pred).squeeze(-1)
+    C_ST = S_ST / vol_ST
+
+    # Use true values for testing coherence of physics calculations
     if DEBUG:
         y_true = data.y.clone().detach()
         y_true.requires_grad_(True)
+        C_ST_true = data.target_scaler.inv_transform(y_true).squeeze(-1)
 
     # Extract parameters and node fields
     params = utils.extract_parameters(data, device, batch_vec, N if batch_vec is None else None)
     node_fields = utils.extract_node_fields(data, device)
 
-    # Compute axial flux and its divergence
-    J_ax = compute_axial_flux(y_pred, data, device)
-    dS_dt_from_flux = compute_flux_divergence(J_ax, data.edge_index.to(device), N, device)
+    # Compute axial flux and its divergence (pass C_ST directly)
+    J_ax = compute_axial_flux(C_ST, node_feat_original, edge_feat_original, edge_index, batch_vec, device, y_pred.dtype)
+    dS_dt_from_flux = compute_flux_divergence(J_ax, edge_index, N, device)
 
-    # Compute phloem loading and outflow
-    F_in = compute_phloem_loading(y_pred, data, params, node_fields, device)
-    F_out = compute_sucrose_outflow(y_pred, data, params, node_fields, device)
+    # Compute phloem loading and outflow (pass C_ST directly)
+    F_in = compute_phloem_loading(C_ST, node_feat_original, params, node_fields, device)
+    F_out = compute_sucrose_outflow(C_ST, node_feat_original, params, node_fields, device)
 
     # Compute time derivative from model
     dy_dt = compute_time_derivative(y_pred, data)
 
-    # Compute physics-based derivative (always compute dC/dt from physics)
-    dS_dt_from_physics = dS_dt_from_flux + F_in - F_out
-    dC_dt_from_physics = dS_dt_from_physics / vol_ST
+    # Compute physics-based derivative in physical (original) space
+    dS_dt_from_physics_original = dS_dt_from_flux + F_in - F_out
 
-    # Convert model's dy_dt to dC/dt and compute residual
-    # Content mode: compare dS/dt directly
-    dy_dt_from_physics = dS_dt_from_physics
-    dC_dt = dy_dt / vol_ST  # for logging only
+    # CRITICAL FIX: Work entirely in standardized space to avoid scale mismatch
+    #
+    # The issue: Converting dy_dt from standardized to physical space using (σ_S / σ_t)
+    # creates a huge scale mismatch because:
+    #   - σ_S ≈ 2.3e-5 mol (targets are very small)
+    #   - σ_t ≈ 0.239 days (time has small variation)
+    #   - Conversion factor ≈ 9.7e-5 (extremely small!)
+    #   - This makes dy_dt_physical ~6 orders of magnitude smaller than physics terms
+    #
+    # The solution: Instead of converting dy_dt to physical space, convert physics terms
+    # to standardized space. This keeps all quantities in the same scale.
+    #
+    # Standardize the physics-based derivative:
+    #   dS_std/dt_std = (dS_phys/dt_phys) × (σ_t / σ_S)
+    #
+    # This is the inverse of the previous conversion, and now both sides are O(1)
+
+    sigma_target = data.target_scaler.std.view(-1)[0].to(device)  # σ_S
+    sigma_time = data.time_scaler.std.view(-1)[0].to(device)      # σ_t
+
+    # Convert physics derivative to standardized space
+    dS_dt_from_physics = dS_dt_from_physics_original * (sigma_time / sigma_target)
+
+    # For logging: compute physical dy_dt (even though we don't use it for loss)
+    dy_dt_physical = dy_dt * (sigma_target / sigma_time)
 
     if DEBUG:
         with open(debug_path, "a") as f:
-            J_ax_true = compute_axial_flux(y_true, data, device)
-            dS_dt_from_flux_true = compute_flux_divergence(J_ax_true, data.edge_index.to(device), N, device)
-            F_in_true = compute_phloem_loading(y_true, data, params, node_fields, device)
-            F_out_true = compute_sucrose_outflow(y_true, data, params, node_fields, device)
+            J_ax_true = compute_axial_flux(C_ST_true, node_feat_original, edge_feat_original, edge_index, batch_vec, device, y_pred.dtype)
+            dS_dt_from_flux_true = compute_flux_divergence(J_ax_true, edge_index, N, device)
+            F_in_true = compute_phloem_loading(C_ST_true, node_feat_original, params, node_fields, device)
+            F_out_true = compute_sucrose_outflow(C_ST_true, node_feat_original, params, node_fields, device)
             dS_dt_from_physics_true = dS_dt_from_flux_true + F_in_true - F_out_true
 
             msg = (
@@ -355,25 +356,18 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
             )
             f.write(msg)
 
-            # Get target_scale for denormalization
-            target_scale_debug = getattr(data, 'target_scale', torch.tensor(1.0, device=device, dtype=y_pred.dtype)).to(device)
-            if batch_vec is not None and target_scale_debug.numel() > 1:
-                target_scale_per_node_debug = target_scale_debug[batch_vec]
-            else:
-                target_scale_per_node_debug = target_scale_debug
-
             # Show predictions in their native units (content)
-            # Show both normalized [0,1] and physical values
+            # Show both standardized and physical values
             msg = (
-                f"--- NORMALIZED VALUES [0,1] ---\n"
-                f"y_true (normalized):\n{y_true[batch_vec == 0].squeeze(-1).detach().cpu().numpy()}\n"
-                f"y_pred (normalized):\n{y_pred[batch_vec == 0].squeeze(-1).detach().cpu().numpy()}\n"
+                f"--- STANDARDIZED VALUES ---\n"
+                f"y_true (standardized):\n{y_true[batch_vec == 0].squeeze(-1).detach().cpu().numpy()}\n"
+                f"y_pred (standardized):\n{y_pred[batch_vec == 0].squeeze(-1).detach().cpu().numpy()}\n"
             )
             f.write(msg)
 
-            # Compute physical values
-            S_ST_true_physical = (y_true.squeeze(-1) * target_scale_per_node_debug)[batch_vec == 0]
-            S_ST_pred_physical = (y_pred.squeeze(-1) * target_scale_per_node_debug)[batch_vec == 0]
+            # Compute physical values using target_scaler
+            S_ST_true_physical = data.target_scaler.inv_transform(y_true).squeeze(-1)[batch_vec == 0]
+            S_ST_pred_physical = data.target_scaler.inv_transform(y_pred).squeeze(-1)[batch_vec == 0]
 
             msg = (
                 f"--- PHYSICAL VALUES ---\n"
@@ -391,11 +385,15 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
                 f"F_out_pred (mol/day):\n{F_out[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
 
                 f"\ndS_dt_from_physics_true (mol/day):\n{dS_dt_from_physics_true[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
-                f"dS_dt_from_physics_pred (mol/day):\n{dS_dt_from_physics[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
+                f"dS_dt_from_physics_pred (mol/day):\n{dS_dt_from_physics_original[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
 
-                # Show model's time derivative in the appropriate units (only for predictions)
+                # Show model's time derivative in both standardized and physical space
                 # Note: Cannot compute dy_dt for y_true since it's not connected to time_per_node in computation graph
-                f"\ndS_dt_pred (mol/day) [from model]:\n{dy_dt[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
+                f"\ndS_dt_pred (standardized) [from model]:\n{dy_dt[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
+                f"dS_dt_from_physics (standardized) [converted from physical]:\n{dS_dt_from_physics[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
+                f"\ndS_dt_pred (mol/day) [from model, physical space]:\n{dy_dt_physical[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
+                f"Conversion factor (sigma_S/sigma_t): {(sigma_target / sigma_time).item():.6e}\n"
+                f"Inverse conversion factor (sigma_t/sigma_S): {(sigma_time / sigma_target).item():.6e}\n"
 
                 f"{'='*60}\n"
             )
@@ -409,7 +407,10 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
     # Without this approach, the residual's behavior would be:
     # With small values, gradients vanish -> physics loss is ignored
     # With huge values (when model outputs noisy dS/dt) -> physics dominates and collapses the model
-    diff = dy_dt.squeeze() - dy_dt_from_physics
+    #
+    # CRITICAL FIX: Now comparing dy_dt with dS_dt_from_physics (both in standardized space)
+    # This avoids the huge scale mismatch from the (σ_S / σ_t) conversion factor
+    diff = dy_dt.squeeze() - dS_dt_from_physics
 
     with torch.no_grad():
         scale = diff.abs().quantile(0.9).clamp(min=0.1, max=10000.0)

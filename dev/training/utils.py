@@ -8,6 +8,7 @@ from typing import Tuple
 from data.dataset_loader import load_phloem_data
 from model.config import ModelConfig
 from .config import TrainingConfig, ModelSetup
+from model.utils import Standardizer
 
 
 def to_float(x):
@@ -135,7 +136,7 @@ def save_checkpoint(
     """Save model checkpoint with all necessary state.
 
     Args:
-        model_setup: Model setup containing model
+        model_setup: Model setup containing model and scalers
         model_cfg: Model configuration
         optimizer: Optimizer state
         scheduler: Scheduler state
@@ -144,6 +145,28 @@ def save_checkpoint(
         val_mse: Validation MSE
         filepath: Path to save checkpoint
     """
+    # Prepare scaler states
+    feature_scaler_state = {
+        'mean': model_setup.feature_scaler.mean,
+        'std': model_setup.feature_scaler.std,
+        'device': str(model_setup.feature_scaler.device)
+    }
+    target_scaler_state = {
+        'mean': model_setup.target_scaler.mean,
+        'std': model_setup.target_scaler.std,
+        'device': str(model_setup.target_scaler.device)
+    }
+    time_scaler_state = {
+        'mean': model_setup.time_scaler.mean,
+        'std': model_setup.time_scaler.std,
+        'device': str(model_setup.time_scaler.device)
+    }
+    edge_scaler_state = {
+        'mean': model_setup.edge_scaler.mean,
+        'std': model_setup.edge_scaler.std,
+        'device': str(model_setup.edge_scaler.device)
+    }
+
     # Save checkpoint
     torch.save({
         'epoch': epoch,
@@ -156,6 +179,10 @@ def save_checkpoint(
         'val_mse': val_mse,
         'val_phys': val_phys,
         'val_rel_error': val_rel_error,
+        'feature_scaler': feature_scaler_state,
+        'target_scaler': target_scaler_state,
+        'time_scaler': time_scaler_state,
+        'edge_scaler': edge_scaler_state,
     }, filepath)
 
 
@@ -180,6 +207,33 @@ def load_best_model(
         # Load model state
         model_setup.model.load_state_dict(best_checkpoint['state_dict'])
 
+        # Reconstruct scalers from saved state
+        model_setup.feature_scaler = Standardizer()
+        model_setup.feature_scaler.mean = best_checkpoint['feature_scaler']['mean']
+        model_setup.feature_scaler.std = best_checkpoint['feature_scaler']['std']
+        model_setup.feature_scaler.device = device
+
+        model_setup.target_scaler = Standardizer()
+        model_setup.target_scaler.mean = best_checkpoint['target_scaler']['mean']
+        model_setup.target_scaler.std = best_checkpoint['target_scaler']['std']
+        model_setup.target_scaler.device = device
+
+        model_setup.time_scaler = Standardizer()
+        model_setup.time_scaler.mean = best_checkpoint['time_scaler']['mean']
+        model_setup.time_scaler.std = best_checkpoint['time_scaler']['std']
+        model_setup.time_scaler.device = device
+
+        model_setup.edge_scaler = Standardizer()
+        model_setup.edge_scaler.mean = best_checkpoint['edge_scaler']['mean']
+        model_setup.edge_scaler.std = best_checkpoint['edge_scaler']['std']
+        model_setup.edge_scaler.device = device
+
+        # Assign scalers to model for backward compatibility
+        model_setup.model.feature_scaler = model_setup.feature_scaler
+        model_setup.model.target_scaler = model_setup.target_scaler
+        model_setup.model.time_scaler = model_setup.time_scaler
+        model_setup.model.edge_scaler = model_setup.edge_scaler
+
         print(f"Loaded best model from epoch {best_checkpoint['epoch']} "
               f"with validation loss {best_checkpoint['val_loss']:.4e} "
               f"(MSE: {best_checkpoint['val_mse']:.4e} Physics: {best_checkpoint['val_phys']:.4e} RelErr: {best_checkpoint['val_rel_error']:.4e})")
@@ -195,18 +249,22 @@ def prepare_model_inputs(
     data,
     model: nn.Module,
     is_training: bool = False
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Prepare data for forward pass.
+):
+    """Prepare data for forward pass by handling standardization of features, targets, and time.
 
-    This function prepares time tensors for the model without any standardization.
+    This function standardizes:
+    - Node features using feature_scaler
+    - Edge features using edge_scaler
+    - Graph-level time using time_scaler
+    - Targets using target_scaler
 
     Args:
         data: Input batch data
-        model: The neural network model
+        model: The neural network model with fitted scalers
         is_training: Whether this is for training
 
     Returns:
-        Tuple of (original_features, data_ready_for_model)
+        Modified data object ready for model forward pass
     """
     # Move to model device
     device = next(model.parameters()).device
@@ -217,15 +275,46 @@ def prepare_model_inputs(
         raise ValueError("Each Data must carry a graph-level `time` tensor.")
     if data.time.dim() != 1:
         raise ValueError(f"`data.time` must be 1D [num_graphs]; got {tuple(data.time.shape)}.")
+    if not hasattr(model, "time_scaler") or model.time_scaler is None:
+        raise RuntimeError("Missing model.time_scaler (fit during setup).")
 
-    data.time = data.time.detach().to(device).requires_grad_(is_training)
+    # Standardize graph-level time and broadcast to nodes
+    time_standardized_value = model.time_scaler.transform(data.time.view(-1, 1)).view(-1)
 
     if hasattr(data, "batch") and data.batch is not None:
-        time_per_node = data.time[data.batch].unsqueeze(-1)
+        time_standardized = time_standardized_value[data.batch]
     else:
-        time_per_node = data.time.repeat(data.num_nodes).unsqueeze(-1)
+        time_standardized = time_standardized_value.expand(data.num_nodes)
 
-    # Attach and (optionally) detach in eval
-    data.time_per_node = time_per_node if is_training else time_per_node.detach()
+    # time_standardized: the standardized, differentiable input used by the GNN
+    # time_sigma: the conversion factor σ_t used to scale d/dτ -> d/dt
+    # time_standardized and time_sigma are tensors of shape [N, 1]
+    std_deviation_value = model.time_scaler.std.view(-1)[0].to(time_standardized.device)
+    time_standardized = time_standardized.view(-1, 1).to(next(model.parameters()).device)
+    time_sigma = std_deviation_value.expand_as(time_standardized).clone()
+
+    # Physics autograd needs time to require grad during training
+    if is_training and not time_standardized.requires_grad:
+        time_standardized.requires_grad_(True)
+
+    # Attach time information to data
+    if is_training:
+        data.time_per_node = time_standardized
+        data.time_sigma = time_sigma
+    else:
+        data.time_per_node = time_standardized.detach()
+        data.time_sigma = time_sigma.detach()
+
+    # Standardize node/edge features and targets (will be used by model)
+    data.node_feat = model.feature_scaler.transform(data.node_feat)
+    data.edge_feat = model.edge_scaler.transform(data.edge_feat)
+    data.y = model.target_scaler.transform(data.y)
+
+    # Attach scalers to data for physics residual computation
+    # This allows physics functions to denormalize predictions back to original space
+    data.target_scaler = model.target_scaler
+    data.feature_scaler = model.feature_scaler
+    data.edge_scaler = model.edge_scaler
+    data.time_scaler = model.time_scaler
 
     return data

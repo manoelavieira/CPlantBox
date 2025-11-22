@@ -258,7 +258,8 @@ class PhloemNNConv(nn.Module):
         # Final MLP heads to produce scalar output per node
         out = self.head(node_feat)
 
-        # Outputs (sucrose content) are normalized [0,1]
-        out = torch.sigmoid(out)
+        # No activation function: model outputs standardized values (mean=0, std=1)
+        # The targets are now standardized, so predictions should be too
+        # Denormalization happens during metric computation and physics residual
 
         return out

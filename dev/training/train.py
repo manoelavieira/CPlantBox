@@ -430,8 +430,9 @@ def compute_loss_and_metrics(
     pred_flat = pred.squeeze(-1)
     y_flat = y.squeeze(-1)
 
-    # Denormalize for relative error calculation
-    pred_original, y_original = _denormalize_for_metrics(pred_flat, y_flat, data, batch_vec)
+    # Denormalize for relative error calculation using target_scaler from data
+    target_scaler = getattr(data, 'target_scaler', None)
+    pred_original, y_original = _denormalize_for_metrics(pred_flat, y_flat, target_scaler)
 
     # Compute error metrics
     loss_mse, mae, rmse, rel_error = _compute_error_metrics(
@@ -474,32 +475,23 @@ def compute_loss_and_metrics(
 def _denormalize_for_metrics(
     pred_flat: torch.Tensor,
     y_flat: torch.Tensor,
-    data,
-    batch_vec: torch.Tensor
+    target_scaler,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Denormalize predictions and targets for relative error calculation.
 
     Args:
-        pred_flat: Flattened predictions [N]
-        y_flat: Flattened targets [N]
-        data: Graph data containing target_scale
-        batch_vec: Batch assignment vector
+        pred_flat: Flattened predictions [N] (standardized)
+        y_flat: Flattened targets [N] (standardized)
+        target_scaler: Standardizer instance for inverse transformation
 
     Returns:
         Tuple of (pred_original, y_original) in original space
     """
-    if data is not None and hasattr(data, 'target_scale'):
-        target_scale = data.target_scale.to(pred_flat.device)
-
-        # Handle batched case
-        if batch_vec is not None and target_scale.numel() > 1:
-            target_scale_per_node = target_scale[batch_vec]
-        else:
-            target_scale_per_node = target_scale
-
-        # Denormalize to original space
-        pred_original = pred_flat * target_scale_per_node
-        y_original = y_flat * target_scale_per_node
+    if target_scaler is not None:
+        # Inverse-transform from standardized space to original space
+        # pred/y are [N], need to reshape to [N, 1] for scaler
+        pred_original = target_scaler.inv_transform(pred_flat.unsqueeze(-1)).squeeze(-1)
+        y_original = target_scaler.inv_transform(y_flat.unsqueeze(-1)).squeeze(-1)
     else:
         # No denormalization available
         pred_original = pred_flat

@@ -255,7 +255,7 @@ def compute_time_derivative(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
     try:
         dy_dt = torch.autograd.grad(
             y_pred.sum(),        # sum to get scalar for gradient computation
-            data.time_per_node,      # [N, 1] per-node time features
+            data.time_per_node,  # [N, 1] per-node time features
             create_graph=True,   # needed for second backward pass
             retain_graph=True,   # keep graph for subsequent loss computation
             allow_unused=False   # ERROR if time_per_node is not connected
@@ -431,9 +431,9 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
         # Node-level quantities: average per graph, then across graphs
         F_in_per_graph = scatter_mean(F_in.detach(), batch_vec, dim=0)
         F_out_per_graph = scatter_mean(F_out.detach(), batch_vec, dim=0)
-        dC_dt_per_graph = scatter_mean(dC_dt.detach().abs(), batch_vec, dim=0)
+        dS_dt_per_graph = scatter_mean(dy_dt.detach().abs(), batch_vec, dim=0)
         dS_dt_from_flux_per_graph = scatter_mean(dS_dt_from_flux.detach().abs(), batch_vec, dim=0)
-        dC_dt_from_physics_per_graph = scatter_mean(dC_dt_from_physics.detach(), batch_vec, dim=0)
+        dS_dt_from_physics_per_graph = scatter_mean(dS_dt_from_physics.detach().abs(), batch_vec, dim=0)
 
         # Edge-level quantities: need edge-to-graph mapping
         if J_ax.size(0) > 0:
@@ -448,9 +448,9 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
             'J_ax': J_ax_avg,
             'F_in': F_in_per_graph.mean(),
             'F_out': F_out_per_graph.mean(),
-            'dC_dt': dC_dt_per_graph.mean(),
+            'dS_dt': dS_dt_per_graph.mean(),
             'dS_dt_from_flux': dS_dt_from_flux_per_graph.mean(),
-            'dC_dt_from_physics': dC_dt_from_physics_per_graph.mean()
+            'dS_dt_from_physics': dS_dt_from_physics_per_graph.mean()
         }
     else:
         # Single graph case: simple mean across nodes/edges
@@ -458,9 +458,9 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
             'J_ax': J_ax.detach().abs().mean() if J_ax.size(0) > 0 else torch.tensor(0.0, device=device),
             'F_in': F_in.detach().mean(),
             'F_out': F_out.detach().mean(),
-            'dC_dt': dC_dt.detach().abs().mean(),
+            'dS_dt': dy_dt.detach().abs().mean(),
             'dS_dt_from_flux': dS_dt_from_flux.detach().abs().mean(),
-            'dC_dt_from_physics': dC_dt_from_physics.detach().mean()
+            'dS_dt_from_physics': dS_dt_from_physics.detach().abs().mean()
         }
 
     return loss, loss_dict

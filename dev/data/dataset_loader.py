@@ -244,18 +244,23 @@ def load_graph_data(h5_file: h5py.File, timestep: int, initial_node_count: int =
     # Use physical time (plant_age) as time feature instead of timestep index
     # This is CRITICAL for physics-informed learning: dC/dt must be computed with respect to
     # actual physical time, not arbitrary timestep indices
-    plant_age = h5_file[f'{step_key}'].attrs['plant_age']
-    time = torch.tensor(plant_age, dtype=torch.float64)
+    #
+    # UNIT CONVERSION: plant_age in HDF5 is in DAYS, but C++ simulation uses HOURS
+    # Convert to hours to match C++ units (all flux parameters are calibrated for hours)
+    plant_age_days = h5_file[f'{step_key}'].attrs['plant_age']
+    plant_age_hours = plant_age_days * 24.0  # days -> hours
+    time = torch.tensor(plant_age_hours, dtype=torch.float64)
 
     # Store the minimum time (time at first timestep) to identify initial graphs
     # This is needed because plant_age doesn't start at 0, so we can't use time==0
     # to identify the first timestep
     try:
-        min_time = h5_file['step_000'].attrs['plant_age']
+        min_time_days = h5_file['step_000'].attrs['plant_age']
+        min_time_hours = min_time_days * 24.0  # days -> hours
     except KeyError as e:
         print(f"[WARN] Could not find plant_age in step_000: {str(e)}")
         raise
-    min_time_tensor = torch.tensor(min_time, dtype=torch.float64)
+    min_time_tensor = torch.tensor(min_time_hours, dtype=torch.float64)
 
     # Load physics constants from parameters
     sim_params = h5_file['parameters/sieve_tube'].attrs

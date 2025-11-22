@@ -287,13 +287,40 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
     vol_ST = node_feat_original[:, 1]
 
     S_ST = data.target_scaler.inv_transform(y_pred).squeeze(-1)
+
+    # Units in HDF5:
+    # - S_ST (Q_ST in HDF5) is in MILLIMOLES (mmol)
+    # - vol_ST is in cm^3
+    # - Kinetic parameters are calibrated for concentrations in mmol/cm^3
+    # Therefore: NO conversion needed: use C_ST = S_ST / vol_ST directly
     C_ST = S_ST / vol_ST
 
     # Use true values for testing coherence of physics calculations
     if DEBUG:
         y_true = data.y.clone().detach()
         y_true.requires_grad_(True)
-        C_ST_true = data.target_scaler.inv_transform(y_true).squeeze(-1)
+        S_ST_true = data.target_scaler.inv_transform(y_true).squeeze(-1)
+        C_ST_true = S_ST_true / vol_ST
+
+        # DEBUG: Print actual concentration values to check units
+        with open(debug_path, "a") as f:
+            msg = (
+                f"\n{'='*60}\n"
+                f"DEBUG OUTPUT\n"
+                f"{'='*60}\n"
+                f"\nNumber of graphs in batch: {torch.bincount(batch_vec).size(0)}\n"
+                f"Number of nodes per graph: {torch.bincount(batch_vec).detach().cpu().numpy()}\n"
+            )
+            f.write(msg)
+
+            msg = (
+                f"\n--- CONCENTRATION VALUES (should be ~0.2-1.0 mol/L = 0.2-1.0 mmol/cm³) ---\n"
+                f"S_ST_true (mmol): {S_ST_true[:10].detach().cpu().numpy()}\n"
+                f"vol_ST (cm³): {vol_ST[:10].detach().cpu().numpy()}\n"
+                f"C_ST_true (mmol/cm³): {C_ST_true[:10].detach().cpu().numpy()}\n"
+                f"C_ST_pred (mmol/cm³): {C_ST[:10].detach().cpu().numpy()}\n"
+            )
+            f.write(msg)
 
     # Extract parameters and node fields
     params = utils.extract_parameters(data, device, batch_vec, N if batch_vec is None else None)
@@ -307,6 +334,11 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
     F_in = compute_phloem_loading(C_ST, node_feat_original, params, node_fields, device)
     F_out = compute_sucrose_outflow(C_ST, node_feat_original, params, node_fields, device)
 
+    # NO UNIT CONVERSION NEEDED:
+    # - Time is now in HOURS (converted from days in dataset_loader.py)
+    # - All flux parameters (Q_Rmmax, Q_Grmax, Q_Exudmax, conductivities) are in mmol/h
+    # - Therefore dS/dt is naturally in mmol/h, matching all flux terms
+    # - This matches the C++ simulation units exactly
     # Compute time derivative from model
     dy_dt = compute_time_derivative(y_pred, data)
 
@@ -343,23 +375,16 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
         with open(debug_path, "a") as f:
             J_ax_true = compute_axial_flux(C_ST_true, node_feat_original, edge_feat_original, edge_index, batch_vec, device, y_pred.dtype)
             dS_dt_from_flux_true = compute_flux_divergence(J_ax_true, edge_index, N, device)
+
             F_in_true = compute_phloem_loading(C_ST_true, node_feat_original, params, node_fields, device)
             F_out_true = compute_sucrose_outflow(C_ST_true, node_feat_original, params, node_fields, device)
-            dS_dt_from_physics_true = dS_dt_from_flux_true + F_in_true - F_out_true
 
-            msg = (
-                f"\n{'='*60}\n"
-                f"DEBUG OUTPUT\n"
-                f"{'='*60}\n"
-                f"\nNumber of graphs in batch: {torch.bincount(batch_vec).size(0)}\n"
-                f"Number of nodes per graph: {torch.bincount(batch_vec).detach().cpu().numpy()}\n"
-            )
-            f.write(msg)
+            dS_dt_from_physics_true = dS_dt_from_flux_true + F_in_true - F_out_true
 
             # Show predictions in their native units (content)
             # Show both standardized and physical values
             msg = (
-                f"--- STANDARDIZED VALUES ---\n"
+                f"\n--- STANDARDIZED VALUES ---\n"
                 f"y_true (standardized):\n{y_true[batch_vec == 0].squeeze(-1).detach().cpu().numpy()}\n"
                 f"y_pred (standardized):\n{y_pred[batch_vec == 0].squeeze(-1).detach().cpu().numpy()}\n"
             )
@@ -370,29 +395,32 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
             S_ST_pred_physical = data.target_scaler.inv_transform(y_pred).squeeze(-1)[batch_vec == 0]
 
             msg = (
-                f"--- PHYSICAL VALUES ---\n"
+                f"\n--- PHYSICAL VALUES ---\n"
                 f"S_ST_true (mol):\n{S_ST_true_physical.detach().cpu().numpy()}\n"
                 f"S_ST_pred (mol):\n{S_ST_pred_physical.detach().cpu().numpy()}\n"
 
-                f"\n--- PHYSICS TERMS (always in physical units) ---\n"
-                f"dS_dt_from_flux_true (mol/day):\n{dS_dt_from_flux_true[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
-                f"dS_dt_from_flux_pred (mol/day):\n{dS_dt_from_flux[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
+                # NOTE: All flux values are in mmol/h (C++ units)
+                # Time is now in HOURS (converted from days in dataset_loader.py)
+                # Therefore dS/dt is also in mmol/h, matching C++ simulation
+                f"\n--- FLUX VALUES (mmol/h, for direct comparison with C++ output) ---\n"
+                f"F_in_true (mmol/h):\n{F_in_true[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
+                f"F_in_pred (mmol/h):\n{F_in[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
 
-                f"\nF_in_true (mol/day):\n{F_in_true[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
-                f"F_in_pred (mol/day):\n{F_in[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
+                f"\nF_out_true (mmol/h):\n{F_out_true[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
+                f"F_out_pred (mmol/h):\n{F_out[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
 
-                f"\nF_out_true (mol/day):\n{F_out_true[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
-                f"F_out_pred (mol/day):\n{F_out[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
+                f"\ndS_dt_from_flux_true (mmol/h):\n{dS_dt_from_flux_true[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
+                f"dS_dt_from_flux_pred (mmol/h):\n{dS_dt_from_flux[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
 
-                f"\ndS_dt_from_physics_true (mol/day):\n{dS_dt_from_physics_true[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
-                f"dS_dt_from_physics_pred (mol/day):\n{dS_dt_from_physics_original[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
+                f"\ndS_dt_from_physics_true (mmol/h):\n{dS_dt_from_physics_true[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
+                f"dS_dt_from_physics_pred (mmol/h):\n{dS_dt_from_physics_original[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
 
                 # Show model's time derivative in both standardized and physical space
                 # Note: Cannot compute dy_dt for y_true since it's not connected to time_per_node in computation graph
                 f"\ndS_dt_pred (standardized) [from model]:\n{dy_dt[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
                 f"dS_dt_from_physics (standardized) [converted from physical]:\n{dS_dt_from_physics[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
-                f"\ndS_dt_pred (mol/day) [from model, physical space]:\n{dy_dt_physical[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
-                f"Conversion factor (sigma_S/sigma_t): {(sigma_target / sigma_time).item():.6e}\n"
+                # f"\ndS_dt_pred (mmol/h) [from model, physical space]:\n{dy_dt_physical[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
+                f"\nConversion factor (sigma_S/sigma_t): {(sigma_target / sigma_time).item():.6e}\n"
                 f"Inverse conversion factor (sigma_t/sigma_S): {(sigma_time / sigma_target).item():.6e}\n"
 
                 f"{'='*60}\n"

@@ -129,40 +129,31 @@ def compute_physics_residual_step(
     model: nn.Module,
     data,
     pred: Optional[torch.Tensor],
-    require_time_grad: bool,
 ) -> Tuple[torch.Tensor, Optional[PhysicsMetrics]]:
     """
-    Unified physics residual computation for train/eval without standardization.
+    Unified physics residual computation for train/eval.
 
-    - In training, use the already-built graph (pred computed under grad,
-      and data.time_per_node requires_grad=True from prepare_model_inputs).
-    - In eval, temporarily enable grad, rebuild a leaf for time_per_node, re-forward,
-      then compute and detach the scalar physics residual.
+    Since we no longer use autograd for time derivatives, the computation
+    is the same for both training and evaluation modes. The physics loss
+    is computed from the discrete flux law comparing predicted vs true values.
 
-    Returns (phys_res_scalar_detached, PhysicsMetrics|None).
+    Args:
+        model: The neural network model
+        data: Graph data containing features and targets
+        pred: Model predictions (if None, will run forward pass)
+
+    Returns:
+        Tuple of (phys_res_scalar, PhysicsMetrics|None)
     """
-    if require_time_grad:
-        # Training path: pred must already be computed under grad; time_per_node should require grad.
-        phys_res, phys_res_dict = physics_residual(pred, data)
-    else:
-        # Eval path: re-enable grad for a one-off forward, then detach result.
-        original_time = data.time_per_node
-        try:
-            with torch.enable_grad():
-                time_leaf = original_time.detach().clone().requires_grad_(True)
-                data.time_per_node = time_leaf
-                pred_eval = model(data)
-                phys_res, phys_res_dict = physics_residual(pred_eval, data)
-        finally:
-            # Restore original attribute to avoid side effects
-            data.time_per_node = original_time
+    # If predictions not provided, run forward pass
+    if pred is None:
+        pred = model(data)
 
-    # Reduce to scalar; detach ONLY in eval (no grad) path
+    # Compute physics residual (no autograd needed)
+    phys_res, phys_res_dict = physics_residual(pred, data)
+
+    # Reduce to scalar if needed
     phys_res_scalar = phys_res if phys_res.dim() == 0 else phys_res.mean()
-
-    # Detach only in eval path
-    if not require_time_grad:
-        phys_res_scalar = phys_res_scalar.detach()
 
     return phys_res_scalar, _to_physics_metrics(phys_res_dict)
 
@@ -643,8 +634,7 @@ def train_epoch(
             phys_res, phys_res_metrics = compute_physics_residual_step(
                 model=model,
                 data=data,
-                pred=pred,
-                require_time_grad=True
+                pred=pred
             )
 
         # Compute loss and metrics (no physics scaling needed)
@@ -1029,15 +1019,14 @@ def eval_model(
             # Forward pass with prepared data (no standardization)
             pred = run_forward(model, data)
 
-            # Compute physics residual (eval path re-enables grad internally)
+            # Compute physics residual
             if loss_config.loss_type == LossType.DATA_ONLY:
                 phys_res, phys_res_metrics = torch.tensor(0.0, device=pred.device), None
             else:
                 phys_res, phys_res_metrics = compute_physics_residual_step(
                     model=model,
                     data=data,
-                    pred=None,
-                    require_time_grad=False
+                    pred=None
                 )
 
             # Compute loss and metrics (no physics scaling needed)

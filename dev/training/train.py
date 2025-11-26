@@ -135,9 +135,8 @@ def _to_physics_metrics(physics_res) -> Optional[PhysicsMetrics]:
             J_ax=float(physics_res['J_ax']),
             F_in=float(physics_res['F_in']),
             F_out=float(physics_res['F_out']),
-            dS_dt=float(physics_res['dS_dt']),
             dS_dt_from_flux=float(physics_res['dS_dt_from_flux']),
-            dS_dt_from_physics=float(physics_res['dS_dt_from_physics'])
+            dS_dt_tot=float(physics_res['dS_dt_tot'])
         )
     else:
         return None
@@ -837,13 +836,13 @@ def train_model(
         # Console logging
         # Only print BC nodes info on first epoch (since it remains constant)
         if epoch == 1:
-            base_log = f"BC nodes = {tr_result.bc_nodes:.1f}({tr_result.bc_pct:.1f}%)\n"
+            base_log = f"BC nodes = {tr_result.bc_nodes:.1f}({tr_result.bc_pct:.1f}%)\n\n"
         else:
             base_log = ""
 
         base_log += (f"Epoch {epoch:03d} | "
                     f"train_tot={tr_result.loss:.3e} train_mse={tr_result.mse:.3e} "
-                    f"train_phys={tr_result.phys:.3e} train_relerr={tr_result.rel_error:.3e} ")
+                    f"train_phys={tr_result.phys:.3e} train_relerr={tr_result.rel_error:.3e}")
         # base_log += f" train_ic={tr_result.ic:.3e} train_bc={tr_result.bc:.3e}"
 
         # Add weighted component info if using adaptive weighting
@@ -855,7 +854,7 @@ def train_model(
                         f"phys_w={tr_result.weighted_physics:.3e}({tr_result.phys_contrib_pct:.1f}%)")
 
         base_log += (f" | val_tot={val_result.loss:.3e} val_mse={val_result.mse:.3e} "
-                    f"val_phys={val_result.phys:.3e} val_relerr={val_result.rel_error:.3e} ")
+                    f"val_phys={val_result.phys:.3e} val_relerr={val_result.rel_error:.3e}")
         # base_log += f" val_ic={val_result.ic:.3e} val_bc={val_result.bc:.3e}"
 
         # Add physics details to console output if available
@@ -973,7 +972,7 @@ def test_model(
     writer.add_text('final/results', final_summary)
 
     # Console output with adaptive weighting info
-    console_msg = (f"\nFinal test metrics!  Loss: {test_result.loss:.3e}, Physics Loss: {test_result.phys:.3e}, "
+    console_msg = (f"\nFinal test metrics!\nLoss: {test_result.loss:.3e}, Physics Loss: {test_result.phys:.3e}, "
                    f"IC Loss: {test_result.ic:.3e}, BC Loss: {test_result.bc:.3e} | "
                    f"MSE: {test_result.mse:.3e}, RMSE: {test_result.rmse:.3e}, "
                    f"MAE: {test_result.mae:.3e}, RelErr: {test_result.rel_error:.3e}")

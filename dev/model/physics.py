@@ -43,12 +43,221 @@ def set_physics_logging(enable: bool, log_path: str = None):
 
         # Clear existing log file
         with open(_PHYSICS_LOG_PATH, 'w') as f:
-            f.write(f"{'='*60}\n")
+            f.write(f"{'='*60}")
             f.write(f"Physics Debug Log - Session Started\n")
             f.write(f"{'='*60}\n")
         print(f"  Log file initialized: {_PHYSICS_LOG_PATH}")
 
     print(f"{'='*60}\n")
+
+
+def _log_header(title: str, batch_vec: torch.Tensor = None):
+    """Create a standardized log header.
+
+    Args:
+        title: Title for this logging section
+        batch_vec: Batch vector for graph counts (optional)
+
+    Returns:
+        str: Formatted header string
+    """
+    num_graphs = torch.bincount(batch_vec).size(0) if batch_vec is not None else 1
+    msg = f"\n{'='*60}\n{title}\n{'='*60}\n"
+    msg += f"\nNumber of graphs: {num_graphs}\n"
+
+    if batch_vec is not None:
+        msg += f"Nodes per graph: {torch.bincount(batch_vec).detach().cpu().numpy()}\n"
+
+    return msg
+
+
+def _log_concentrations(C_ST_true: torch.Tensor, C_ST_pred: torch.Tensor, n_samples: int = 10):
+    """Log concentration values.
+
+    Args:
+        C_ST_true: True concentration values
+        C_ST_pred: Predicted concentration values
+        n_samples: Number of samples to display
+
+    Returns:
+        str: Formatted concentration log
+    """
+    msg = f"\n--- CONCENTRATION VALUES (mmol/cm³) ---\n"
+    msg += f"C_ST_true: {C_ST_true[:n_samples].detach().cpu().numpy()}\n"
+    msg += f"C_ST_pred: {C_ST_pred[:n_samples].detach().cpu().numpy()}\n"
+    return msg
+
+
+def _log_fluxes(J_ax_true: torch.Tensor, J_ax_pred: torch.Tensor, n_samples: int = 10):
+    """Log flux values.
+
+    Args:
+        J_ax_true: True flux values
+        J_ax_pred: Predicted flux values
+        n_samples: Number of samples to display
+
+    Returns:
+        str: Formatted flux log
+    """
+    msg = f"\n--- FLUX VALUES (mmol/h) ---\n"
+
+    if J_ax_true.numel() > 0:
+        msg += f"J_ax_true (mean): {J_ax_true.mean().detach().cpu().item():.6e}\n"
+        if J_ax_true.size(0) >= n_samples:
+            msg += f"J_ax_true (first {n_samples}): {J_ax_true[:n_samples].detach().cpu().numpy()}\n"
+        msg += f"J_ax_true (std): {J_ax_true.std().detach().cpu().item():.6e}\n"
+
+    if J_ax_pred.numel() > 0:
+        msg += f"J_ax_pred (mean): {J_ax_pred.mean().detach().cpu().item():.6e}\n"
+        if J_ax_pred.size(0) >= n_samples:
+            msg += f"J_ax_pred (first {n_samples}): {J_ax_pred[:n_samples].detach().cpu().numpy()}\n"
+        msg += f"J_ax_pred (std): {J_ax_pred.std().detach().cpu().item():.6e}\n"
+
+    return msg
+
+
+def _log_source_sink_terms(
+    F_in_true: torch.Tensor,
+    F_in_pred: torch.Tensor,
+    F_out_true: torch.Tensor,
+    F_out_pred: torch.Tensor,
+    n_samples: int = 10
+):
+    """Log source/sink terms (F_in and F_out).
+
+    Args:
+        F_in_true: True phloem loading values
+        F_in_pred: Predicted phloem loading values
+        F_out_true: True sucrose outflow values
+        F_out_pred: Predicted sucrose outflow values
+        n_samples: Number of samples to display
+
+    Returns:
+        str: Formatted source/sink log
+    """
+    msg = f"\n--- SOURCE/SINK TERMS (mmol/h) ---\n"
+    msg += f"F_in_true: {F_in_true[:n_samples].detach().cpu().numpy()}\n"
+    msg += f"F_in_pred: {F_in_pred[:n_samples].detach().cpu().numpy()}\n"
+    msg += f"F_in mean - true: {F_in_true.mean().detach().cpu().item():.6e}, pred: {F_in_pred.mean().detach().cpu().item():.6e}\n"
+    msg += f"\n"
+    msg += f"F_out_true: {F_out_true[:n_samples].detach().cpu().numpy()}\n"
+    msg += f"F_out_pred: {F_out_pred[:n_samples].detach().cpu().numpy()}\n"
+    msg += f"F_out mean - true: {F_out_true.mean().detach().cpu().item():.6e}, pred: {F_out_pred.mean().detach().cpu().item():.6e}\n"
+    return msg
+
+
+def _log_divergence(
+    dS_dt_from_flux_true: torch.Tensor,
+    dS_dt_from_flux_pred: torch.Tensor,
+    n_samples: int = 10
+):
+    """Log divergence values.
+
+    Args:
+        dS_dt_from_flux_true: True divergence values
+        dS_dt_from_flux_pred: Predicted divergence values
+        n_samples: Number of samples to display
+
+    Returns:
+        str: Formatted divergence log
+    """
+    msg = f"\n--- DIVERGENCE (mmol/h) ---\n"
+    msg += f"Divergence_true (first {n_samples}): {dS_dt_from_flux_true[:n_samples].detach().cpu().numpy()}\n"
+    msg += f"Divergence_true (mean): {dS_dt_from_flux_true.mean().detach().cpu().item():.6e}\n"
+    msg += f"Divergence_true (std): {dS_dt_from_flux_true.std().detach().cpu().item():.6e}\n"
+    msg += f"\n"
+    msg += f"Divergence_pred (first {n_samples}): {dS_dt_from_flux_pred[:n_samples].detach().cpu().numpy()}\n"
+    msg += f"Divergence_pred (mean): {dS_dt_from_flux_pred.mean().detach().cpu().item():.6e}\n"
+    msg += f"Divergence_pred (std): {dS_dt_from_flux_pred.std().detach().cpu().item():.6e}\n"
+    return msg
+
+
+def _log_total_residual(
+    dS_dt_tot_true: torch.Tensor,
+    dS_dt_tot_pred: torch.Tensor,
+    n_samples: int = 10
+):
+    """Log total physics residual.
+
+    Args:
+        dS_dt_tot_true: True total residual values
+        dS_dt_tot_pred: Predicted total residual values
+        n_samples: Number of samples to display
+
+    Returns:
+        str: Formatted total residual log
+    """
+    msg = f"\n--- TOTAL PHYSICS RESIDUAL (mmol/h) ---\n"
+    msg += f"dS_dt_tot_true (first {n_samples}): {dS_dt_tot_true[:n_samples].detach().cpu().numpy()}\n"
+    msg += f"dS_dt_tot_true (mean absolute): {dS_dt_tot_true.abs().mean().detach().cpu().item():.6e}\n"
+    msg += f"\n"
+    msg += f"dS_dt_tot_pred (first {n_samples}): {dS_dt_tot_pred[:n_samples].detach().cpu().numpy()}\n"
+    msg += f"dS_dt_tot_pred (mean absolute): {dS_dt_tot_pred.abs().mean().detach().cpu().item():.6e}\n"
+    return msg
+
+
+def _log_comparison_metrics(
+    J_ax_true: torch.Tensor,
+    J_ax_pred: torch.Tensor,
+    dS_dt_from_flux_true: torch.Tensor,
+    dS_dt_from_flux_pred: torch.Tensor,
+    F_in_true: torch.Tensor,
+    F_in_pred: torch.Tensor,
+    F_out_true: torch.Tensor,
+    F_out_pred: torch.Tensor,
+    dS_dt_tot_true: torch.Tensor,
+    dS_dt_tot_pred: torch.Tensor
+):
+    """Log comparison metrics (MSE between true and predicted).
+
+    Args:
+        All physics quantities (true and predicted)
+
+    Returns:
+        str: Formatted comparison metrics log
+    """
+    msg = f"\n--- COMPARISON METRICS ---\n"
+
+    if J_ax_true.numel() > 0 and J_ax_pred.numel() > 0:
+        msg += f"Flux MSE: {((J_ax_true - J_ax_pred).pow(2).mean()).detach().cpu().item():.6e}\n"
+
+    msg += f"Divergence MSE: {((dS_dt_from_flux_true - dS_dt_from_flux_pred).pow(2).mean()).detach().cpu().item():.6e}\n"
+    msg += f"F_in MSE: {((F_in_true - F_in_pred).pow(2).mean()).detach().cpu().item():.6e}\n"
+    msg += f"F_out MSE: {((F_out_true - F_out_pred).pow(2).mean()).detach().cpu().item():.6e}\n"
+    msg += f"Total residual MSE: {((dS_dt_tot_true - dS_dt_tot_pred).pow(2).mean()).detach().cpu().item():.6e}\n"
+
+    return msg
+
+
+def _log_penalty_monitoring(
+    physics_loss: torch.Tensor,
+    negative_concentration_penalty: torch.Tensor,
+    penalty_weight: float,
+    total_loss: torch.Tensor,
+    model_type: str = "NNConv"
+):
+    """Log penalty monitoring information.
+
+    Args:
+        physics_loss: Physics residual loss component
+        negative_concentration_penalty: Penalty for negative concentrations
+        penalty_weight: Weight applied to penalty
+        total_loss: Combined total loss
+        model_type: Type of model (for labeling)
+
+    Returns:
+        str: Formatted penalty monitoring log
+    """
+    ratio = (penalty_weight * negative_concentration_penalty) / (physics_loss + 1e-10)
+    msg = f"\n--- PENALTY MONITORING ({model_type}) ---\n"
+    msg += f"Physics loss: {physics_loss.item():.6e}\n"
+    msg += f"Penalty (unweighted): {negative_concentration_penalty.item():.6e}\n"
+    msg += f"Penalty (weighted): {(penalty_weight * negative_concentration_penalty).item():.6e}\n"
+    msg += f"Penalty weight: {penalty_weight:.1f}\n"
+    msg += f"Total loss: {total_loss.item():.6e}\n"
+    msg += f"Penalty/Physics ratio: {ratio.item():.2f}\n"
+    msg += f"{'='*60}\n"
+    return msg
 
 
 def compute_axial_flux(
@@ -311,56 +520,20 @@ def log_physics_values(y_pred: torch.Tensor, data: Data, model_output=None):
         dS_dt_tot_pred = divergence_pred + F_in_pred - F_out_pred
 
         with open(_PHYSICS_LOG_PATH, "a") as f:
-            msg = (
-                f"\n{'='*60}\n"
-                f"DEBUG OUTPUT - OPERATOR MODEL (DATA-ONLY MODE)\n"
-                f"{'='*60}\n"
-                f"\nNumber of graphs: {torch.bincount(batch_vec).size(0) if batch_vec is not None else 1}\n"
+            msg = _log_header("DEBUG OUTPUT - OPERATOR MODEL (DATA-ONLY MODE)", batch_vec)
+            msg += _log_concentrations(C_ST_true, C_ST_pred)
+            msg += _log_fluxes(J_ax_true, edge_fluxes_pred)
+            msg += _log_divergence(dS_dt_from_flux_true, divergence_pred)
+            msg += _log_source_sink_terms(F_in_true, F_in_pred, F_out_true, F_out_pred)
+            msg += _log_total_residual(dS_dt_tot_true, dS_dt_tot_pred)
+            msg += _log_comparison_metrics(
+                J_ax_true, edge_fluxes_pred,
+                dS_dt_from_flux_true, divergence_pred,
+                F_in_true, F_in_pred,
+                F_out_true, F_out_pred,
+                dS_dt_tot_true, dS_dt_tot_pred
             )
-            if batch_vec is not None:
-                msg += f"Nodes per graph: {torch.bincount(batch_vec).detach().cpu().numpy()}\n"
-
-            msg += (
-                f"\n--- CONCENTRATION VALUES (mmol/cm³) ---\n"
-                f"C_ST_true: {C_ST_true[:10].detach().cpu().numpy()}\n"
-                f"C_ST_pred: {C_ST_pred[:10].detach().cpu().numpy()}\n"
-
-                f"\n--- EDGE FLUXES (mmol/h) ---\n"
-                f"J_ax_true (reconstructed from physics):\n"
-                f"  First 10: {J_ax_true[:10].detach().cpu().numpy()}\n"
-                f"  Mean: {J_ax_true.mean().detach().cpu().item():.6e}\n"
-                f"  Std: {J_ax_true.std().detach().cpu().item():.6e}\n"
-                f"J_ax_pred (from operator model):\n"
-                f"  First 10: {edge_fluxes_pred[:10].detach().cpu().numpy()}\n"
-                f"  Mean: {edge_fluxes_pred.mean().detach().cpu().item():.6e}\n"
-                f"  Std: {edge_fluxes_pred.std().detach().cpu().item():.6e}\n"
-
-                f"\n--- DIVERGENCE (mmol/h) ---\n"
-                f"Divergence_true:\n"
-                f"  First 10: {dS_dt_from_flux_true[:10].detach().cpu().numpy()}\n"
-                f"  Mean: {dS_dt_from_flux_true.mean().detach().cpu().item():.6e}\n"
-                f"Divergence_pred:\n"
-                f"  First 10: {divergence_pred[:10].detach().cpu().numpy()}\n"
-                f"  Mean: {divergence_pred.mean().detach().cpu().item():.6e}\n"
-
-                f"\n--- SOURCE/SINK TERMS (mmol/h) ---\n"
-                f"F_in_true: {F_in_true[:10].detach().cpu().numpy()}\n"
-                f"F_in_pred: {F_in_pred[:10].detach().cpu().numpy()}\n"
-                f"F_out_true: {F_out_true[:10].detach().cpu().numpy()}\n"
-                f"F_out_pred: {F_out_pred[:10].detach().cpu().numpy()}\n"
-
-                f"\n--- TOTAL PHYSICS RESIDUAL (mmol/h) ---\n"
-                f"dS_dt_tot_true: {dS_dt_tot_true[:10].detach().cpu().numpy()}\n"
-                f"dS_dt_tot_pred: {dS_dt_tot_pred[:10].detach().cpu().numpy()}\n"
-
-                f"\n--- COMPARISON METRICS ---\n"
-                f"Flux MSE: {((J_ax_true - edge_fluxes_pred).pow(2).mean()).detach().cpu().item():.6e}\n"
-                f"Divergence MSE: {((dS_dt_from_flux_true - divergence_pred).pow(2).mean()).detach().cpu().item():.6e}\n"
-                f"F_in MSE: {((F_in_true - F_in_pred).pow(2).mean()).detach().cpu().item():.6e}\n"
-                f"F_out MSE: {((F_out_true - F_out_pred).pow(2).mean()).detach().cpu().item():.6e}\n"
-                f"Total residual MSE: {((dS_dt_tot_true - dS_dt_tot_pred).pow(2).mean()).detach().cpu().item():.6e}\n"
-                f"{'='*60}\n"
-            )
+            msg += f"{'='*60}\n"
             f.write(msg)
 
         # Compute averaged metrics for terminal display (operator model)
@@ -415,45 +588,20 @@ def log_physics_values(y_pred: torch.Tensor, data: Data, model_output=None):
         dS_dt_tot_true = dS_dt_from_flux_true + F_in_true - F_out_true
 
         with open(_PHYSICS_LOG_PATH, "a") as f:
-            msg = (
-                f"\n{'='*60}\n"
-                f"DEBUG OUTPUT - NNCONV MODEL (DATA-ONLY MODE)\n"
-                f"{'='*60}\n"
-                f"\nNumber of graphs: {torch.bincount(batch_vec).size(0) if batch_vec is not None else 1}\n"
+            msg = _log_header("DEBUG OUTPUT - NNCONV MODEL (DATA-ONLY MODE)", batch_vec)
+            msg += _log_concentrations(C_ST_true, C_ST_pred)
+            msg += _log_fluxes(J_ax_true, J_ax_pred)
+            msg += _log_source_sink_terms(F_in_true, F_in_pred, F_out_true, F_out_pred)
+            msg += _log_divergence(dS_dt_from_flux_true, dS_dt_from_flux_pred)
+            msg += _log_total_residual(dS_dt_tot_true, dS_dt_tot_pred)
+            msg += _log_comparison_metrics(
+                J_ax_true, J_ax_pred,
+                dS_dt_from_flux_true, dS_dt_from_flux_pred,
+                F_in_true, F_in_pred,
+                F_out_true, F_out_pred,
+                dS_dt_tot_true, dS_dt_tot_pred
             )
-            if batch_vec is not None:
-                msg += f"Nodes per graph: {torch.bincount(batch_vec).detach().cpu().numpy()}\n"
-
-            msg += (
-                f"\n--- CONCENTRATION VALUES (mmol/cm³) ---\n"
-                f"C_ST_true: {C_ST_true[:10].detach().cpu().numpy()}\n"
-                f"C_ST_pred: {C_ST_pred[:10].detach().cpu().numpy()}\n"
-
-                f"\n--- FLUX VALUES (mmol/h) ---\n"
-                f"J_ax_true (mean): {J_ax_true.mean().detach().cpu().item():.6e}\n"
-                f"J_ax_pred (mean): {J_ax_pred.mean().detach().cpu().item():.6e}\n"
-
-                f"\nF_in_true: {F_in_true[:10].detach().cpu().numpy()}\n"
-                f"F_in_pred: {F_in_pred[:10].detach().cpu().numpy()}\n"
-
-                f"\nF_out_true: {F_out_true[:10].detach().cpu().numpy()}\n"
-                f"F_out_pred: {F_out_pred[:10].detach().cpu().numpy()}\n"
-
-                f"\n--- TIME DERIVATIVES (mmol/h) ---\n"
-                f"dS_dt_from_flux_true: {dS_dt_from_flux_true[:10].detach().cpu().numpy()}\n"
-                f"dS_dt_from_flux_pred: {dS_dt_from_flux_pred[:10].detach().cpu().numpy()}\n"
-
-                f"\ndS_dt_tot_true (total): {dS_dt_tot_true[:10].detach().cpu().numpy()}\n"
-                f"dS_dt_tot_pred (total): {dS_dt_tot_pred[:10].detach().cpu().numpy()}\n"
-
-                f"\n--- COMPARISON METRICS ---\n"
-                f"Flux MSE: {((J_ax_true - J_ax_pred).pow(2).mean()).detach().cpu().item():.6e}\n"
-                f"Divergence MSE: {((dS_dt_from_flux_true - dS_dt_from_flux_pred).pow(2).mean()).detach().cpu().item():.6e}\n"
-                f"F_in MSE: {((F_in_true - F_in_pred).pow(2).mean()).detach().cpu().item():.6e}\n"
-                f"F_out MSE: {((F_out_true - F_out_pred).pow(2).mean()).detach().cpu().item():.6e}\n"
-                f"Total residual MSE: {((dS_dt_tot_true - dS_dt_tot_pred).pow(2).mean()).detach().cpu().item():.6e}\n"
-                f"{'='*60}\n"
-            )
+            msg += f"{'='*60}\n"
             f.write(msg)
 
         # Compute averaged metrics for terminal display (NNConv model)
@@ -561,43 +709,17 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
         F_in_true = compute_phloem_loading(C_ST_true, node_feat_original, params, node_fields, device)
         F_out_true = compute_sucrose_outflow(C_ST_true, node_feat_original, params, node_fields, device)
         dS_dt_tot_true = dS_dt_from_flux_true + F_in_true - F_out_true
+
         with open(_PHYSICS_LOG_PATH, "a") as f:
-            msg = (
-                f"\n{'='*60}\n"
-                f"DEBUG OUTPUT - PHYSICS RESIDUAL (MINIMIZE TO ZERO)\n"
-                f"{'='*60}\n"
-                f"\nNumber of graphs in batch: {torch.bincount(batch_vec).size(0) if batch_vec is not None else 1}\n"
-            )
-            if batch_vec is not None:
-                msg += f"Number of nodes per graph: {torch.bincount(batch_vec).detach().cpu().numpy()}\n"
-            f.write(msg)
-
-            msg = (
-                f"\n--- CONCENTRATION VALUES (mmol/cm³) ---\n"
-                f"C_ST_true: {C_ST_true[:10].detach().cpu().numpy()}\n"
-                f"C_ST_pred: {C_ST_pred[:10].detach().cpu().numpy()}\n"
-
-                f"\n--- FLUX VALUES (mmol/h) ---\n"
-                f"J_ax_true (mean): {J_ax_true.mean().detach().cpu().item():.6e}\n"
-                f"J_ax_pred (mean): {J_ax_pred.mean().detach().cpu().item():.6e}\n"
-
-                f"\nF_in_true: {F_in_true[:10].detach().cpu().numpy()}\n"
-                f"F_in_pred: {F_in_pred[:10].detach().cpu().numpy()}\n"
-
-                f"\nF_out_true: {F_out_true[:10].detach().cpu().numpy()}\n"
-                f"F_out_pred: {F_out_pred[:10].detach().cpu().numpy()}\n"
-
-                f"\n--- TIME DERIVATIVES FROM DISCRETE FLUX LAW (mmol/h) ---\n"
-                f"dS_dt_from_flux_true: {dS_dt_from_flux_true[:10].detach().cpu().numpy()}\n"
-                f"dS_dt_from_flux_pred: {dS_dt_from_flux_pred[:10].detach().cpu().numpy()}\n"
-
-                f"\ndS_dt_tot_true (total): {dS_dt_tot_true[:10].detach().cpu().numpy()}\n"
-                f"dS_dt_tot_pred (total): {dS_dt_tot_pred[:10].detach().cpu().numpy()}\n"
-
-                f"\n--- PHYSICS RESIDUAL (should approach zero) ---\n"
-                f"dS_dt_tot_pred (first 10 nodes): {dS_dt_tot_pred[:10].detach().cpu().numpy()}\n"
-                f"Mean absolute residual: {dS_dt_tot_pred.abs().mean().detach().cpu().item():.6e}\n"
-            )
+            msg = _log_header("DEBUG OUTPUT - PHYSICS RESIDUAL (MINIMIZE TO ZERO)", batch_vec)
+            msg += _log_concentrations(C_ST_true, C_ST_pred)
+            msg += _log_fluxes(J_ax_true, J_ax_pred)
+            msg += _log_source_sink_terms(F_in_true, F_in_pred, F_out_true, F_out_pred)
+            msg += _log_divergence(dS_dt_from_flux_true, dS_dt_from_flux_pred)
+            msg += _log_total_residual(dS_dt_tot_true, dS_dt_tot_pred)
+            msg += f"\n--- PHYSICS RESIDUAL (should approach zero) ---\n"
+            msg += f"dS_dt_tot_pred (first 10 nodes): {dS_dt_tot_pred[:10].detach().cpu().numpy()}\n"
+            msg += f"Mean absolute residual: {dS_dt_tot_pred.abs().mean().detach().cpu().item():.6e}\n"
             f.write(msg)
 
     # ============================
@@ -634,16 +756,9 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
     # Log penalty monitoring information
     if _ENABLE_PHYSICS_LOGGING:
         with open(_PHYSICS_LOG_PATH, "a") as f:
-            ratio = (PENALTY_WEIGHT * negative_concentration_penalty) / (physics_loss + 1e-10)
-            msg = (
-                f"\n--- PENALTY MONITORING (NNConv) ---\n"
-                f"Physics loss: {physics_loss.item():.6e}\n"
-                f"Penalty (unweighted): {negative_concentration_penalty.item():.6e}\n"
-                f"Penalty (weighted): {(PENALTY_WEIGHT * negative_concentration_penalty).item():.6e}\n"
-                f"Penalty weight: {PENALTY_WEIGHT:.1f}\n"
-                f"Total loss: {loss.item():.6e}\n"
-                f"Penalty/Physics ratio: {ratio.item():.2f}\n"
-                f"{'='*60}\n"
+            msg = _log_penalty_monitoring(
+                physics_loss, negative_concentration_penalty,
+                PENALTY_WEIGHT, loss, "NNConv"
             )
             f.write(msg)
 
@@ -762,63 +877,18 @@ def physics_residual_operator(
         dS_dt_tot_true = dS_dt_from_flux_true + F_in_true - F_out_true
 
         with open(_PHYSICS_LOG_PATH, "a") as f:
-            msg = (
-                f"\n{'='*60}\n"
-                f"DEBUG OUTPUT - OPERATOR MODEL PHYSICS RESIDUAL\n"
-                f"{'='*60}\n"
-                f"\nNumber of graphs: {torch.bincount(batch_vec).size(0) if batch_vec is not None else 1}\n"
-            )
-            if batch_vec is not None:
-                msg += f"Nodes per graph: {torch.bincount(batch_vec).detach().cpu().numpy()}\n"
-
-            msg += (
-                f"\n--- CONCENTRATION VALUES (mmol/cm³) ---\n"
-                f"C_ST_true: {C_ST_true[:10].detach().cpu().numpy()}\n"
-                f"C_ST_pred: {C_ST_pred[:10].detach().cpu().numpy()}\n"
-
-                f"\n--- EDGE FLUXES (mmol/h) ---\n"
-                f"J_ax_true (reconstructed from physics):\n"
-                f"  First 10: {J_ax_true[:10].detach().cpu().numpy()}\n"
-                f"  Mean: {J_ax_true.mean().detach().cpu().item():.6e}\n"
-                f"  Std: {J_ax_true.std().detach().cpu().item():.6e}\n"
-                f"J_ax_pred (from operator model):\n"
-                f"  First 10: {edge_fluxes_pred[:10].detach().cpu().numpy()}\n"
-                f"  Mean: {edge_fluxes_pred.mean().detach().cpu().item():.6e}\n"
-                f"  Std: {edge_fluxes_pred.std().detach().cpu().item():.6e}\n"
-
-                f"\n--- DIVERGENCE (mmol/h) ---\n"
-                f"Divergence_true (reconstructed):\n"
-                f"  First 10: {dS_dt_from_flux_true[:10].detach().cpu().numpy()}\n"
-                f"  Mean: {dS_dt_from_flux_true.mean().detach().cpu().item():.6e}\n"
-                f"  Std: {dS_dt_from_flux_true.std().detach().cpu().item():.6e}\n"
-                f"Divergence_pred (from operator model):\n"
-                f"  First 10: {divergence_pred[:10].detach().cpu().numpy()}\n"
-                f"  Mean: {divergence_pred.mean().detach().cpu().item():.6e}\n"
-                f"  Std: {divergence_pred.std().detach().cpu().item():.6e}\n"
-
-                f"\n--- SOURCE/SINK TERMS (mmol/h) ---\n"
-                f"F_in_true: {F_in_true[:10].detach().cpu().numpy()}\n"
-                f"F_in_pred: {F_in_pred[:10].detach().cpu().numpy()}\n"
-                f"F_in mean - true: {F_in_true.mean().detach().cpu().item():.6e}, pred: {F_in_pred.mean().detach().cpu().item():.6e}\n"
-                f"\n"
-                f"F_out_true: {F_out_true[:10].detach().cpu().numpy()}\n"
-                f"F_out_pred: {F_out_pred[:10].detach().cpu().numpy()}\n"
-                f"F_out mean - true: {F_out_true.mean().detach().cpu().item():.6e}, pred: {F_out_pred.mean().detach().cpu().item():.6e}\n"
-
-                f"\n--- TOTAL PHYSICS RESIDUAL (mmol/h) ---\n"
-                f"dS_dt_tot_true (total):\n"
-                f"  First 10: {dS_dt_tot_true[:10].detach().cpu().numpy()}\n"
-                f"  Mean absolute: {dS_dt_tot_true.abs().mean().detach().cpu().item():.6e}\n"
-                f"dS_dt_tot_pred (total):\n"
-                f"  First 10: {dS_dt_tot_pred[:10].detach().cpu().numpy()}\n"
-                f"  Mean absolute: {dS_dt_tot_pred.abs().mean().detach().cpu().item():.6e}\n"
-
-                f"\n--- COMPARISON METRICS ---\n"
-                f"Flux MSE: {((J_ax_true - edge_fluxes_pred).pow(2).mean()).detach().cpu().item():.6e}\n"
-                f"Divergence MSE: {((dS_dt_from_flux_true - divergence_pred).pow(2).mean()).detach().cpu().item():.6e}\n"
-                f"F_in MSE: {((F_in_true - F_in_pred).pow(2).mean()).detach().cpu().item():.6e}\n"
-                f"F_out MSE: {((F_out_true - F_out_pred).pow(2).mean()).detach().cpu().item():.6e}\n"
-                f"Total residual MSE: {((dS_dt_tot_true - dS_dt_tot_pred).pow(2).mean()).detach().cpu().item():.6e}\n"
+            msg = _log_header("DEBUG OUTPUT - OPERATOR MODEL PHYSICS RESIDUAL", batch_vec)
+            msg += _log_concentrations(C_ST_true, C_ST_pred)
+            msg += _log_fluxes(J_ax_true, edge_fluxes_pred)
+            msg += _log_divergence(dS_dt_from_flux_true, divergence_pred)
+            msg += _log_source_sink_terms(F_in_true, F_in_pred, F_out_true, F_out_pred)
+            msg += _log_total_residual(dS_dt_tot_true, dS_dt_tot_pred)
+            msg += _log_comparison_metrics(
+                J_ax_true, edge_fluxes_pred,
+                dS_dt_from_flux_true, divergence_pred,
+                F_in_true, F_in_pred,
+                F_out_true, F_out_pred,
+                dS_dt_tot_true, dS_dt_tot_pred
             )
             f.write(msg)
 
@@ -849,16 +919,9 @@ def physics_residual_operator(
     # Log penalty monitoring information
     if _ENABLE_PHYSICS_LOGGING:
         with open(_PHYSICS_LOG_PATH, "a") as f:
-            ratio = (PENALTY_WEIGHT * negative_concentration_penalty) / (physics_loss + 1e-10)
-            msg = (
-                f"\n--- PENALTY MONITORING (Operator) ---\n"
-                f"Physics loss: {physics_loss.item():.6e}\n"
-                f"Penalty (unweighted): {negative_concentration_penalty.item():.6e}\n"
-                f"Penalty (weighted): {(PENALTY_WEIGHT * negative_concentration_penalty).item():.6e}\n"
-                f"Penalty weight: {PENALTY_WEIGHT:.1f}\n"
-                f"Total loss: {loss.item():.6e}\n"
-                f"Penalty/Physics ratio: {ratio.item():.2f}\n"
-                f"{'='*60}\n"
+            msg = _log_penalty_monitoring(
+                physics_loss, negative_concentration_penalty,
+                PENALTY_WEIGHT, loss, "Operator"
             )
             f.write(msg)
 

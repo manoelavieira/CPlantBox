@@ -15,6 +15,9 @@ def parse_arguments() -> TrainingConfig:
 
     parser.add_argument('--data-path', type=str,
                        help='Path to H5 file for simulated data')
+    parser.add_argument('--model-type', type=str, default='nnconv',
+                       choices=['nnconv', 'operator'],
+                       help='Model architecture: nnconv (baseline) or operator (flux-based)')
     parser.add_argument('--batch-size', type=int, default=8,
                        help='Batch size for training')
     parser.add_argument('--train-ratio', type=float, default=0.8,
@@ -48,6 +51,7 @@ def parse_arguments() -> TrainingConfig:
     # Create training configuration
     config = TrainingConfig(
         data_path=args.data_path,
+        model_type=args.model_type,
         batch_size=args.batch_size,
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,

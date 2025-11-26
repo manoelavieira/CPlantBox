@@ -24,6 +24,9 @@ class TrainingConfig:
     train_ratio: float = 0.8
     val_ratio: float = 0.1
 
+    # Model architecture
+    model_type: str = "nnconv"  # 'nnconv' or 'operator'
+
     # Training parameters
     lr: float = 3e-3
     weight_decay: float = 1e-5
@@ -37,8 +40,8 @@ class TrainingConfig:
     lambda_bc: float = 1.0
 
     # Adaptive loss balancing for physics mode
-    use_adaptive_physics_weighting: bool = True # Balance physics vs IC/BC dynamically
-    target_physics_ratio: float = 1             # Target ratio of physics loss to supervision loss
+    use_adaptive_physics_weighting: bool = False    # Balance physics vs IC/BC dynamically
+    target_physics_ratio: float = 1                 # Target ratio of physics loss to supervision loss
 
     # Reproducibility
     seed: int = 42
@@ -62,6 +65,8 @@ class TrainingConfig:
 
     def validate(self) -> None:
         """Validate configuration parameters."""
+        if self.model_type not in ["nnconv", "operator"]:
+            raise ValueError(f"model_type must be 'nnconv' or 'operator', got {self.model_type}")
         if not (0 < self.train_ratio < 1):
             raise ValueError(f"train_ratio must be between 0 and 1, got {self.train_ratio}")
         if not (0 < self.val_ratio < 1):

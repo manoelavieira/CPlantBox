@@ -37,7 +37,7 @@ def main():
           f"Test batches: {len(test_loader)}")
 
     # Setup model
-    model_setup = setup.setup_model_and_scalers(train_loader, device)
+    model_setup = setup.setup_model_and_scalers(train_loader, device, config.model_type)
     model_setup.model = model_setup.model.double()  # Convert to float64
 
     # Create model config for logging

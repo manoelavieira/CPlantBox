@@ -32,10 +32,11 @@ class TrainingConfig:
     weight_decay: float = 1e-5
     epochs: int = 100
     patience: int = 10
-    lambda_data: float = 1.0
 
     # Loss configuration
     loss_type: LossType = LossType.PHYSICS_WITH_IC_BC
+    lambda_data: float = 1.0
+    lambda_phys: float = 1.0
     lambda_ic: float = 1.0
     lambda_bc: float = 1.0
 
@@ -54,14 +55,24 @@ class TrainingConfig:
     clip_grad_norm: float = 1.0
 
     # Paths
-    model_save_dir: str = "results/best_model"
+    model_save_dir: str = "logs/model"
     model_filename: str = "best_model.pt"
-    tensorboard_log_dir: str = "results/tensorboard_logs"
+    physics_save_dir: str = "logs/physics"
+    physics_save_filename: str = "debugs.txt"
+    tensorboard_log_dir: str = "logs/tensorboard"
+
+    # Physics logging
+    enable_physics_logging: bool = False
 
     @property
     def model_save_path(self) -> str:
         """Get the full path for saving the model."""
         return str(Path(self.model_save_dir) / self.model_filename)
+
+    @property
+    def physics_save_path(self) -> str:
+        """Get the full path for saving physics debug logs."""
+        return str(Path(self.physics_save_dir) / self.physics_save_filename)
 
     def validate(self) -> None:
         """Validate configuration parameters."""
@@ -155,6 +166,7 @@ class LossConfig:
     """Configuration for loss computation."""
     loss_type: LossType = LossType.PHYSICS_WITH_IC_BC
     lambda_data: float = 1.0
+    lambda_phys: float = 1.0
     lambda_ic: float = 1.0
     lambda_bc: float = 1.0
     use_adaptive_physics_weighting: bool = True
@@ -166,6 +178,7 @@ class LossConfig:
         return cls(
             loss_type=config.loss_type,
             lambda_data=config.lambda_data,
+            lambda_phys=config.lambda_phys,
             lambda_ic=config.lambda_ic,
             lambda_bc=config.lambda_bc,
             use_adaptive_physics_weighting=config.use_adaptive_physics_weighting,
@@ -184,7 +197,7 @@ class LossResult:
     phys: float
     ic: float
     bc: float
-    adaptive_weight: float = 0.0
+    phys_weight: float = 0.0
     bc_nodes: int = 0
     bc_pct: float = 0.0
     phys_contrib_pct: float = 0.0
@@ -204,7 +217,7 @@ class EpochResult:
     ic: float
     bc: float
     physics_metrics: Optional[PhysicsMetrics] = None
-    adaptive_weight: float = 0.0
+    phys_weight: float = 0.0
     supervision_weight: float = 0.0
     bc_nodes: float = 0.0
     bc_pct: float = 0.0
@@ -227,7 +240,7 @@ class EpochResult:
             ic=totals["ic"] / n_batches,
             bc=totals["bc"] / n_batches,
             physics_metrics=totals["last_phys_metrics"],
-            adaptive_weight=totals["adaptive_weight"] / n_batches,
+            phys_weight=totals["phys_weight"] / n_batches,
             supervision_weight=totals["supervision_weight"] / n_batches,
             bc_nodes=totals["bc_nodes"] / n_batches,
             bc_pct=totals["bc_pct"] / n_batches,

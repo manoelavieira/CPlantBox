@@ -234,7 +234,7 @@ class PhloemOperatorGNN(nn.Module):
             raise ValueError(f"time_per_node must be [N,1], got {tuple(data.time_per_node.shape)}")
 
         self._validated_input = True
-        print("Input validation successful (PhloemOperatorGNN).")
+        print("Input validation successful (PhloemOperatorGNN)")
 
     def forward(self, data: Data) -> dict:
         """Forward pass returning predictions, edge fluxes, and divergences.

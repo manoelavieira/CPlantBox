@@ -1,16 +1,54 @@
 from __future__ import annotations
 
 import torch
+from pathlib import Path
 
 from torch_scatter import scatter_mean
 from torch_geometric.data import Data
-from training.config import PhysicsMetrics
+from training.config import PhysicsMetrics, TrainingConfig
 from . import utils
 from . import config
 
-DEBUG = True                # Debug flag: set to True to enable detailed physics loss debugging
 PENALTY_WEIGHT = 1000.0     # Weight for penalizing non-positive concentrations
-debug_path = "results/debug_physics_logs.txt"
+
+# Module-level physics logging configuration
+# Default values are imported from TrainingConfig to ensure consistency
+_ENABLE_PHYSICS_LOGGING = TrainingConfig.enable_physics_logging
+_PHYSICS_LOG_PATH = str(Path(TrainingConfig.physics_save_dir) / TrainingConfig.physics_save_filename)
+
+
+def set_physics_logging(enable: bool, log_path: str = None):
+    """Configure physics logging settings.
+
+    Args:
+        enable: Whether to enable physics logging
+        log_path: Path to the physics log file (optional, defaults to logs/physics/debug.txt)
+    """
+    global _ENABLE_PHYSICS_LOGGING, _PHYSICS_LOG_PATH
+
+    _ENABLE_PHYSICS_LOGGING = enable
+    if log_path is not None:
+        _PHYSICS_LOG_PATH = log_path
+
+    # Print configuration for debugging
+    print(f"\n{'='*60}")
+    print(f"Physics Logging Configuration:")
+    print(f"  Enabled: {_ENABLE_PHYSICS_LOGGING}")
+    print(f"  Log Path: {_PHYSICS_LOG_PATH}")
+
+    # Create directory if logging is enabled
+    if _ENABLE_PHYSICS_LOGGING:
+        log_dir = Path(_PHYSICS_LOG_PATH).parent
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        # Clear existing log file
+        with open(_PHYSICS_LOG_PATH, 'w') as f:
+            f.write(f"{'='*60}\n")
+            f.write(f"Physics Debug Log - Session Started\n")
+            f.write(f"{'='*60}\n")
+        print(f"  Log file initialized: {_PHYSICS_LOG_PATH}")
+
+    print(f"{'='*60}\n")
 
 
 def compute_axial_flux(
@@ -215,9 +253,9 @@ def log_physics_values(y_pred: torch.Tensor, data: Data, model_output=None):
         model_output: For operator models, dict containing edge_fluxes and divergences
 
     Returns:
-        PhysicsMetrics: Computed physics metrics for terminal display, or None if DEBUG=False
+        PhysicsMetrics: Computed physics metrics for terminal display, or None if logging disabled
     """
-    if not DEBUG:
+    if not _ENABLE_PHYSICS_LOGGING:
         return None
 
     # Handle operator model case
@@ -272,7 +310,7 @@ def log_physics_values(y_pred: torch.Tensor, data: Data, model_output=None):
         dS_dt_tot_true = dS_dt_from_flux_true + F_in_true - F_out_true
         dS_dt_tot_pred = divergence_pred + F_in_pred - F_out_pred
 
-        with open(debug_path, "a") as f:
+        with open(_PHYSICS_LOG_PATH, "a") as f:
             msg = (
                 f"\n{'='*60}\n"
                 f"DEBUG OUTPUT - OPERATOR MODEL (DATA-ONLY MODE)\n"
@@ -376,7 +414,7 @@ def log_physics_values(y_pred: torch.Tensor, data: Data, model_output=None):
         F_out_true = compute_sucrose_outflow(C_ST_true, node_feat_original, params, node_fields, device)
         dS_dt_tot_true = dS_dt_from_flux_true + F_in_true - F_out_true
 
-        with open(debug_path, "a") as f:
+        with open(_PHYSICS_LOG_PATH, "a") as f:
             msg = (
                 f"\n{'='*60}\n"
                 f"DEBUG OUTPUT - NNCONV MODEL (DATA-ONLY MODE)\n"
@@ -510,7 +548,7 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
     # Total physics-based derivative from predictions (in physical units: mmol/h)
     dS_dt_tot_pred = dS_dt_from_flux_pred + F_in_pred - F_out_pred
 
-    if DEBUG:
+    if _ENABLE_PHYSICS_LOGGING:
         # Compute physics terms from true values for comparison/debugging
         y_true = data.y.to(device)
         S_ST_true = data.target_scaler.inv_transform(y_true).squeeze(-1)
@@ -523,7 +561,7 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
         F_in_true = compute_phloem_loading(C_ST_true, node_feat_original, params, node_fields, device)
         F_out_true = compute_sucrose_outflow(C_ST_true, node_feat_original, params, node_fields, device)
         dS_dt_tot_true = dS_dt_from_flux_true + F_in_true - F_out_true
-        with open(debug_path, "a") as f:
+        with open(_PHYSICS_LOG_PATH, "a") as f:
             msg = (
                 f"\n{'='*60}\n"
                 f"DEBUG OUTPUT - PHYSICS RESIDUAL (MINIMIZE TO ZERO)\n"
@@ -559,7 +597,6 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
                 f"\n--- PHYSICS RESIDUAL (should approach zero) ---\n"
                 f"dS_dt_tot_pred (first 10 nodes): {dS_dt_tot_pred[:10].detach().cpu().numpy()}\n"
                 f"Mean absolute residual: {dS_dt_tot_pred.abs().mean().detach().cpu().item():.6e}\n"
-                f"{'='*60}\n"
             )
             f.write(msg)
 
@@ -595,8 +632,8 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
     loss = physics_loss + PENALTY_WEIGHT * negative_concentration_penalty
 
     # Log penalty monitoring information
-    if DEBUG:
-        with open(debug_path, "a") as f:
+    if _ENABLE_PHYSICS_LOGGING:
+        with open(_PHYSICS_LOG_PATH, "a") as f:
             ratio = (PENALTY_WEIGHT * negative_concentration_penalty) / (physics_loss + 1e-10)
             msg = (
                 f"\n--- PENALTY MONITORING (NNConv) ---\n"
@@ -606,6 +643,7 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
                 f"Penalty weight: {PENALTY_WEIGHT:.1f}\n"
                 f"Total loss: {loss.item():.6e}\n"
                 f"Penalty/Physics ratio: {ratio.item():.2f}\n"
+                f"{'='*60}\n"
             )
             f.write(msg)
 
@@ -703,7 +741,7 @@ def physics_residual_operator(
     # dS/dt = divergence + F_in - F_out ≈ 0
     dS_dt_tot_pred = divergence_pred + F_in_pred - F_out_pred
 
-    if DEBUG:
+    if _ENABLE_PHYSICS_LOGGING:
         # For debugging, compute ground truth physics terms
         y_true = data.y.to(device)
         S_ST_true = data.target_scaler.inv_transform(y_true).squeeze(-1)
@@ -723,7 +761,7 @@ def physics_residual_operator(
         F_out_true = compute_sucrose_outflow(C_ST_true, node_feat_original, params, node_fields, device)
         dS_dt_tot_true = dS_dt_from_flux_true + F_in_true - F_out_true
 
-        with open(debug_path, "a") as f:
+        with open(_PHYSICS_LOG_PATH, "a") as f:
             msg = (
                 f"\n{'='*60}\n"
                 f"DEBUG OUTPUT - OPERATOR MODEL PHYSICS RESIDUAL\n"
@@ -781,7 +819,6 @@ def physics_residual_operator(
                 f"F_in MSE: {((F_in_true - F_in_pred).pow(2).mean()).detach().cpu().item():.6e}\n"
                 f"F_out MSE: {((F_out_true - F_out_pred).pow(2).mean()).detach().cpu().item():.6e}\n"
                 f"Total residual MSE: {((dS_dt_tot_true - dS_dt_tot_pred).pow(2).mean()).detach().cpu().item():.6e}\n"
-                f"{'='*60}\n"
             )
             f.write(msg)
 
@@ -810,8 +847,8 @@ def physics_residual_operator(
     loss = physics_loss + PENALTY_WEIGHT * negative_concentration_penalty
 
     # Log penalty monitoring information
-    if DEBUG:
-        with open(debug_path, "a") as f:
+    if _ENABLE_PHYSICS_LOGGING:
+        with open(_PHYSICS_LOG_PATH, "a") as f:
             ratio = (PENALTY_WEIGHT * negative_concentration_penalty) / (physics_loss + 1e-10)
             msg = (
                 f"\n--- PENALTY MONITORING (Operator) ---\n"
@@ -821,6 +858,7 @@ def physics_residual_operator(
                 f"Penalty weight: {PENALTY_WEIGHT:.1f}\n"
                 f"Total loss: {loss.item():.6e}\n"
                 f"Penalty/Physics ratio: {ratio.item():.2f}\n"
+                f"{'='*60}\n"
             )
             f.write(msg)
 

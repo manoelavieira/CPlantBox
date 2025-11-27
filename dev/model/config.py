@@ -23,14 +23,14 @@ class ModelConfig:
         aggr: NNConv aggregator type ("add", "mean", or "max")
         dropout: Dropout probability
     """
-    model_type: str = "nnconv"  # 'nnconv' or 'operator'
+    model_type: str = "operator"  # 'nnconv' or 'operator'
     node_feat_dim: int = 7  # [psi, vol_st, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp]
     edge_feat_dim: int = 1  # [r_st]
     num_org_types: int = 3  # ot_root=0, ot_stem=1, ot_leaf=2 (remapped from CPlantBox 2,3,4)
-    hidden_size: int = 64
-    num_layers: int = 3
+    hidden_size: int = 128
+    num_layers: int = 4
     aggr: str = "add"
-    dropout: float = 0.0
+    dropout: float = 0.1
 
     def __post_init__(self):
         if self.model_type not in ["nnconv", "operator"]:

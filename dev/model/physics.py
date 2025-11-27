@@ -71,7 +71,7 @@ def _log_header(title: str, batch_vec: torch.Tensor = None):
     return msg
 
 
-def _log_concentrations(C_ST_true: torch.Tensor, C_ST_pred: torch.Tensor, n_samples: int = 10):
+def _log_concentrations(C_ST_true: torch.Tensor, C_ST_pred: torch.Tensor, n_samples: int = 50):
     """Log concentration values.
 
     Args:
@@ -88,7 +88,7 @@ def _log_concentrations(C_ST_true: torch.Tensor, C_ST_pred: torch.Tensor, n_samp
     return msg
 
 
-def _log_fluxes(J_ax_true: torch.Tensor, J_ax_pred: torch.Tensor, n_samples: int = 10):
+def _log_fluxes(J_ax_true: torch.Tensor, J_ax_pred: torch.Tensor, n_samples: int = 50):
     """Log flux values.
 
     Args:
@@ -121,7 +121,7 @@ def _log_source_sink_terms(
     F_in_pred: torch.Tensor,
     F_out_true: torch.Tensor,
     F_out_pred: torch.Tensor,
-    n_samples: int = 10
+    n_samples: int = 50
 ):
     """Log source/sink terms (F_in and F_out).
 
@@ -136,20 +136,22 @@ def _log_source_sink_terms(
         str: Formatted source/sink log
     """
     msg = f"\n--- SOURCE/SINK TERMS (mmol/h) ---\n"
-    msg += f"F_in_true: {F_in_true[:n_samples].detach().cpu().numpy()}\n"
-    msg += f"F_in_pred: {F_in_pred[:n_samples].detach().cpu().numpy()}\n"
-    msg += f"F_in mean - true: {F_in_true.mean().detach().cpu().item():.6e}, pred: {F_in_pred.mean().detach().cpu().item():.6e}\n"
+    msg += f"F_in_true (mean): {F_in_true.mean().detach().cpu().item():.6e}\n"
+    msg += f"F_in_true (first {n_samples}): {F_in_true[:n_samples].detach().cpu().numpy()}\n"
+    msg += f"F_in_pred (mean): {F_in_pred.mean().detach().cpu().item():.6e}\n"
+    msg += f"F_in_pred (first {n_samples}): {F_in_pred[:n_samples].detach().cpu().numpy()}\n"
     msg += f"\n"
-    msg += f"F_out_true: {F_out_true[:n_samples].detach().cpu().numpy()}\n"
-    msg += f"F_out_pred: {F_out_pred[:n_samples].detach().cpu().numpy()}\n"
-    msg += f"F_out mean - true: {F_out_true.mean().detach().cpu().item():.6e}, pred: {F_out_pred.mean().detach().cpu().item():.6e}\n"
+    msg += f"F_out_true (mean): {F_out_true.mean().detach().cpu().item():.6e}\n"
+    msg += f"F_out_true (first {n_samples}): {F_out_true[:n_samples].detach().cpu().numpy()}\n"
+    msg += f"F_out_pred (mean): {F_out_pred.mean().detach().cpu().item():.6e}\n"
+    msg += f"F_out_pred (first {n_samples}): {F_out_pred[:n_samples].detach().cpu().numpy()}\n"
     return msg
 
 
 def _log_divergence(
     dS_dt_from_flux_true: torch.Tensor,
     dS_dt_from_flux_pred: torch.Tensor,
-    n_samples: int = 10
+    n_samples: int = 50
 ):
     """Log divergence values.
 
@@ -175,7 +177,7 @@ def _log_divergence(
 def _log_total_residual(
     dS_dt_tot_true: torch.Tensor,
     dS_dt_tot_pred: torch.Tensor,
-    n_samples: int = 10
+    n_samples: int = 50
 ):
     """Log total physics residual.
 
@@ -736,10 +738,9 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
 
     # Use adaptive normalization based on current residual scale
     # Use 90th percentile of absolute values as scale (robust to outliers)
-    with torch.no_grad():
-        scale = residual.abs().quantile(0.9).clamp(min=0.1, max=10000.0)
-
-    # Normalize residual by adaptive scale
+    # with torch.no_grad():
+    #     scale = residual.abs().quantile(0.9).clamp(min=0.1, max=10000.0)
+    scale = 1.0
     residual_node = (residual / scale).pow(2)
 
     # Average per graph first, then across graphs
@@ -900,9 +901,9 @@ def physics_residual_operator(
     negative_concentration_penalty = torch.relu(-C_ST_pred).pow(2).mean()
 
     # Adaptive normalization
-    with torch.no_grad():
-        scale = residual.abs().quantile(0.9).clamp(min=0.1, max=10000.0)
-
+    # with torch.no_grad():
+    #     scale = residual.abs().quantile(0.9).clamp(min=0.1, max=10000.0)
+    scale = 1.0
     residual_node = (residual / scale).pow(2)
 
     # Average per graph first, then across graphs

@@ -324,16 +324,17 @@ def compute_axial_flux(
     P_i = P_ST[src]
     P_j = P_ST[dst]
 
-    JW_ST = (P_j - P_i) / r_ST
+    JW_ST = (P_i - P_j) / r_ST
 
     # ---- Step 3: Select upstream concentration based on flow direction
-    # With dP = P_j - P_i, positive JW_ST means P_j > P_i, so flow is j -> i
+    # With dP = P_i - P_j, positive JW_ST means P_i > P_j, so flow is i -> j
     # For sugar flux, we want the upstream (source) concentration
+    # If flow is i -> j, then upstream is i (src), downstream is j (dst)
     # If flow is j -> i, then upstream is j (dst), downstream is i (src)
     C_i = C_ST[src]
     C_j = C_ST[dst]
 
-    C_upstream = torch.where(JW_ST > 0, C_j, C_i)
+    C_upstream = torch.where(JW_ST > 0, C_i, C_j)
     C_upstream = torch.clamp(C_upstream, min=0.0)
 
     # ---- Step 4: Sugar flux JS_ST = JW_ST * C_upstream

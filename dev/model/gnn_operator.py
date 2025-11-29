@@ -5,26 +5,29 @@ Implements PhloemOperatorGNN where:
 1. Message passing layers update node embeddings
 2. Prediction head outputs sucrose content S_ST
 3. Physical flux module computes fluxes from predicted concentrations
-   using: J_ax,ij = J^W_ij(Δψ, ΔT, r_ij) · C_upstream
+   using: J_ax,ij = J^W_ij(Δψ, ΔC, T, r_ij) · C_upstream
 
 The water flux J^W_ij is antisymmetric by construction (J^W_ji = -J^W_ij)
 through parametrization in terms of differences:
 - Δψ = ψ_src - ψ_dst (pressure gradient)
-- ΔT = T_src - T_dst (temperature gradient)
+- ΔC = C_src - C_dst (concentration gradient)
+- T = (T_src + T_dst) / 2 (average temperature, not a gradient)
 
 This properly implements the physical transport operator where fluxes
-depend on both the concentration at the upstream node and the pressure-driven
-water flux.
+depend on the concentration at the upstream node (based on flow direction)
+and the pressure-driven water flux. The concentration gradient ΔC affects
+the flux magnitude through osmotic effects, while temperature T affects
+it through the RT (gas constant × temperature) term.
 
 Expected `Data` fields per graph (per timestep)
 ----------------------------------------------
 - data.edge_index: LongTensor  [2, E]
 - data.edge_feat:  FloatTensor [E, edge_feat_dim]  # edge features (e.g., r_st resistance)
-- data.edge_org:   LongTensor  [E]                  # organ type per edge
+- data.edge_org:   LongTensor  [E]                 # organ type per edge
 - data.node_feat:  FloatTensor [N, node_feat_dim]  # [psi, vol_st, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp]
 - data.time_per_node: FloatTensor [N, 1]           # time in days (per node)
 - data.y:          FloatTensor [N, 1]              # target sucrose content at t
-- data.norm_stats: dict                             # normalization statistics (optional)
+- data.norm_stats: dict                            # normalization statistics (optional)
 - Optional: data.batch for mini-batching multiple graphs
 """
 
@@ -86,7 +89,8 @@ class MessagePassingLayer(nn.Module):
             nn.Linear(hidden_size, hidden_size)
         )
 
-        # MLP to update node embeddings from [h_old, aggregated_messages]
+        # MLP to update node embeddings
+        # Input is concatenation of [h_old, aggregated_messages]
         self.node_update_mlp = nn.Sequential(
             nn.Linear(in_channels + hidden_size, hidden_size),
             nn.ReLU(),
@@ -149,14 +153,20 @@ class MessagePassingLayer(nn.Module):
 class PhysicalFluxModule(nn.Module):
     """Computes physical fluxes based on predicted concentrations and physical features.
 
-    Implements: J_ax,ij = J^W_ij(Δψ, ΔT, r_ij) · C_upstream
+    Implements: J_ax,ij = J^W_ij(Δψ, ΔC, T, r_ij) · C_upstream
     where:
     - J^W_ij is the water flux (antisymmetric: J^W_ji = -J^W_ij)
-    - C_upstream is the concentration at the source node
+    - C_upstream is the concentration at the upstream node (source of the flow)
 
-    The water flux is parametrized using pressure and temperature differences:
-    - Δψ = ψ_src - ψ_dst (driving force)
-    - ΔT = T_src - T_dst (affects viscosity)
+    The water flux is parametrized using:
+    - Δψ = ψ_src - ψ_dst (pressure gradient, driving force for water movement)
+    - ΔC = C_src - C_dst (concentration gradient, affects flow via osmotic effects)
+    - T = average temperature (affects viscosity and RT term, NOT a gradient)
+
+    Note: Unlike traditional Münch models, we don't use ΔT (temperature difference)
+    because temperature affects the flux through the RT (gas constant × T) term in
+    osmotic pressure, not through a gradient. In practice, all nodes have the same
+    temperature at any given time step.
 
     This ensures physical consistency: J_ji = -J_ij by construction.
     """
@@ -178,17 +188,19 @@ class PhysicalFluxModule(nn.Module):
 
         self.num_org_types = num_org_types
 
+        # Learnable linear combination of (Δpsi, ΔC) -> antisymmetric scalar a_ij
+        # a_ij = w_psi * Δpsi + w_C * ΔC
+        self.antisym_linear = nn.Linear(2, 1, bias=False)
+
         # Edge input = continuous features + one-hot organ type
         edge_input_dim = edge_feat_dim + num_org_types
 
         # MLP to compute water flux magnitude from symmetric edge representation
-        # Input: [Δpsi, ΔT, edge_features_symmetric]
+        # Input: [|Δpsi|, |ΔC|, T_edge, edge_features_symmetric]
         # Output: scalar flux magnitude (always positive or zero)
-        # The sign is determined by the direction: J_ij = sign(Δpsi) * |J|
-        # This ensures J_ji = -J_ij by construction
-        water_flux_input_dim = 2 + edge_input_dim  # Δpsi, ΔT, edge_features
-        self.water_flux_mlp = nn.Sequential(
-            nn.Linear(water_flux_input_dim, hidden_size),
+        sym_input_dim = 3 + edge_input_dim  # |Δpsi|, |ΔC|, T_edge, edge_features
+        self.sym_mlp = nn.Sequential(
+            nn.Linear(sym_input_dim, hidden_size),
             nn.ReLU(),
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
@@ -237,41 +249,61 @@ class PhysicalFluxModule(nn.Module):
 
         # Extract physical features for water flux: psi (index 0) and Temp (index 6)
         # node_feat_phys = [psi, vol, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp, time]
-        psi = node_feat_phys[:, 0:1]  # [N, 1]
-        Temp = node_feat_phys[:, 6:7]  # [N, 1]
+        psi = node_feat_phys[:, 0:1]
+        Temp = node_feat_phys[:, 6:7]
 
-        psi_src = psi[src]  # [E, 1]
-        psi_dst = psi[dst]  # [E, 1]
-        Temp_src = Temp[src]  # [E, 1]
-        Temp_dst = Temp[dst]  # [E, 1]
+        psi_src, psi_dst = psi[src], psi[dst]
+        T_src, T_dst = Temp[src], Temp[dst]
+
+        # Sucrose concentrations at endpoints
+        C_src = C_ST[src]
+        C_dst = C_ST[dst]
 
         # Compute differences (antisymmetric features)
-        # Δpsi = psi_src - psi_dst (positive if flow is src→dst)
-        # ΔT = Temp_src - Temp_dst
-        delta_psi = psi_src - psi_dst  # [E, 1]
-        delta_T = Temp_src - Temp_dst  # [E, 1]
+        # Following CPlantBox convention where JW = (P_src - P_dst) / r_ST
+        # Note: src/dst are graph topology labels, NOT flow direction!
+        # Positive flux: P_src > P_dst -> water flows HIGH to LOW -> src -> dst
+        # We compute delta_psi = psi_src - psi_dst to match this convention
+        delta_psi = psi_src - psi_dst
+        delta_C = C_src - C_dst
+
+
+        # Antisymmetric linear combination: a_ij = w_psi * Δpsi + w_C * ΔC
+        antisym_input = torch.cat([delta_psi, delta_C], dim=-1)  # [E, 2]
+        a_ij = self.antisym_linear(antisym_input).squeeze(-1)    # [E]
 
         # Use absolute values for symmetric magnitude computation
         # This ensures magnitude is the same regardless of edge direction
-        abs_delta_psi = torch.abs(delta_psi)  # [E, 1]
-        abs_delta_T = torch.abs(delta_T)  # [E, 1]
+        abs_delta_psi = torch.abs(delta_psi)
+        abs_delta_C = torch.abs(delta_C)
 
-        # Compute flux magnitude from symmetric edge representation
-        # Input: [|Δpsi|, |ΔT|, edge_features] - all symmetric
-        water_flux_input = torch.cat([abs_delta_psi, abs_delta_T, edge_inputs], dim=-1)
-        flux_magnitude = self.water_flux_mlp(water_flux_input).squeeze(-1)  # [E], always >= 0
+        # Use absolute temperature / edge-average, not ΔT
+        T_edge = 0.5 * (T_src + T_dst)
 
-        # Compute signed water flux: J_water = sign(Δpsi) * magnitude
-        # This ensures J_ji = -J_ij because:
-        # - magnitude_ji = magnitude_ij (same |Δpsi|, |ΔT|, edge_features)
-        # - sign_ji = -sign_ij (Δpsi_ji = -Δpsi_ij)
-        J_water = torch.sign(delta_psi.squeeze(-1)) * flux_magnitude  # [E]
+        # Inputs for symmetric magnitude MLP: [|Δpsi|, |ΔC|, T_edge, edge_features]
+        sym_input = torch.cat(
+            [abs_delta_psi, abs_delta_C, T_edge, edge_inputs],
+            dim=-1
+        )
+        scale = self.sym_mlp(sym_input).squeeze(-1)  # [E], always >= 0
 
-        # Get concentration at source (upstream) node
-        C_src = C_ST[src].squeeze(-1)  # [E]
+        # Water flux: J_water_ij = a_ij * scale_ij
+        # - a_ij = w_psi * Δpsi + w_C * ΔC (antisymmetric: flips sign if src/dst are swapped)
+        # - scale_ij = SymMLP(|Δpsi|, |ΔC|, T_edge, edge_features) ≥ 0 (symmetric)
+        # This guarantees J_water_ji = -J_water_ij by construction
+        # Water flux: antisymmetric scalar * symmetric positive scale
+        J_water = a_ij * scale  # [E]
 
+        # Select upstream concentration based on flow direction
+        # CPlantBox convention: JW_ST = (P_src - P_dst) / r_ST
+        # If J_water > 0: P_src > P_dst -> flow is src -> dst -> upstream is src
+        # If J_water < 0: P_dst > P_src -> flow is dst -> src -> upstream is dst
+        # Upstream = where the water (and sucrose) flows FROM
         # Compute sugar flux: J_ax,ij = J^W_ij * C_upstream
-        edge_fluxes = J_water * C_src  # [E] (mol/s)
+        C_src = C_ST[src].squeeze(-1)
+        C_dst = C_ST[dst].squeeze(-1)
+        C_upstream = torch.where(J_water > 0, C_src, C_dst)
+        edge_fluxes = J_water * C_upstream
 
         # Compute divergence per node
         divergence = torch.zeros(N, device=device, dtype=dtype)
@@ -288,7 +320,9 @@ class PhloemOperatorGNN(nn.Module):
     1. Message passing layers update node embeddings
     2. Prediction head outputs sucrose content S_ST
     3. Physical flux module computes fluxes from predicted concentrations
-       using J_ax,ij = J^W_ij(ΔP, r_ij, T) · C_upstream
+    using J_ax,ij = J^W_ij(Δψ, ΔC, T, r_ij) · C_upstream, where J^W_ij is
+    parameterized as a learnable linear combination of Δψ and ΔC times a
+    symmetric nonlinear scale factor.
 
     Returns a dictionary with:
         - 'predictions': Node-wise sucrose content predictions [N, 1]
@@ -471,11 +505,11 @@ class PhloemOperatorGNN(nn.Module):
             h = h + h_new
 
         # Get predictions: S_ST (standardized sucrose content)
-        S_ST = self.head(h)  # [N, 1]
+        S_ST = self.head(h)
 
         # Compute C_ST from S_ST for flux calculation
-        vol_ST = node_feat_phys[:, 1:2]  # [N, 1] - volume is at index 1
-        C_ST = self._compute_concentration(S_ST, vol_ST, data)  # [N, 1]
+        vol_ST = node_feat_phys[:, 1:2]
+        C_ST = self._compute_concentration(S_ST, vol_ST, data)
 
         # Compute raw physical fluxes from predicted concentrations
         edge_fluxes_raw, divergences_raw = self.flux_module(

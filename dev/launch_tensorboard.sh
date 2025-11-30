@@ -4,7 +4,7 @@
 # Usage: ./launch_tensorboard.sh [port]
 
 PORT=${1:-6006}
-LOG_DIR="results/tensorboard_logs"
+LOG_DIR="logs/tensorboard"
 
 echo "🚀 Launching TensorBoard for CPlantBox GNN training visualization"
 echo "📁 Log directory: $LOG_DIR"

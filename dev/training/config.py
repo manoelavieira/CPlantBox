@@ -134,6 +134,42 @@ class PhysicsMetrics:
 
 
 @dataclass
+class PhysicsErrorMetrics:
+    """Container for physics error metrics (MSE, RMSE, Relative Error)."""
+    # J_ax errors
+    J_ax_mse: float = 0.0
+    J_ax_rmse: float = 0.0
+    J_ax_rel_error: float = 0.0
+
+    # divJ (divergence) errors
+    divJ_mse: float = 0.0
+    divJ_rmse: float = 0.0
+    divJ_rel_error: float = 0.0
+
+    # F_in errors
+    F_in_mse: float = 0.0
+    F_in_rmse: float = 0.0
+    F_in_rel_error: float = 0.0
+
+    # F_out errors
+    F_out_mse: float = 0.0
+    F_out_rmse: float = 0.0
+    F_out_rel_error: float = 0.0
+
+    # dS_dt_tot (total residual) errors
+    dS_dt_tot_mse: float = 0.0
+    dS_dt_tot_rmse: float = 0.0
+    dS_dt_tot_rel_error: float = 0.0
+
+    def __str__(self) -> str:
+        return (f"J_ax: MSE={self.J_ax_mse:.3e} RMSE={self.J_ax_rmse:.3e} RelErr={self.J_ax_rel_error:.3e} | "
+                f"divJ: MSE={self.divJ_mse:.3e} RMSE={self.divJ_rmse:.3e} RelErr={self.divJ_rel_error:.3e} | "
+                f"F_in: MSE={self.F_in_mse:.3e} RMSE={self.F_in_rmse:.3e} RelErr={self.F_in_rel_error:.3e} | "
+                f"F_out: MSE={self.F_out_mse:.3e} RMSE={self.F_out_rmse:.3e} RelErr={self.F_out_rel_error:.3e} | "
+                f"dS_dt_tot: MSE={self.dS_dt_tot_mse:.3e} RMSE={self.dS_dt_tot_rmse:.3e} RelErr={self.dS_dt_tot_rel_error:.3e}")
+
+
+@dataclass
 class TrainingMetrics:
     """Container for training metrics."""
     loss: float
@@ -147,6 +183,7 @@ class TrainingMetrics:
     bc_nodes: float = 0.0  # Average number of boundary nodes
     bc_pct: float = 0.0  # Average percentage of boundary nodes
     physics_details: Optional['PhysicsMetrics'] = None
+    physics_errors: Optional['PhysicsErrorMetrics'] = None
 
     def __str__(self) -> str:
         base_str = f"loss={self.loss:.3e} MSE={self.mse:.3e} RMSE={self.rmse:.3e} MAE={self.mae:.3e} RelErr={self.rel_error:.3e} physics={self.physics:.3e}"
@@ -203,6 +240,7 @@ class LossResult:
     phys_contrib_pct: float = 0.0
     sup_or_data_contrib_pct: float = 0.0
     physics_metrics: Optional[PhysicsMetrics] = None
+    physics_errors: Optional[PhysicsErrorMetrics] = None
 
 
 @dataclass
@@ -217,6 +255,7 @@ class EpochResult:
     ic: float
     bc: float
     physics_metrics: Optional[PhysicsMetrics] = None
+    physics_errors: Optional[PhysicsErrorMetrics] = None
     phys_weight: float = 0.0
     supervision_weight: float = 0.0
     bc_nodes: float = 0.0
@@ -240,6 +279,7 @@ class EpochResult:
             ic=totals["ic"] / n_batches,
             bc=totals["bc"] / n_batches,
             physics_metrics=totals["last_phys_metrics"],
+            physics_errors=totals.get("last_phys_errors", None),
             phys_weight=totals["phys_weight"] / n_batches,
             supervision_weight=totals["supervision_weight"] / n_batches,
             bc_nodes=totals["bc_nodes"] / n_batches,

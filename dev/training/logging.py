@@ -8,7 +8,7 @@ from pathlib import Path
 from datetime import datetime
 
 from model.config import ModelConfig
-from .config import TrainingConfig, TrainingMetrics, PhysicsMetrics
+from .config import TrainingConfig, TrainingMetrics, PhysicsMetrics, PhysicsErrorMetrics
 
 
 def create_tensorboard_writer(config: TrainingConfig) -> SummaryWriter:
@@ -175,6 +175,80 @@ def log_epoch_metrics(
 
     if val_metrics.physics_details is not None:
         log_physics_components(writer, epoch, 0, 1, val_metrics.physics_details, phase='val_epoch')
+
+    # Log physics error metrics if available
+    if train_metrics.physics_errors is not None:
+        log_physics_error_metrics(writer, epoch, train_metrics.physics_errors, phase='train')
+
+    if val_metrics.physics_errors is not None:
+        log_physics_error_metrics(writer, epoch, val_metrics.physics_errors, phase='val')
+
+
+def log_physics_error_metrics(
+    writer: SummaryWriter,
+    epoch: int,
+    physics_errors: 'PhysicsErrorMetrics',
+    phase: str = 'train'
+) -> None:
+    """Log physics error metrics (MSE, RMSE, Relative Error) to TensorBoard.
+
+    Args:
+        writer: TensorBoard writer
+        epoch: Current epoch number
+        physics_errors: Physics error metrics
+        phase: Phase name ('train', 'val', 'test')
+    """
+    prefix = f'physics_errors_{phase}'
+
+    # Log J_ax errors
+    writer.add_scalar(f'{prefix}/J_ax_mse', physics_errors.J_ax_mse, epoch)
+    writer.add_scalar(f'{prefix}/J_ax_rmse', physics_errors.J_ax_rmse, epoch)
+    writer.add_scalar(f'{prefix}/J_ax_rel_error', physics_errors.J_ax_rel_error, epoch)
+
+    # Log divJ (divergence) errors
+    writer.add_scalar(f'{prefix}/divJ_mse', physics_errors.divJ_mse, epoch)
+    writer.add_scalar(f'{prefix}/divJ_rmse', physics_errors.divJ_rmse, epoch)
+    writer.add_scalar(f'{prefix}/divJ_rel_error', physics_errors.divJ_rel_error, epoch)
+
+    # Log F_in errors
+    writer.add_scalar(f'{prefix}/F_in_mse', physics_errors.F_in_mse, epoch)
+    writer.add_scalar(f'{prefix}/F_in_rmse', physics_errors.F_in_rmse, epoch)
+    writer.add_scalar(f'{prefix}/F_in_rel_error', physics_errors.F_in_rel_error, epoch)
+
+    # Log F_out errors
+    writer.add_scalar(f'{prefix}/F_out_mse', physics_errors.F_out_mse, epoch)
+    writer.add_scalar(f'{prefix}/F_out_rmse', physics_errors.F_out_rmse, epoch)
+    writer.add_scalar(f'{prefix}/F_out_rel_error', physics_errors.F_out_rel_error, epoch)
+
+    # Log dS_dt_tot (total residual) errors
+    writer.add_scalar(f'{prefix}/dS_dt_tot_mse', physics_errors.dS_dt_tot_mse, epoch)
+    writer.add_scalar(f'{prefix}/dS_dt_tot_rmse', physics_errors.dS_dt_tot_rmse, epoch)
+    writer.add_scalar(f'{prefix}/dS_dt_tot_rel_error', physics_errors.dS_dt_tot_rel_error, epoch)
+
+    # Log grouped metrics for easier comparison
+    writer.add_scalars(f'{prefix}_mse_all', {
+        'J_ax': physics_errors.J_ax_mse,
+        'divJ': physics_errors.divJ_mse,
+        'F_in': physics_errors.F_in_mse,
+        'F_out': physics_errors.F_out_mse,
+        'dS_dt_tot': physics_errors.dS_dt_tot_mse
+    }, epoch)
+
+    writer.add_scalars(f'{prefix}_rmse_all', {
+        'J_ax': physics_errors.J_ax_rmse,
+        'divJ': physics_errors.divJ_rmse,
+        'F_in': physics_errors.F_in_rmse,
+        'F_out': physics_errors.F_out_rmse,
+        'dS_dt_tot': physics_errors.dS_dt_tot_rmse
+    }, epoch)
+
+    writer.add_scalars(f'{prefix}_rel_error_all', {
+        'J_ax': physics_errors.J_ax_rel_error,
+        'divJ': physics_errors.divJ_rel_error,
+        'F_in': physics_errors.F_in_rel_error,
+        'F_out': physics_errors.F_out_rel_error,
+        'dS_dt_tot': physics_errors.dS_dt_tot_rel_error
+    }, epoch)
 
 
 def log_gradient_norms(

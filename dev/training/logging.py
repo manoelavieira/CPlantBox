@@ -205,10 +205,11 @@ def log_physics_error_metrics(
     writer.add_scalar(f'{prefix}/J_ax_rmse', physics_errors.J_ax_rmse, epoch)
     writer.add_scalar(f'{prefix}/J_ax_rel_error', physics_errors.J_ax_rel_error, epoch)
 
-    # Log divJ (divergence) errors
+    # Log divJ (divergence) errors - mass conservation metrics
     writer.add_scalar(f'{prefix}/divJ_mse', physics_errors.divJ_mse, epoch)
     writer.add_scalar(f'{prefix}/divJ_rmse', physics_errors.divJ_rmse, epoch)
     writer.add_scalar(f'{prefix}/divJ_rel_error', physics_errors.divJ_rel_error, epoch)
+    writer.add_scalar(f'{prefix}/divJ_correlation', physics_errors.divJ_correlation, epoch)
 
     # Log F_in errors
     writer.add_scalar(f'{prefix}/F_in_mse', physics_errors.F_in_mse, epoch)
@@ -224,6 +225,18 @@ def log_physics_error_metrics(
     writer.add_scalar(f'{prefix}/dS_dt_tot_mse', physics_errors.dS_dt_tot_mse, epoch)
     writer.add_scalar(f'{prefix}/dS_dt_tot_rmse', physics_errors.dS_dt_tot_rmse, epoch)
     writer.add_scalar(f'{prefix}/dS_dt_tot_rel_error', physics_errors.dS_dt_tot_rel_error, epoch)
+
+    # Log J_ax antisymmetry error (both nnconv and operator models)
+    writer.add_scalar(f'{prefix}/J_ax_antisym_error', physics_errors.J_ax_antisym_error, epoch)
+
+    # Log flux direction consistency metrics
+    writer.add_scalar(f'{prefix}/J_ax_sign_accuracy', physics_errors.J_ax_sign_accuracy, epoch)
+    writer.add_scalar(f'{prefix}/J_ax_reversal_rate', physics_errors.J_ax_reversal_rate, epoch)
+    writer.add_scalar(f'{prefix}/delta_C_sign_accuracy', physics_errors.delta_C_sign_accuracy, epoch)
+
+    # Log physics score metrics (dimensionless residual-based consistency)
+    writer.add_scalar(f'{prefix}/physics_rel_error', physics_errors.physics_rel_error, epoch)
+    writer.add_scalar(f'{prefix}/physics_satisfaction_rate', physics_errors.physics_satisfaction_rate, epoch)
 
     # Log grouped metrics for easier comparison
     writer.add_scalars(f'{prefix}_mse_all', {

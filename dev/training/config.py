@@ -141,10 +141,11 @@ class PhysicsErrorMetrics:
     J_ax_rmse: float = 0.0
     J_ax_rel_error: float = 0.0
 
-    # divJ (divergence) errors
+    # divJ (divergence) errors - for mass conservation evaluation
     divJ_mse: float = 0.0
     divJ_rmse: float = 0.0
     divJ_rel_error: float = 0.0
+    divJ_correlation: float = 0.0  # Pearson correlation between predicted and true divergence
 
     # F_in errors
     F_in_mse: float = 0.0
@@ -161,12 +162,32 @@ class PhysicsErrorMetrics:
     dS_dt_tot_rmse: float = 0.0
     dS_dt_tot_rel_error: float = 0.0
 
+    # J_ax antisymmetry error (operator model only)
+    J_ax_antisym_error: float = 0.0
+
+    # Flux direction consistency metrics (physical credibility)
+    J_ax_sign_accuracy: float = 0.0      # Fraction of edges with correct flux direction
+    J_ax_reversal_rate: float = 0.0      # Fraction of edges with wrong direction (1 - sign_accuracy)
+    delta_C_sign_accuracy: float = 0.0   # Fraction of edges with correct ΔC sign (osmotic effects)
+
+    # Physics score metrics (dimensionless residual-based consistency)
+    physics_rel_error: float = 0.0       # Normalized residual: E[|r|] / (E[|F_in|] + E[|F_out|] + eps)
+    physics_satisfaction_rate: float = 0.0  # Fraction of nodes satisfying conservation within tolerance
+
     def __str__(self) -> str:
-        return (f"J_ax: MSE={self.J_ax_mse:.3e} RMSE={self.J_ax_rmse:.3e} RelErr={self.J_ax_rel_error:.3e} | "
-                f"divJ: MSE={self.divJ_mse:.3e} RMSE={self.divJ_rmse:.3e} RelErr={self.divJ_rel_error:.3e} | "
+        base = (f"J_ax: MSE={self.J_ax_mse:.3e} RMSE={self.J_ax_rmse:.3e} RelErr={self.J_ax_rel_error:.3e} SignAcc={self.J_ax_sign_accuracy:.3f} | "
+                f"divJ: MSE={self.divJ_mse:.3e} RMSE={self.divJ_rmse:.3e} RelErr={self.divJ_rel_error:.3e} Corr={self.divJ_correlation:.4f} | "
                 f"F_in: MSE={self.F_in_mse:.3e} RMSE={self.F_in_rmse:.3e} RelErr={self.F_in_rel_error:.3e} | "
                 f"F_out: MSE={self.F_out_mse:.3e} RMSE={self.F_out_rmse:.3e} RelErr={self.F_out_rel_error:.3e} | "
                 f"dS_dt_tot: MSE={self.dS_dt_tot_mse:.3e} RMSE={self.dS_dt_tot_rmse:.3e} RelErr={self.dS_dt_tot_rel_error:.3e}")
+        # Always include antisymmetry error and direction metrics
+        base += f" | J_ax_antisym={self.J_ax_antisym_error:.3e}"
+        if self.J_ax_reversal_rate > 0 or self.delta_C_sign_accuracy > 0:
+            base += f" | RevRate={self.J_ax_reversal_rate:.3f} deltaC_SignAcc={self.delta_C_sign_accuracy:.3f}"
+        # Add physics score metrics
+        if self.physics_rel_error > 0 or self.physics_satisfaction_rate > 0:
+            base += f" | PhysRelErr={self.physics_rel_error:.4f} PhysSatisf={self.physics_satisfaction_rate:.3f}"
+        return base
 
 
 @dataclass

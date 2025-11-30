@@ -9,6 +9,7 @@ from pathlib import Path
 
 from model.config import ModelConfig
 from model.gnn import PhloemNNConv
+from model.gnn_operator import PhloemOperatorGNN
 from .config import TrainingConfig, ModelSetup
 
 from torch.utils.data import DataLoader
@@ -43,21 +44,31 @@ def setup_environment(config: TrainingConfig) -> torch.device:
 
 def setup_model_and_scalers(
     train_loader: DataLoader,
-    device: torch.device
+    device: torch.device,
+    model_type: str = "nnconv"
 ) -> ModelSetup:
     """Setup model and scalers.
 
     Args:
-        config: Training configuration
         train_loader: Training data loader for fitting scalers
         device: Device to place model and scalers on
+        model_type: Type of model ('nnconv' or 'operator')
 
     Returns:
         ModelSetup: Configured model with fitted scalers
     """
-    # Create model
-    model_cfg = ModelConfig()
-    model = PhloemNNConv(model_cfg).to(device)
+    # Create model configuration
+    model_cfg = ModelConfig(model_type=model_type)
+
+    # Instantiate the appropriate model
+    if model_type == "nnconv":
+        model = PhloemNNConv(model_cfg).to(device)
+    elif model_type == "operator":
+        model = PhloemOperatorGNN(model_cfg).to(device)
+    else:
+        raise ValueError(f"Unknown model_type: {model_type}. Must be 'nnconv' or 'operator'")
+
+    print(f"Created model: {model.__class__.__name__} (type={model_type})")
 
     # Setup standardization on training data
     # Use standard scalers that normalize to mean=0, std=1

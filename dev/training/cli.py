@@ -15,6 +15,9 @@ def parse_arguments() -> TrainingConfig:
 
     parser.add_argument('--data-path', type=str,
                        help='Path to H5 file for simulated data')
+    parser.add_argument('--model-type', type=str, default='nnconv',
+                       choices=['nnconv', 'operator'],
+                       help='Model architecture: nnconv (baseline) or operator (flux-based)')
     parser.add_argument('--batch-size', type=int, default=8,
                        help='Batch size for training')
     parser.add_argument('--train-ratio', type=float, default=0.8,
@@ -33,13 +36,17 @@ def parse_arguments() -> TrainingConfig:
                        help='Random seed for reproducibility')
     parser.add_argument('--lambda-data', type=float, default=1.0,
                         help='Weight for data MSE loss term (only used with "combined" loss)')
+    parser.add_argument('--lambda-phys', type=float, default=1.0,
+                        help='Weight for residual loss term (only used with "combined" and "physics" loss)')
     parser.add_argument('--lambda-ic', type=float, default=1.0,
-                        help='Weight for initial condition loss term (only used with physics loss)')
+                        help='Weight for initial condition loss term (only used with "physics" loss)')
     parser.add_argument('--lambda-bc', type=float, default=1.0,
-                        help='Weight for boundary condition loss term (used with physics loss)')
+                        help='Weight for boundary condition loss term (used with "physics" loss)')
     parser.add_argument('--loss-type', type=str, default='physics',
                         choices=['data', 'physics', 'combined'],
                         help='Type of loss to use: data (MSE), physics, or combined (data + physics)')
+    parser.add_argument('--enable-physics-logging', action='store_true',
+                        help='Enable detailed physics debug logging to file')
     parser.add_argument('--tensorboard-log-dir', type=str, default='results/tensorboard_logs',
                         help='Directory for TensorBoard logs')
 
@@ -48,6 +55,7 @@ def parse_arguments() -> TrainingConfig:
     # Create training configuration
     config = TrainingConfig(
         data_path=args.data_path,
+        model_type=args.model_type,
         batch_size=args.batch_size,
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
@@ -57,10 +65,11 @@ def parse_arguments() -> TrainingConfig:
         epochs=args.epochs,
         seed=args.seed,
         lambda_data=args.lambda_data,
+        lambda_phys=args.lambda_phys,
         lambda_ic=args.lambda_ic,
         lambda_bc=args.lambda_bc,
         loss_type=LossType(args.loss_type),
-        tensorboard_log_dir=args.tensorboard_log_dir
+        enable_physics_logging=args.enable_physics_logging,
     )
 
     # Validate configuration

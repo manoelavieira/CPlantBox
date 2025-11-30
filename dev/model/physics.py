@@ -1,15 +1,558 @@
 from __future__ import annotations
 
 import torch
+from pathlib import Path
 
 from torch_scatter import scatter_mean
 from torch_geometric.data import Data
-
+from training.config import PhysicsMetrics, PhysicsErrorMetrics, TrainingConfig
 from . import utils
 from . import config
 
-DEBUG = True  # Debug flag: set to True to enable detailed physics loss debugging
-debug_path = "results/debug_physics_logs.txt"
+PENALTY_WEIGHT = 1000.0     # Weight for penalizing non-positive concentrations
+EPSILON = 1e-12             # Small constant to prevent division by zero
+
+# Module-level physics logging configuration
+# Default values are imported from TrainingConfig to ensure consistency
+_ENABLE_PHYSICS_LOGGING = TrainingConfig.enable_physics_logging
+_PHYSICS_LOG_PATH = str(Path(TrainingConfig.physics_save_dir) / TrainingConfig.physics_save_filename)
+
+
+def set_physics_logging(enable: bool, log_path: str = None):
+    """Configure physics logging settings.
+
+    Args:
+        enable: Whether to enable physics logging
+        log_path: Path to the physics log file (optional, defaults to logs/physics/debug.txt)
+    """
+    global _ENABLE_PHYSICS_LOGGING, _PHYSICS_LOG_PATH
+
+    _ENABLE_PHYSICS_LOGGING = enable
+    if log_path is not None:
+        _PHYSICS_LOG_PATH = log_path
+
+    # Print configuration for debugging
+    print(f"\n{'='*60}")
+    print(f"Physics Logging Configuration:")
+    print(f"  Enabled: {_ENABLE_PHYSICS_LOGGING}")
+    print(f"  Log Path: {_PHYSICS_LOG_PATH}")
+
+    # Create directory if logging is enabled
+    if _ENABLE_PHYSICS_LOGGING:
+        log_dir = Path(_PHYSICS_LOG_PATH).parent
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        # Clear existing log file
+        with open(_PHYSICS_LOG_PATH, 'w') as f:
+            f.write(f"{'='*60}")
+            f.write(f"Physics Debug Log - Session Started\n")
+            f.write(f"{'='*60}\n")
+        print(f"  Log file initialized: {_PHYSICS_LOG_PATH}")
+
+    print(f"{'='*60}\n")
+
+
+def _log_header(title: str, batch_vec: torch.Tensor = None):
+    """Create a standardized log header.
+
+    Args:
+        title: Title for this logging section
+        batch_vec: Batch vector for graph counts (optional)
+
+    Returns:
+        str: Formatted header string
+    """
+    num_graphs = torch.bincount(batch_vec).size(0) if batch_vec is not None else 1
+    msg = f"\n{'='*60}\n{title}\n{'='*60}\n"
+    msg += f"\nNumber of graphs: {num_graphs}\n"
+
+    if batch_vec is not None:
+        msg += f"Nodes per graph: {torch.bincount(batch_vec).detach().cpu().numpy()}\n"
+
+    return msg
+
+
+def _log_concentrations(C_ST_true: torch.Tensor, C_ST_pred: torch.Tensor, n_samples: int = 50):
+    """Log concentration values.
+
+    Args:
+        C_ST_true: True concentration values
+        C_ST_pred: Predicted concentration values
+        n_samples: Number of samples to display
+
+    Returns:
+        str: Formatted concentration log
+    """
+    msg = f"\n--- CONCENTRATION VALUES (mmol/cm³) ---\n"
+    msg += f"C_ST_true: {C_ST_true[:n_samples].detach().cpu().numpy()}\n"
+    msg += f"C_ST_pred: {C_ST_pred[:n_samples].detach().cpu().numpy()}\n"
+    return msg
+
+
+def _log_fluxes(J_ax_true: torch.Tensor, J_ax_pred: torch.Tensor, n_samples: int = 50):
+    """Log flux values.
+
+    Args:
+        J_ax_true: True flux values
+        J_ax_pred: Predicted flux values
+        n_samples: Number of samples to display
+
+    Returns:
+        str: Formatted flux log
+    """
+    msg = f"\n--- FLUX VALUES (mmol/h) ---\n"
+
+    if J_ax_true.numel() > 0:
+        msg += f"J_ax_true (mean): {J_ax_true.mean().detach().cpu().item():.6e}\n"
+        msg += f"J_ax_true (std): {J_ax_true.std().detach().cpu().item():.6e}\n"
+        if J_ax_true.size(0) >= n_samples:
+            msg += f"J_ax_true (first {n_samples}): {J_ax_true[:n_samples].detach().cpu().numpy()}\n"
+
+    if J_ax_pred.numel() > 0:
+        msg += f"J_ax_pred (mean): {J_ax_pred.mean().detach().cpu().item():.6e}\n"
+        msg += f"J_ax_pred (std): {J_ax_pred.std().detach().cpu().item():.6e}\n"
+        if J_ax_pred.size(0) >= n_samples:
+            msg += f"J_ax_pred (first {n_samples}): {J_ax_pred[:n_samples].detach().cpu().numpy()}\n"
+
+    return msg
+
+
+def _log_source_sink_terms(
+    F_in_true: torch.Tensor,
+    F_in_pred: torch.Tensor,
+    F_out_true: torch.Tensor,
+    F_out_pred: torch.Tensor,
+    n_samples: int = 50
+):
+    """Log source/sink terms (F_in and F_out).
+
+    Args:
+        F_in_true: True phloem loading values
+        F_in_pred: Predicted phloem loading values
+        F_out_true: True sucrose outflow values
+        F_out_pred: Predicted sucrose outflow values
+        n_samples: Number of samples to display
+
+    Returns:
+        str: Formatted source/sink log
+    """
+    msg = f"\n--- SOURCE/SINK TERMS (mmol/h) ---\n"
+    msg += f"F_in_true (mean): {F_in_true.mean().detach().cpu().item():.6e}\n"
+    msg += f"F_in_true (first {n_samples}): {F_in_true[:n_samples].detach().cpu().numpy()}\n"
+    msg += f"F_in_pred (mean): {F_in_pred.mean().detach().cpu().item():.6e}\n"
+    msg += f"F_in_pred (first {n_samples}): {F_in_pred[:n_samples].detach().cpu().numpy()}\n"
+    msg += f"\n"
+    msg += f"F_out_true (mean): {F_out_true.mean().detach().cpu().item():.6e}\n"
+    msg += f"F_out_true (first {n_samples}): {F_out_true[:n_samples].detach().cpu().numpy()}\n"
+    msg += f"F_out_pred (mean): {F_out_pred.mean().detach().cpu().item():.6e}\n"
+    msg += f"F_out_pred (first {n_samples}): {F_out_pred[:n_samples].detach().cpu().numpy()}\n"
+    return msg
+
+
+def _log_divergence(
+    dS_dt_from_flux_true: torch.Tensor,
+    dS_dt_from_flux_pred: torch.Tensor,
+    n_samples: int = 50
+):
+    """Log divergence values.
+
+    Args:
+        dS_dt_from_flux_true: True divergence values
+        dS_dt_from_flux_pred: Predicted divergence values
+        n_samples: Number of samples to display
+
+    Returns:
+        str: Formatted divergence log
+    """
+    msg = f"\n--- DIVERGENCE (mmol/h) ---\n"
+    msg += f"Divergence_true (mean): {dS_dt_from_flux_true.mean().detach().cpu().item():.6e}\n"
+    msg += f"Divergence_true (std): {dS_dt_from_flux_true.std().detach().cpu().item():.6e}\n"
+    msg += f"Divergence_true (first {n_samples}): {dS_dt_from_flux_true[:n_samples].detach().cpu().numpy()}\n"
+    msg += f"\n"
+    msg += f"Divergence_pred (mean): {dS_dt_from_flux_pred.mean().detach().cpu().item():.6e}\n"
+    msg += f"Divergence_pred (std): {dS_dt_from_flux_pred.std().detach().cpu().item():.6e}\n"
+    msg += f"Divergence_pred (first {n_samples}): {dS_dt_from_flux_pred[:n_samples].detach().cpu().numpy()}\n"
+    return msg
+
+
+def _log_total_residual(
+    dS_dt_tot_true: torch.Tensor,
+    dS_dt_tot_pred: torch.Tensor,
+    n_samples: int = 50
+):
+    """Log total physics residual.
+
+    Args:
+        dS_dt_tot_true: True total residual values
+        dS_dt_tot_pred: Predicted total residual values
+        n_samples: Number of samples to display
+
+    Returns:
+        str: Formatted total residual log
+    """
+    msg = f"\n--- TOTAL PHYSICS RESIDUAL (mmol/h) ---\n"
+    msg += f"dS_dt_tot_true (mean absolute): {dS_dt_tot_true.abs().mean().detach().cpu().item():.6e}\n"
+    msg += f"dS_dt_tot_true (first {n_samples}): {dS_dt_tot_true[:n_samples].detach().cpu().numpy()}\n"
+    msg += f"\n"
+    msg += f"dS_dt_tot_pred (mean absolute): {dS_dt_tot_pred.abs().mean().detach().cpu().item():.6e}\n"
+    msg += f"dS_dt_tot_pred (first {n_samples}): {dS_dt_tot_pred[:n_samples].detach().cpu().numpy()}\n"
+    return msg
+
+
+def _log_comparison_metrics(physics_errors: PhysicsErrorMetrics):
+    """Log comparison metrics from PhysicsErrorMetrics.
+
+    Args:
+        physics_errors: PhysicsErrorMetrics object containing MSE, RMSE, and Relative Error
+
+    Returns:
+        str: Formatted comparison metrics log
+    """
+    msg = f"\n--- PHYSICS ERROR METRICS ---\n"
+
+    # J_ax errors
+    msg += f"J_ax      | MSE: {physics_errors.J_ax_mse:.6e}, RMSE: {physics_errors.J_ax_rmse:.6e}, RelErr: {physics_errors.J_ax_rel_error:.6e}\n"
+
+    # Antisymmetry error (both nnconv and operator models)
+    if physics_errors.J_ax_antisym_error >= 0:
+        msg += f"J_ax      | Antisymmetry Error: {physics_errors.J_ax_antisym_error:.6e}\n"
+    # divJ (divergence) errors - mass conservation quality
+    msg += f"divJ      | MSE: {physics_errors.divJ_mse:.6e}, RMSE: {physics_errors.divJ_rmse:.6e}, RelErr: {physics_errors.divJ_rel_error:.6e}, Corr: {physics_errors.divJ_correlation:.6f}\n"
+
+    # F_in errors
+    msg += f"F_in      | MSE: {physics_errors.F_in_mse:.6e}, RMSE: {physics_errors.F_in_rmse:.6e}, RelErr: {physics_errors.F_in_rel_error:.6e}\n"
+
+    # F_out errors
+    msg += f"F_out     | MSE: {physics_errors.F_out_mse:.6e}, RMSE: {physics_errors.F_out_rmse:.6e}, RelErr: {physics_errors.F_out_rel_error:.6e}\n"
+
+    # dS_dt_tot (total residual) errors
+    msg += f"dS_dt_tot | MSE: {physics_errors.dS_dt_tot_mse:.6e}, RMSE: {physics_errors.dS_dt_tot_rmse:.6e}, RelErr: {physics_errors.dS_dt_tot_rel_error:.6e}\n"
+
+    # Flux direction consistency (physical credibility)
+    if physics_errors.J_ax_sign_accuracy > 0:
+        msg += f"\n--- FLUX DIRECTION CONSISTENCY ---\n"
+        msg += f"J_ax Sign Accuracy: {physics_errors.J_ax_sign_accuracy:.4f} ({physics_errors.J_ax_sign_accuracy*100:.2f}%)\n"
+        msg += f"J_ax Reversal Rate: {physics_errors.J_ax_reversal_rate:.4f} ({physics_errors.J_ax_reversal_rate*100:.2f}%)\n"
+        msg += f"ΔC Sign Accuracy:   {physics_errors.delta_C_sign_accuracy:.4f} ({physics_errors.delta_C_sign_accuracy*100:.2f}%)\n"
+
+    # Physics score (dimensionless residual-based consistency)
+    if physics_errors.physics_rel_error > 0 or physics_errors.physics_satisfaction_rate > 0:
+        msg += f"\n--- PHYSICS SCORE (CONSERVATION QUALITY) ---\n"
+        msg += f"Normalized Residual Error: {physics_errors.physics_rel_error:.6f}\n"
+        msg += f"  (Interpretation: < 0.05 tight, ~ 1 moderate violation, >> 1 poor conservation)\n"
+        msg += f"Physics Satisfaction Rate: {physics_errors.physics_satisfaction_rate:.4f} ({physics_errors.physics_satisfaction_rate*100:.2f}%)\n"
+        msg += f"  (Nodes within 1% tolerance of local source/sink scale)\n"
+
+    return msg
+
+
+def compute_flux_direction_metrics(
+    J_ax_true: torch.Tensor,
+    J_ax_pred: torch.Tensor,
+    C_ST_true: torch.Tensor,
+    C_ST_pred: torch.Tensor,
+    edge_index: torch.Tensor
+) -> tuple[float, float, float]:
+    """Compute flux direction consistency metrics.
+
+    Evaluates whether the model predicts the correct physical direction of transport,
+    which is crucial for physical credibility even if magnitudes are imperfect.
+
+    Args:
+        J_ax_true: True axial fluxes [E]
+        J_ax_pred: Predicted axial fluxes [E]
+        C_ST_true: True concentrations [N]
+        C_ST_pred: Predicted concentrations [N]
+        edge_index: Edge connectivity [2, E]
+
+    Returns:
+        tuple: (sign_accuracy, reversal_rate, delta_C_sign_accuracy)
+            - sign_accuracy: Fraction of edges where sign(J_pred) == sign(J_true)
+            - reversal_rate: Fraction of edges with wrong direction (1 - sign_accuracy)
+            - delta_C_sign_accuracy: Fraction of edges where sign(ΔC_pred) == sign(ΔC_true)
+    """
+    if J_ax_true.numel() == 0 or J_ax_pred.numel() == 0:
+        return 0.0, 0.0, 0.0
+
+    # (1) Flux sign accuracy: Does predicted flux have correct direction?
+    sign_true = torch.sign(J_ax_true)
+    sign_pred = torch.sign(J_ax_pred)
+
+    # Count edges where signs match
+    sign_matches = (sign_true == sign_pred).float()
+    sign_accuracy = sign_matches.mean().detach().cpu().item()
+    reversal_rate = 1.0 - sign_accuracy
+
+    # (2) Concentration gradient sign accuracy: Does model capture osmotic effects correctly?
+    if edge_index is not None and C_ST_true.numel() > 0 and C_ST_pred.numel() > 0:
+        src, dst = edge_index[0], edge_index[1]
+
+        # Compute concentration differences
+        delta_C_true = C_ST_true[src] - C_ST_true[dst]
+        delta_C_pred = C_ST_pred[src] - C_ST_pred[dst]
+
+        # Check if signs match
+        delta_C_sign_true = torch.sign(delta_C_true)
+        delta_C_sign_pred = torch.sign(delta_C_pred)
+
+        delta_C_sign_matches = (delta_C_sign_true == delta_C_sign_pred).float()
+        delta_C_sign_accuracy = delta_C_sign_matches.mean().detach().cpu().item()
+    else:
+        delta_C_sign_accuracy = 0.0
+
+    return sign_accuracy, reversal_rate, delta_C_sign_accuracy
+
+
+def compute_physics_score(
+    residual: torch.Tensor,
+    F_in: torch.Tensor,
+    F_out: torch.Tensor,
+    batch_vec: torch.Tensor = None,
+    tolerance_factor: float = 0.01
+) -> tuple[float, float]:
+    """Compute dimensionless physics consistency score from conservation residual.
+
+    This metric evaluates how well mass conservation is satisfied:
+        r_i = (divJ + F_in - F_out)_i ≈ 0
+
+    Two metrics are computed:
+    (1) Normalized Relative Error (PhysRelError):
+        For each graph g: PhysRelError_g = E_i[|r_i|] / (E_i[|F_in,i|] + E_i[|F_out,i|] + eps)
+        Then average over graphs.
+
+        Interpretation:
+        - PhysRelErr << 1 (e.g., 0.01-0.05): Physics is tight, good conservation
+        - PhysRelErr ~ 1: Physics moderately violated
+        - PhysRelErr >> 1: Physics badly violated
+
+    (2) Physics Satisfaction Rate:
+        Fraction of nodes satisfying: |r_i| <= tolerance * (|F_in_i| + |F_out_i| + eps)
+        where tolerance is typically 0.01 (1% tolerance).
+
+        Interpretation:
+        - Rate > 0.95: Excellent physics satisfaction
+        - Rate 0.8-0.95: Good physics satisfaction
+        - Rate < 0.8: Poor physics satisfaction
+
+    Args:
+        residual: Conservation residual r = divJ + F_in - F_out [N] (mmol/h)
+        F_in: Phloem loading [N] (mmol/h)
+        F_out: Sucrose outflow [N] (mmol/h)
+        batch_vec: Batch indices for multiple graphs [N] (optional)
+        tolerance_factor: Relative tolerance for satisfaction check (default: 0.01 = 1%)
+
+    Returns:
+        tuple: (physics_rel_error, physics_satisfaction_rate)
+            - physics_rel_error: Normalized residual magnitude
+            - physics_satisfaction_rate: Fraction of nodes within tolerance
+    """
+    EPSILON = 1e-10
+
+    # Compute absolute values
+    abs_residual = residual.abs()
+    abs_F_in = F_in.abs()
+    abs_F_out = F_out.abs()
+
+    # Local scale for each node: sum of source and sink magnitudes
+    local_scale = abs_F_in + abs_F_out + EPSILON
+
+    if batch_vec is not None:
+        from torch_scatter import scatter_mean
+
+        # (1) Normalized Relative Error per graph
+        # For each graph: mean(|r|) / (mean(|F_in|) + mean(|F_out|) + eps)
+        mean_abs_residual_per_graph = scatter_mean(abs_residual, batch_vec, dim=0)
+        mean_abs_F_in_per_graph = scatter_mean(abs_F_in, batch_vec, dim=0)
+        mean_abs_F_out_per_graph = scatter_mean(abs_F_out, batch_vec, dim=0)
+
+        scale_per_graph = mean_abs_F_in_per_graph + mean_abs_F_out_per_graph + EPSILON
+        rel_error_per_graph = mean_abs_residual_per_graph / scale_per_graph
+        physics_rel_error = rel_error_per_graph.mean().detach().cpu().item()
+
+        # (2) Satisfaction rate: fraction of nodes within tolerance
+        tolerance = tolerance_factor * local_scale
+        is_satisfied = (abs_residual <= tolerance).float()
+        satisfaction_per_graph = scatter_mean(is_satisfied, batch_vec, dim=0)
+        physics_satisfaction_rate = satisfaction_per_graph.mean().detach().cpu().item()
+    else:
+        # Single graph case
+        # (1) Normalized Relative Error
+        mean_abs_residual = abs_residual.mean()
+        mean_abs_F_in = abs_F_in.mean()
+        mean_abs_F_out = abs_F_out.mean()
+
+        scale = mean_abs_F_in + mean_abs_F_out + EPSILON
+        physics_rel_error = (mean_abs_residual / scale).detach().cpu().item()
+
+        # (2) Satisfaction rate
+        tolerance = tolerance_factor * local_scale
+        is_satisfied = (abs_residual <= tolerance).float()
+        physics_satisfaction_rate = is_satisfied.mean().detach().cpu().item()
+
+    return physics_rel_error, physics_satisfaction_rate
+
+
+def _compute_physics_error_metrics(
+    J_ax_true: torch.Tensor,
+    J_ax_pred: torch.Tensor,
+    dS_dt_from_flux_true: torch.Tensor,
+    dS_dt_from_flux_pred: torch.Tensor,
+    F_in_true: torch.Tensor,
+    F_in_pred: torch.Tensor,
+    F_out_true: torch.Tensor,
+    F_out_pred: torch.Tensor,
+    dS_dt_tot_true: torch.Tensor,
+    dS_dt_tot_pred: torch.Tensor,
+    J_ax_antisym_error: float = 0.0,
+    edge_index: torch.Tensor = None,
+    C_ST_true: torch.Tensor = None,
+    C_ST_pred: torch.Tensor = None,
+    batch_vec: torch.Tensor = None
+) -> PhysicsErrorMetrics:
+    """Compute MSE, RMSE, Relative Error, direction consistency, and physics score.
+
+    Args:
+        J_ax_true: True axial fluxes
+        J_ax_pred: Predicted axial fluxes
+        dS_dt_from_flux_true: True flux divergence
+        dS_dt_from_flux_pred: Predicted flux divergence
+        F_in_true: True phloem loading
+        F_in_pred: Predicted phloem loading
+        F_out_true: True sucrose outflow
+        F_out_pred: Predicted sucrose outflow
+        dS_dt_tot_true: True total residual
+        dS_dt_tot_pred: Predicted total residual
+        J_ax_antisym_error: Antisymmetry error for operator model (optional)
+        edge_index: Edge connectivity for antisymmetry and direction calculations (optional)
+        C_ST_true: True concentrations for ΔC sign accuracy (optional)
+        C_ST_pred: Predicted concentrations for ΔC sign accuracy (optional)
+        batch_vec: Batch indices for multiple graphs (optional)
+
+    Returns:
+        PhysicsErrorMetrics containing MSE, RMSE, relative errors, direction metrics, and physics scores
+    """
+    # Helper function to compute metrics for a quantity
+    def compute_metrics(true_vals, pred_vals):
+        mse = (true_vals - pred_vals).pow(2).mean().detach().cpu().item()
+        rmse = torch.sqrt((true_vals - pred_vals).pow(2).mean()).detach().cpu().item()
+        # Relative error: mean absolute error / mean absolute true value
+        mae = torch.abs(true_vals - pred_vals).mean().detach().cpu().item()
+        mean_true = torch.abs(true_vals).mean().detach().cpu().item()
+        rel_error = mae / (mean_true + EPSILON)
+        return mse, rmse, rel_error
+
+    # Helper function to compute Pearson correlation
+    def compute_correlation(true_vals, pred_vals):
+        """Compute Pearson correlation coefficient between true and predicted values."""
+        if true_vals.numel() == 0 or pred_vals.numel() == 0:
+            return 0.0
+
+        # Center the data
+        true_centered = true_vals - true_vals.mean()
+        pred_centered = pred_vals - pred_vals.mean()
+
+        # Compute correlation
+        numerator = (true_centered * pred_centered).sum()
+        denominator = torch.sqrt((true_centered ** 2).sum() * (pred_centered ** 2).sum())
+
+        if denominator < EPSILON:
+            return 0.0
+
+        correlation = (numerator / denominator).detach().cpu().item()
+        return correlation
+
+    # Compute J_ax metrics (only if we have edge-level data)
+    if J_ax_true.numel() > 0 and J_ax_pred.numel() > 0:
+        J_ax_mse, J_ax_rmse, J_ax_rel = compute_metrics(J_ax_true, J_ax_pred)
+    else:
+        J_ax_mse, J_ax_rmse, J_ax_rel = 0.0, 0.0, 0.0
+
+    # Compute divergence metrics (including correlation for mass conservation evaluation)
+    divJ_mse, divJ_rmse, divJ_rel = compute_metrics(dS_dt_from_flux_true, dS_dt_from_flux_pred)
+    divJ_correlation = compute_correlation(dS_dt_from_flux_true, dS_dt_from_flux_pred)
+
+    # Compute F_in metrics
+    F_in_mse, F_in_rmse, F_in_rel = compute_metrics(F_in_true, F_in_pred)
+
+    # Compute F_out metrics
+    F_out_mse, F_out_rmse, F_out_rel = compute_metrics(F_out_true, F_out_pred)
+
+    # Compute dS_dt_tot metrics
+    dS_dt_tot_mse, dS_dt_tot_rmse, dS_dt_tot_rel = compute_metrics(dS_dt_tot_true, dS_dt_tot_pred)
+
+    # Compute antisymmetry error if edge_index is provided and we have predicted fluxes
+    antisym_err = J_ax_antisym_error
+    if edge_index is not None and J_ax_pred.numel() > 0 and antisym_err == 0.0:
+        antisym_err = compute_flux_antisymmetry_error(J_ax_pred, edge_index)
+
+    # Compute flux direction consistency metrics if concentrations are provided
+    if C_ST_true is not None and C_ST_pred is not None and edge_index is not None and J_ax_true.numel() > 0:
+        sign_acc, rev_rate, delta_C_acc = compute_flux_direction_metrics(
+            J_ax_true, J_ax_pred, C_ST_true, C_ST_pred, edge_index
+        )
+    else:
+        sign_acc, rev_rate, delta_C_acc = 0.0, 0.0, 0.0
+
+    # Compute physics score from residual (dimensionless consistency metric)
+    phys_rel_err, phys_sat_rate = compute_physics_score(
+        dS_dt_tot_pred, F_in_pred, F_out_pred, batch_vec, tolerance_factor=0.01
+    )
+
+    return PhysicsErrorMetrics(
+        J_ax_mse=J_ax_mse,
+        J_ax_rmse=J_ax_rmse,
+        J_ax_rel_error=J_ax_rel,
+        divJ_mse=divJ_mse,
+        divJ_rmse=divJ_rmse,
+        divJ_rel_error=divJ_rel,
+        divJ_correlation=divJ_correlation,
+        F_in_mse=F_in_mse,
+        F_in_rmse=F_in_rmse,
+        F_in_rel_error=F_in_rel,
+        F_out_mse=F_out_mse,
+        F_out_rmse=F_out_rmse,
+        F_out_rel_error=F_out_rel,
+        dS_dt_tot_mse=dS_dt_tot_mse,
+        dS_dt_tot_rmse=dS_dt_tot_rmse,
+        dS_dt_tot_rel_error=dS_dt_tot_rel,
+        J_ax_antisym_error=antisym_err,
+        J_ax_sign_accuracy=sign_acc,
+        J_ax_reversal_rate=rev_rate,
+        delta_C_sign_accuracy=delta_C_acc,
+        physics_rel_error=phys_rel_err,
+        physics_satisfaction_rate=phys_sat_rate
+    )
+
+
+def _log_penalty_monitoring(
+    physics_loss: torch.Tensor,
+    negative_concentration_penalty: torch.Tensor,
+    penalty_weight: float,
+    total_loss: torch.Tensor,
+    model_type: str = "NNConv"
+):
+    """Log penalty monitoring information.
+
+    Args:
+        physics_loss: Physics residual loss component
+        negative_concentration_penalty: Penalty for negative concentrations
+        penalty_weight: Weight applied to penalty
+        total_loss: Combined total loss
+        model_type: Type of model (for labeling)
+
+    Returns:
+        str: Formatted penalty monitoring log
+    """
+    ratio = (penalty_weight * negative_concentration_penalty) / (physics_loss + 1e-10)
+    msg = f"\n--- PENALTY MONITORING ({model_type}) ---\n"
+    msg += f"Physics loss: {physics_loss.item():.6e}\n"
+    msg += f"Penalty (unweighted): {negative_concentration_penalty.item():.6e}\n"
+    msg += f"Penalty (weighted): {(penalty_weight * negative_concentration_penalty).item():.6e}\n"
+    msg += f"Penalty weight: {penalty_weight:.1f}\n"
+    msg += f"Total loss: {total_loss.item():.6e}\n"
+    msg += f"Penalty/Physics ratio: {ratio.item():.2f}\n"
+    msg += f"{'='*60}\n"
+    return msg
 
 
 def compute_axial_flux(
@@ -74,16 +617,17 @@ def compute_axial_flux(
     P_i = P_ST[src]
     P_j = P_ST[dst]
 
-    JW_ST = (P_j - P_i) / r_ST
+    JW_ST = (P_i - P_j) / r_ST
 
     # ---- Step 3: Select upstream concentration based on flow direction
-    # With dP = P_j - P_i, positive JW_ST means P_j > P_i, so flow is j -> i
+    # With dP = P_i - P_j, positive JW_ST means P_i > P_j, so flow is i -> j
     # For sugar flux, we want the upstream (source) concentration
+    # If flow is i -> j, then upstream is i (src), downstream is j (dst)
     # If flow is j -> i, then upstream is j (dst), downstream is i (src)
     C_i = C_ST[src]
     C_j = C_ST[dst]
 
-    C_upstream = torch.where(JW_ST > 0, C_j, C_i)
+    C_upstream = torch.where(JW_ST > 0, C_i, C_j)
     C_upstream = torch.clamp(C_upstream, min=0.0)
 
     # ---- Step 4: Sugar flux JS_ST = JW_ST * C_upstream
@@ -121,6 +665,68 @@ def compute_flux_divergence(J_ax: torch.Tensor, edge_index: torch.Tensor, N: int
     dS_dt_from_flux.scatter_add_(0, src, +J_ax)
 
     return dS_dt_from_flux
+
+
+def compute_flux_antisymmetry_error(
+    J_ax: torch.Tensor,
+    edge_index: torch.Tensor
+) -> float:
+    """Compute antisymmetry error for bidirectional flux predictions.
+
+    For each bidirectional edge pair (i,j) and (j,i), compute:
+    E_antisym = 1/E * sum(|J_ij + J_ji|)
+
+    Perfect antisymmetry (J_ji = -J_ij) yields E_antisym = 0.
+
+    Args:
+        J_ax: Edge fluxes [E]
+        edge_index: Edge connectivity [2, E]
+
+    Returns:
+        float: Mean antisymmetry error across all bidirectional pairs
+    """
+    if J_ax.size(0) == 0:
+        return 0.0
+
+    # Create edge pair lookup: (src, dst) -> edge_index
+    src, dst = edge_index[0], edge_index[1]
+    edge_dict = {}
+
+    for e_idx in range(edge_index.size(1)):
+        s = src[e_idx].item()
+        d = dst[e_idx].item()
+        edge_dict[(s, d)] = e_idx
+
+    # Find bidirectional pairs and compute |J_ij + J_ji|
+    antisym_errors = []
+    visited = set()
+
+    for e_idx in range(edge_index.size(1)):
+        s = src[e_idx].item()
+        d = dst[e_idx].item()
+
+        # Skip if we already processed this pair
+        if (s, d) in visited:
+            continue
+
+        # Look for reverse edge
+        if (d, s) in edge_dict:
+            e_rev = edge_dict[(d, s)]
+            J_ij = J_ax[e_idx].item()
+            J_ji = J_ax[e_rev].item()
+
+            # Antisymmetry error: |J_ij + J_ji|
+            antisym_errors.append(abs(J_ij + J_ji))
+
+            # Mark both directions as visited
+            visited.add((s, d))
+            visited.add((d, s))
+
+    if len(antisym_errors) == 0:
+        return 0.0
+
+    # Return mean antisymmetry error
+    return sum(antisym_errors) / len(antisym_errors)
 
 
 def compute_phloem_loading(
@@ -201,82 +807,40 @@ def compute_sucrose_outflow(
     return F_out_MM + Exud
 
 
-def compute_time_derivative(y_pred: torch.Tensor, data: Data) -> torch.Tensor:
-    """Compute time derivative of y_pred (sucrose content) from model predictions.
+def log_physics_values(y_pred: torch.Tensor, data: Data, model_output=None):
+    """Log true and predicted physics values for analysis (no loss computation).
+
+    This function computes and logs all physics quantities (C_ST, J_ax, divergence,
+    F_in, F_out) for both true and predicted values. It's useful for evaluating
+    physical consistency of models trained with DATA_ONLY loss.
 
     Args:
-        y_pred: Predicted sucrose content [N, 1] - must be connected to data.time_per_node
-        data: Graph data containing time features
+        y_pred: Predicted sucrose content [N, 1] or dict for operator model
+        data: Graph data containing topology, features, and targets
+        model_output: For operator models, dict containing edge_fluxes and divergences
 
     Returns:
-        torch.Tensor: Time derivative dy/dt per node [N]
-
-    Raises:
-        ValueError: If y_pred is not connected to data.time_per_node in computation graph
+        Tuple of (PhysicsMetrics, PhysicsErrorMetrics):
+            - Physics metrics for terminal display
+            - Physics error metrics (MSE, RMSE, Relative Error)
+            Returns (None, None) if logging disabled
     """
+    if not _ENABLE_PHYSICS_LOGGING:
+        return None, None
 
-    # We need dS/dt from the model with respect to a differentiable time feature
-    # This is ESSENTIAL for physics-informed learning: without it, the physics constraint is meaningless
-    if not hasattr(data, 'time_per_node') or data.time_per_node is None:
-        raise ValueError("data.time_per_node not found. Required for physics residual computation.")
-    if not data.time_per_node.requires_grad:
-        raise ValueError("data.time_per_node must have requires_grad=True for physics residual computation.")
+    # Handle operator model case
+    is_operator_model = isinstance(y_pred, dict)
+    if is_operator_model:
+        model_output = y_pred
+        y_pred = model_output['predictions']
+        edge_fluxes_pred = model_output['edge_fluxes']
+        divergence_pred = model_output['divergences']
 
-    # Compute gradient of predictions w.r.t. time_per_node [N,1]
-    try:
-        dy_dt = torch.autograd.grad(
-            y_pred.sum(),        # sum to get scalar for gradient computation
-            data.time_per_node,  # [N, 1] per-node time features
-            create_graph=True,   # needed for second backward pass
-            retain_graph=True,   # keep graph for subsequent loss computation
-            allow_unused=False   # ERROR if time_per_node is not connected
-        )[0]
-        dy_dt = dy_dt.squeeze()
-    except RuntimeError as e:
-        if "not have been used in the graph" in str(e):
-            raise ValueError(
-                "Physics residual computation failed: y_pred is not connected to time_per_node. "
-                "This indicates that the model predictions don't depend on time, which breaks the physics constraint. "
-                "Ensure that y_pred comes from a model forward pass that uses the same data object, "
-                "or that the model architecture properly utilizes the time feature."
-            ) from e
-        else:
-            raise
-
-    return dy_dt
-
-
-def physics_residual(y_pred: torch.Tensor, data: Data):
-    """Compute physics-informed residual term based on sucrose transport equations.
-
-    Implements the governing equation for content-based sucrose transport in sieve-tubes:
-    dS/dt = J_ax + (F_in - F_out)
-
-    where:
-    - J_ax is the axial sucrose flux
-    - F_in is the phloem loading rate
-    - F_out is the sucrose outflow
-
-    IMPORTANT: y_pred MUST come from a model forward pass using the same data object,
-    so that data.time_per_node is properly connected to y_pred in the computation graph.
-    Without this connection, dy/dt cannot be computed and the physics constraint is meaningless.
-
-    Args:
-        y_pred: Predicted sucrose content [N, 1] -> MUST be connected to data.time_per_node
-        data: Graph data containing topology, features, simulation parameters, and node fields
-
-    Returns:
-        tuple: (residual_loss, physics_components_dict) where physics_components_dict contains
-            {'J_ax', 'F_in', 'F_out', 'dy_dt', 'dS_dt_from_flux'}
-
-    Raises:
-        ValueError: If y_pred is not connected to data.time_per_node in the computation graph
-    """
     device = y_pred.device
     batch_vec = getattr(data, "batch", None)
     N = y_pred.size(0)
 
-    # Inverse-transform node/edge features and targets
+    # Inverse-transform features
     node_feat_standardized = data.node_feat.to(device)
     node_feat_original = data.feature_scaler.inv_transform(node_feat_standardized)
 
@@ -286,189 +850,331 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
     edge_index = data.edge_index.to(device)
     vol_ST = node_feat_original[:, 1]
 
-    S_ST = data.target_scaler.inv_transform(y_pred).squeeze(-1)
+    # Extract parameters and node fields
+    params = utils.extract_parameters(data, device, batch_vec, N if batch_vec is None else None)
+    node_fields = utils.extract_node_fields(data, device)
 
-    # Units in HDF5:
-    # - S_ST (Q_ST in HDF5) is in MILLIMOLES (mmol)
-    # - vol_ST is in cm^3
-    # - Kinetic parameters are calibrated for concentrations in mmol/cm^3
-    # Therefore: NO conversion needed: use C_ST = S_ST / vol_ST directly
-    C_ST = S_ST / vol_ST
+    # Compute predicted physics terms
+    S_ST_pred = data.target_scaler.inv_transform(y_pred).squeeze(-1)
+    C_ST_pred = S_ST_pred / vol_ST
 
-    # Use true values for testing coherence of physics calculations
-    if DEBUG:
-        y_true = data.y.clone().detach()
-        y_true.requires_grad_(True)
-        S_ST_true = data.target_scaler.inv_transform(y_true).squeeze(-1)
-        C_ST_true = S_ST_true / vol_ST
+    # Compute true physics terms
+    y_true = data.y.to(device)
+    S_ST_true = data.target_scaler.inv_transform(y_true).squeeze(-1)
+    C_ST_true = S_ST_true / vol_ST
 
-        # DEBUG: Print actual concentration values to check units
-        with open(debug_path, "a") as f:
-            msg = (
-                f"\n{'='*60}\n"
-                f"DEBUG OUTPUT\n"
-                f"{'='*60}\n"
-                f"\nNumber of graphs in batch: {torch.bincount(batch_vec).size(0)}\n"
-                f"Number of nodes per graph: {torch.bincount(batch_vec).detach().cpu().numpy()}\n"
-            )
+    if is_operator_model:
+        # Operator model: use predicted fluxes/divergences directly
+        J_ax_true = compute_axial_flux(
+            C_ST_true, node_feat_original, edge_feat_original,
+            edge_index, batch_vec, device, y_pred.dtype
+        )
+        dS_dt_from_flux_true = compute_flux_divergence(J_ax_true, edge_index, N, device)
+
+        F_in_pred = compute_phloem_loading(C_ST_pred, node_feat_original, params, node_fields, device)
+        F_out_pred = compute_sucrose_outflow(C_ST_pred, node_feat_original, params, node_fields, device)
+
+        F_in_true = compute_phloem_loading(C_ST_true, node_feat_original, params, node_fields, device)
+        F_out_true = compute_sucrose_outflow(C_ST_true, node_feat_original, params, node_fields, device)
+
+        dS_dt_tot_true = dS_dt_from_flux_true + F_in_true - F_out_true
+        dS_dt_tot_pred = divergence_pred + F_in_pred - F_out_pred
+
+        # Compute error metrics
+        physics_errors = _compute_physics_error_metrics(
+            J_ax_true, edge_fluxes_pred,
+            dS_dt_from_flux_true, divergence_pred,
+            F_in_true, F_in_pred,
+            F_out_true, F_out_pred,
+            dS_dt_tot_true, dS_dt_tot_pred,
+            edge_index=edge_index,
+            C_ST_true=C_ST_true,
+            C_ST_pred=C_ST_pred,
+            batch_vec=batch_vec
+        )
+
+        with open(_PHYSICS_LOG_PATH, "a") as f:
+            msg = _log_header("DEBUG OUTPUT - OPERATOR MODEL (DATA-ONLY MODE)", batch_vec)
+            msg += _log_concentrations(C_ST_true, C_ST_pred)
+            msg += _log_fluxes(J_ax_true, edge_fluxes_pred)
+            msg += _log_divergence(dS_dt_from_flux_true, divergence_pred)
+            msg += _log_source_sink_terms(F_in_true, F_in_pred, F_out_true, F_out_pred)
+            msg += _log_total_residual(dS_dt_tot_true, dS_dt_tot_pred)
+            msg += _log_comparison_metrics(physics_errors)
+            msg += f"{'='*60}\n"
             f.write(msg)
 
-            msg = (
-                f"\n--- CONCENTRATION VALUES (should be ~0.2-1.0 mol/L = 0.2-1.0 mmol/cm³) ---\n"
-                f"S_ST_true (mmol): {S_ST_true[:10].detach().cpu().numpy()}\n"
-                f"vol_ST (cm³): {vol_ST[:10].detach().cpu().numpy()}\n"
-                f"C_ST_true (mmol/cm³): {C_ST_true[:10].detach().cpu().numpy()}\n"
-                f"C_ST_pred (mmol/cm³): {C_ST[:10].detach().cpu().numpy()}\n"
+        # Compute averaged metrics for terminal display (operator model)
+        from torch_scatter import scatter_mean
+        if batch_vec is not None:
+            # Batched case: compute per-graph averages
+            F_in_per_graph = scatter_mean(F_in_pred.detach(), batch_vec, dim=0)
+            F_out_per_graph = scatter_mean(F_out_pred.detach(), batch_vec, dim=0)
+            divergence_per_graph = scatter_mean(divergence_pred.detach().abs(), batch_vec, dim=0)
+            dS_dt_per_graph = scatter_mean(dS_dt_tot_pred.detach().abs(), batch_vec, dim=0)
+
+            if edge_fluxes_pred.size(0) > 0:
+                edge_batch = batch_vec[edge_index[0].to(device)]
+                J_ax_per_graph = scatter_mean(edge_fluxes_pred.detach().abs(), edge_batch, dim=0)
+                J_ax_avg = J_ax_per_graph.mean().item()
+            else:
+                J_ax_avg = 0.0
+
+            return (
+                PhysicsMetrics(
+                    J_ax=J_ax_avg,
+                    F_in=F_in_per_graph.mean().item(),
+                    F_out=F_out_per_graph.mean().item(),
+                    dS_dt_from_flux=divergence_per_graph.mean().item(),
+                    dS_dt_tot=dS_dt_per_graph.mean().item()
+                ),
+                physics_errors
             )
+        else:
+            # Single graph case
+            return (
+                PhysicsMetrics(
+                    J_ax=edge_fluxes_pred.detach().abs().mean().item() if edge_fluxes_pred.size(0) > 0 else 0.0,
+                    F_in=F_in_pred.detach().mean().item(),
+                    F_out=F_out_pred.detach().mean().item(),
+                    dS_dt_from_flux=divergence_pred.detach().abs().mean().item(),
+                    dS_dt_tot=dS_dt_tot_pred.detach().abs().mean().item()
+                ),
+                physics_errors
+            )
+    else:
+        # NNConv model: reconstruct fluxes from predictions
+        J_ax_pred = compute_axial_flux(C_ST_pred, node_feat_original, edge_feat_original,
+                                       edge_index, batch_vec, device, y_pred.dtype)
+        dS_dt_from_flux_pred = compute_flux_divergence(J_ax_pred, edge_index, N, device)
+
+        F_in_pred = compute_phloem_loading(C_ST_pred, node_feat_original, params, node_fields, device)
+        F_out_pred = compute_sucrose_outflow(C_ST_pred, node_feat_original, params, node_fields, device)
+        dS_dt_tot_pred = dS_dt_from_flux_pred + F_in_pred - F_out_pred
+
+        # Compute true values
+        J_ax_true = compute_axial_flux(C_ST_true, node_feat_original, edge_feat_original,
+                                       edge_index, batch_vec, device, y_pred.dtype)
+        dS_dt_from_flux_true = compute_flux_divergence(J_ax_true, edge_index, N, device)
+
+        F_in_true = compute_phloem_loading(C_ST_true, node_feat_original, params, node_fields, device)
+        F_out_true = compute_sucrose_outflow(C_ST_true, node_feat_original, params, node_fields, device)
+        dS_dt_tot_true = dS_dt_from_flux_true + F_in_true - F_out_true
+
+        # Compute error metrics
+        physics_errors = _compute_physics_error_metrics(
+            J_ax_true, J_ax_pred,
+            dS_dt_from_flux_true, dS_dt_from_flux_pred,
+            F_in_true, F_in_pred,
+            F_out_true, F_out_pred,
+            dS_dt_tot_true, dS_dt_tot_pred,
+            edge_index=edge_index,
+            C_ST_true=C_ST_true,
+            C_ST_pred=C_ST_pred,
+            batch_vec=batch_vec
+        )
+
+        with open(_PHYSICS_LOG_PATH, "a") as f:
+            msg = _log_header("DEBUG OUTPUT - NNCONV MODEL (DATA-ONLY MODE)", batch_vec)
+            msg += _log_concentrations(C_ST_true, C_ST_pred)
+            msg += _log_fluxes(J_ax_true, J_ax_pred)
+            msg += _log_source_sink_terms(F_in_true, F_in_pred, F_out_true, F_out_pred)
+            msg += _log_divergence(dS_dt_from_flux_true, dS_dt_from_flux_pred)
+            msg += _log_total_residual(dS_dt_tot_true, dS_dt_tot_pred)
+            msg += _log_comparison_metrics(physics_errors)
+            msg += f"{'='*60}\n"
             f.write(msg)
+
+        # Compute averaged metrics for terminal display (NNConv model)
+        from torch_scatter import scatter_mean
+        if batch_vec is not None:
+            # Batched case: compute per-graph averages
+            F_in_per_graph = scatter_mean(F_in_pred.detach(), batch_vec, dim=0)
+            F_out_per_graph = scatter_mean(F_out_pred.detach(), batch_vec, dim=0)
+            dS_dt_from_flux_per_graph = scatter_mean(dS_dt_from_flux_pred.detach().abs(), batch_vec, dim=0)
+            dS_dt_per_graph = scatter_mean(dS_dt_tot_pred.detach().abs(), batch_vec, dim=0)
+
+            if J_ax_pred.size(0) > 0:
+                edge_batch = batch_vec[edge_index[0].to(device)]
+                J_ax_per_graph = scatter_mean(J_ax_pred.detach().abs(), edge_batch, dim=0)
+                J_ax_avg = J_ax_per_graph.mean().item()
+            else:
+                J_ax_avg = 0.0
+
+            return (
+                PhysicsMetrics(
+                    J_ax=J_ax_avg,
+                    F_in=F_in_per_graph.mean().item(),
+                    F_out=F_out_per_graph.mean().item(),
+                    dS_dt_from_flux=dS_dt_from_flux_per_graph.mean().item(),
+                    dS_dt_tot=dS_dt_per_graph.mean().item()
+                ),
+                physics_errors
+            )
+        else:
+            # Single graph case
+            return (
+                PhysicsMetrics(
+                    J_ax=J_ax_pred.detach().abs().mean().item() if J_ax_pred.size(0) > 0 else 0.0,
+                    F_in=F_in_pred.detach().mean().item(),
+                    F_out=F_out_pred.detach().mean().item(),
+                    dS_dt_from_flux=dS_dt_from_flux_pred.detach().abs().mean().item(),
+                    dS_dt_tot=dS_dt_tot_pred.detach().abs().mean().item()
+                ),
+                physics_errors
+            )
+
+
+def physics_residual(y_pred: torch.Tensor, data: Data):
+    """Compute physics-informed residual term based on sucrose transport equations.
+
+    Implements the governing equation for content-based sucrose transport in sieve-tubes:
+    dS/dt = divJ + (F_in - F_out) ≈ 0
+
+    where:
+    - divJ is the divergence of axial sucrose flux
+    - F_in is the phloem loading rate
+    - F_out is the sucrose outflow
+
+    Physics loss is computed by minimizing dS_dt_tot_pred to enforce
+    the conservation law on predicted concentrations.
+
+    Args:
+        y_pred: Predicted sucrose content [N, 1]
+        data: Graph data containing topology, features, simulation parameters, and node fields
+
+    Returns:
+        tuple: (residual_loss, physics_components_dict, physics_error_metrics) where:
+            - physics_components_dict contains {'J_ax', 'F_in', 'F_out', 'dS_dt_from_flux', 'dS_dt_tot'}
+            - physics_error_metrics is PhysicsErrorMetrics (or None if logging disabled)
+    """
+    device = y_pred.device
+    batch_vec = getattr(data, "batch", None)
+    N = y_pred.size(0)
+
+    # Inverse-transform node/edge features
+    node_feat_standardized = data.node_feat.to(device)
+    node_feat_original = data.feature_scaler.inv_transform(node_feat_standardized)
+
+    edge_feat_standardized = data.edge_feat.to(device)
+    edge_feat_original = data.edge_scaler.inv_transform(edge_feat_standardized)
+
+    edge_index = data.edge_index.to(device)
+    vol_ST = node_feat_original[:, 1]
 
     # Extract parameters and node fields
     params = utils.extract_parameters(data, device, batch_vec, N if batch_vec is None else None)
     node_fields = utils.extract_node_fields(data, device)
 
-    # Compute axial flux and its divergence (pass C_ST directly)
-    J_ax = compute_axial_flux(C_ST, node_feat_original, edge_feat_original, edge_index, batch_vec, device, y_pred.dtype)
-    dS_dt_from_flux = compute_flux_divergence(J_ax, edge_index, N, device)
+    # ============================
+    # Compute physics terms from PREDICTIONS
+    # ============================
+    S_ST_pred = data.target_scaler.inv_transform(y_pred).squeeze(-1)
+    C_ST_pred = S_ST_pred / vol_ST
 
-    # Compute phloem loading and outflow (pass C_ST directly)
-    F_in = compute_phloem_loading(C_ST, node_feat_original, params, node_fields, device)
-    F_out = compute_sucrose_outflow(C_ST, node_feat_original, params, node_fields, device)
+    # Compute axial flux and its divergence from predictions
+    J_ax_pred = compute_axial_flux(C_ST_pred, node_feat_original, edge_feat_original,
+                                   edge_index, batch_vec, device, y_pred.dtype)
+    dS_dt_from_flux_pred = compute_flux_divergence(J_ax_pred, edge_index, N, device)
 
-    # NO UNIT CONVERSION NEEDED:
-    # - Time is now in HOURS (converted from days in dataset_loader.py)
-    # - All flux parameters (Q_Rmmax, Q_Grmax, Q_Exudmax, conductivities) are in mmol/h
-    # - Therefore dS/dt is naturally in mmol/h, matching all flux terms
-    # - This matches the C++ simulation units exactly
-    # Compute time derivative from model
-    dy_dt = compute_time_derivative(y_pred, data)
+    # Compute phloem loading and outflow from predictions
+    F_in_pred = compute_phloem_loading(C_ST_pred, node_feat_original, params, node_fields, device)
+    F_out_pred = compute_sucrose_outflow(C_ST_pred, node_feat_original, params, node_fields, device)
 
-    # Compute physics-based derivative in physical (original) space
-    dS_dt_from_physics_original = dS_dt_from_flux + F_in - F_out
+    # Total physics-based derivative from predictions (in physical units: mmol/h)
+    dS_dt_tot_pred = dS_dt_from_flux_pred + F_in_pred - F_out_pred
 
-    # CRITICAL FIX: Work entirely in standardized space to avoid scale mismatch
-    #
-    # The issue: Converting dy_dt from standardized to physical space using (σ_S / σ_t)
-    # creates a huge scale mismatch because:
-    #   - σ_S ≈ 2.3e-5 mol (targets are very small)
-    #   - σ_t ≈ 0.239 days (time has small variation)
-    #   - Conversion factor ≈ 9.7e-5 (extremely small!)
-    #   - This makes dy_dt_physical ~6 orders of magnitude smaller than physics terms
-    #
-    # The solution: Instead of converting dy_dt to physical space, convert physics terms
-    # to standardized space. This keeps all quantities in the same scale.
-    #
-    # Standardize the physics-based derivative:
-    #   dS_std/dt_std = (dS_phys/dt_phys) × (σ_t / σ_S)
-    #
-    # This is the inverse of the previous conversion, and now both sides are O(1)
+    # Always compute physics terms from true values for error metrics
+    y_true = data.y.to(device)
+    S_ST_true = data.target_scaler.inv_transform(y_true).squeeze(-1)
+    C_ST_true = S_ST_true / vol_ST
 
-    sigma_target = data.target_scaler.std.view(-1)[0].to(device)  # σ_S
-    sigma_time = data.time_scaler.std.view(-1)[0].to(device)      # σ_t
+    J_ax_true = compute_axial_flux(C_ST_true, node_feat_original, edge_feat_original,
+                                   edge_index, batch_vec, device, y_pred.dtype)
+    dS_dt_from_flux_true = compute_flux_divergence(J_ax_true, edge_index, N, device)
 
-    # Convert physics derivative to standardized space
-    dS_dt_from_physics = dS_dt_from_physics_original * (sigma_time / sigma_target)
+    F_in_true = compute_phloem_loading(C_ST_true, node_feat_original, params, node_fields, device)
+    F_out_true = compute_sucrose_outflow(C_ST_true, node_feat_original, params, node_fields, device)
+    dS_dt_tot_true = dS_dt_from_flux_true + F_in_true - F_out_true
 
-    # For logging: compute physical dy_dt (even though we don't use it for loss)
-    dy_dt_physical = dy_dt * (sigma_target / sigma_time)
+    # Compute physics error metrics (include edge_index for antisymmetry calculation)
+    physics_errors = _compute_physics_error_metrics(
+        J_ax_true, J_ax_pred,
+        dS_dt_from_flux_true, dS_dt_from_flux_pred,
+        F_in_true, F_in_pred,
+        F_out_true, F_out_pred,
+        dS_dt_tot_true, dS_dt_tot_pred,
+        edge_index=edge_index,
+        C_ST_true=C_ST_true,
+        C_ST_pred=C_ST_pred,
+        batch_vec=batch_vec
+    )
 
-    if DEBUG:
-        with open(debug_path, "a") as f:
-            J_ax_true = compute_axial_flux(C_ST_true, node_feat_original, edge_feat_original, edge_index, batch_vec, device, y_pred.dtype)
-            dS_dt_from_flux_true = compute_flux_divergence(J_ax_true, edge_index, N, device)
-
-            F_in_true = compute_phloem_loading(C_ST_true, node_feat_original, params, node_fields, device)
-            F_out_true = compute_sucrose_outflow(C_ST_true, node_feat_original, params, node_fields, device)
-
-            dS_dt_from_physics_true = dS_dt_from_flux_true + F_in_true - F_out_true
-
-            # Show predictions in their native units (content)
-            # Show both standardized and physical values
-            msg = (
-                f"\n--- STANDARDIZED VALUES ---\n"
-                f"y_true (standardized):\n{y_true[batch_vec == 0].squeeze(-1).detach().cpu().numpy()}\n"
-                f"y_pred (standardized):\n{y_pred[batch_vec == 0].squeeze(-1).detach().cpu().numpy()}\n"
-            )
+    if _ENABLE_PHYSICS_LOGGING:
+        with open(_PHYSICS_LOG_PATH, "a") as f:
+            msg = _log_header("DEBUG OUTPUT - PHYSICS RESIDUAL (MINIMIZE TO ZERO)", batch_vec)
+            msg += _log_concentrations(C_ST_true, C_ST_pred)
+            msg += _log_fluxes(J_ax_true, J_ax_pred)
+            msg += _log_source_sink_terms(F_in_true, F_in_pred, F_out_true, F_out_pred)
+            msg += _log_divergence(dS_dt_from_flux_true, dS_dt_from_flux_pred)
+            msg += _log_total_residual(dS_dt_tot_true, dS_dt_tot_pred)
+            msg += _log_comparison_metrics(physics_errors)
+            msg += f"\n--- PHYSICS RESIDUAL (should approach zero) ---\n"
+            msg += f"dS_dt_tot_pred (first 10 nodes): {dS_dt_tot_pred[:10].detach().cpu().numpy()}\n"
+            msg += f"Mean absolute residual: {dS_dt_tot_pred.abs().mean().detach().cpu().item():.6e}\n"
             f.write(msg)
 
-            # Compute physical values using target_scaler
-            S_ST_true_physical = data.target_scaler.inv_transform(y_true).squeeze(-1)[batch_vec == 0]
-            S_ST_pred_physical = data.target_scaler.inv_transform(y_pred).squeeze(-1)[batch_vec == 0]
+    # ============================
+    # Compute physics residual: minimize dS_dt_tot_pred to zero
+    # ============================
+    # Physics loss: enforce conservation law by minimizing the residual
+    # dS/dt = divJ + F_in - F_out ≈ 0
+    # residual = divJ_pred + F_in_pred - F_out_pred
+    residual = dS_dt_tot_pred
 
-            msg = (
-                f"\n--- PHYSICAL VALUES ---\n"
-                f"S_ST_true (mol):\n{S_ST_true_physical.detach().cpu().numpy()}\n"
-                f"S_ST_pred (mol):\n{S_ST_pred_physical.detach().cpu().numpy()}\n"
-
-                # NOTE: All flux values are in mmol/h (C++ units)
-                # Time is now in HOURS (converted from days in dataset_loader.py)
-                # Therefore dS/dt is also in mmol/h, matching C++ simulation
-                f"\n--- FLUX VALUES (mmol/h, for direct comparison with C++ output) ---\n"
-                f"F_in_true (mmol/h):\n{F_in_true[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
-                f"F_in_pred (mmol/h):\n{F_in[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
-
-                f"\nF_out_true (mmol/h):\n{F_out_true[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
-                f"F_out_pred (mmol/h):\n{F_out[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
-
-                f"\ndS_dt_from_flux_true (mmol/h):\n{dS_dt_from_flux_true[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
-                f"dS_dt_from_flux_pred (mmol/h):\n{dS_dt_from_flux[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
-
-                f"\ndS_dt_from_physics_true (mmol/h):\n{dS_dt_from_physics_true[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
-                f"dS_dt_from_physics_pred (mmol/h):\n{dS_dt_from_physics_original[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
-
-                # Show model's time derivative in both standardized and physical space
-                # Note: Cannot compute dy_dt for y_true since it's not connected to time_per_node in computation graph
-                f"\ndS_dt_pred (standardized) [from model]:\n{dy_dt[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
-                f"dS_dt_from_physics (standardized) [converted from physical]:\n{dS_dt_from_physics[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
-                # f"\ndS_dt_pred (mmol/h) [from model, physical space]:\n{dy_dt_physical[batch_vec == 0].detach().cpu().numpy()[:10]}\n"
-                f"\nConversion factor (sigma_S/sigma_t): {(sigma_target / sigma_time).item():.6e}\n"
-                f"Inverse conversion factor (sigma_t/sigma_S): {(sigma_time / sigma_target).item():.6e}\n"
-
-                f"{'='*60}\n"
-            )
-            f.write(msg)
+    # Add penalty for negative concentrations (after denormalization)
+    # This encourages the model to respect the physical constraint C_ST >= 0
+    negative_concentration_penalty = torch.relu(-C_ST_pred).pow(2).mean()
 
     # Use adaptive normalization based on current residual scale
-    #
-    # Compute characteristic scale from this batch (robust to outliers using median-like measure)
-    # Use 90th percentile of absolute differences as scale (more robust than max)
-    #
-    # Without this approach, the residual's behavior would be:
-    # With small values, gradients vanish -> physics loss is ignored
-    # With huge values (when model outputs noisy dS/dt) -> physics dominates and collapses the model
-    #
-    # CRITICAL FIX: Now comparing dy_dt with dS_dt_from_physics (both in standardized space)
-    # This avoids the huge scale mismatch from the (σ_S / σ_t) conversion factor
-    diff = dy_dt.squeeze() - dS_dt_from_physics
-
-    with torch.no_grad():
-        scale = diff.abs().quantile(0.9).clamp(min=0.1, max=10000.0)
-
-    # Normalize residual by adaptive scale
-    residual_node = (diff / scale).pow(2)
+    # Use 90th percentile of absolute values as scale (robust to outliers)
+    # with torch.no_grad():
+    #     scale = residual.abs().quantile(0.9).clamp(min=0.1, max=10000.0)
+    scale = 1.0
+    residual_node = (residual / scale).pow(2)
 
     # Average per graph first, then across graphs
     if batch_vec is not None:
         residual_per_graph = scatter_mean(residual_node, batch_vec, dim=0)
-        loss = residual_per_graph.mean()
+        physics_loss = residual_per_graph.mean()
     else:
-        loss = residual_node.mean()
+        physics_loss = residual_node.mean()
 
-    # Prepare detailed physics components for logging
-    # Compute per-graph averages first, then average across graphs (consistent with loss computation)
+    # Combine physics residual with non-negativity penalty
+    # Weight the penalty strongly to enforce physical constraint
+    loss = physics_loss + PENALTY_WEIGHT * negative_concentration_penalty
+
+    # Log penalty monitoring information
+    if _ENABLE_PHYSICS_LOGGING:
+        with open(_PHYSICS_LOG_PATH, "a") as f:
+            msg = _log_penalty_monitoring(
+                physics_loss, negative_concentration_penalty,
+                PENALTY_WEIGHT, loss, "NNConv"
+            )
+            f.write(msg)
+
+    # Prepare detailed physics components for logging (use predicted values)
     if batch_vec is not None:
         # Batched case: compute per-graph averages using scatter_mean
-        # Node-level quantities: average per graph, then across graphs
-        F_in_per_graph = scatter_mean(F_in.detach(), batch_vec, dim=0)
-        F_out_per_graph = scatter_mean(F_out.detach(), batch_vec, dim=0)
-        dS_dt_per_graph = scatter_mean(dy_dt.detach().abs(), batch_vec, dim=0)
-        dS_dt_from_flux_per_graph = scatter_mean(dS_dt_from_flux.detach().abs(), batch_vec, dim=0)
-        dS_dt_from_physics_per_graph = scatter_mean(dS_dt_from_physics.detach().abs(), batch_vec, dim=0)
+        F_in_per_graph = scatter_mean(F_in_pred.detach(), batch_vec, dim=0)
+        F_out_per_graph = scatter_mean(F_out_pred.detach(), batch_vec, dim=0)
+        dS_dt_from_flux_pred_per_graph = scatter_mean(dS_dt_from_flux_pred.detach().abs(), batch_vec, dim=0)
+        dS_dt_tot_pred_per_graph = scatter_mean(dS_dt_tot_pred.detach().abs(), batch_vec, dim=0)
 
         # Edge-level quantities: need edge-to-graph mapping
-        if J_ax.size(0) > 0:
-            # Create edge batch vector by mapping edges to their source node's graph
+        if J_ax_pred.size(0) > 0:
             edge_batch = batch_vec[data.edge_index[0].to(device)]
-            J_ax_per_graph = scatter_mean(J_ax.detach().abs(), edge_batch, dim=0)
+            J_ax_per_graph = scatter_mean(J_ax_pred.detach().abs(), edge_batch, dim=0)
             J_ax_avg = J_ax_per_graph.mean()
         else:
             J_ax_avg = torch.tensor(0.0, device=device)
@@ -477,19 +1183,185 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
             'J_ax': J_ax_avg,
             'F_in': F_in_per_graph.mean(),
             'F_out': F_out_per_graph.mean(),
-            'dS_dt': dS_dt_per_graph.mean(),
-            'dS_dt_from_flux': dS_dt_from_flux_per_graph.mean(),
-            'dS_dt_from_physics': dS_dt_from_physics_per_graph.mean()
+            'dS_dt_from_flux': dS_dt_from_flux_pred_per_graph.mean(),
+            'dS_dt_tot': dS_dt_tot_pred_per_graph.mean()
         }
     else:
         # Single graph case: simple mean across nodes/edges
         loss_dict = {
-            'J_ax': J_ax.detach().abs().mean() if J_ax.size(0) > 0 else torch.tensor(0.0, device=device),
-            'F_in': F_in.detach().mean(),
-            'F_out': F_out.detach().mean(),
-            'dS_dt': dy_dt.detach().abs().mean(),
-            'dS_dt_from_flux': dS_dt_from_flux.detach().abs().mean(),
-            'dS_dt_from_physics': dS_dt_from_physics.detach().abs().mean()
+            'J_ax': J_ax_pred.detach().abs().mean() if J_ax_pred.size(0) > 0 else torch.tensor(0.0, device=device),
+            'F_in': F_in_pred.detach().mean(),
+            'F_out': F_out_pred.detach().mean(),
+            'dS_dt_from_flux': dS_dt_from_flux_pred.detach().abs().mean(),
+            'dS_dt_tot': dS_dt_tot_pred.detach().abs().mean()
         }
 
-    return loss, loss_dict
+    return loss, loss_dict, physics_errors
+
+
+def physics_residual_operator(
+    model_output: dict,
+    data: Data
+) -> tuple[torch.Tensor, dict]:
+    """Compute physics residual for operator-based GNN.
+
+    Unlike physics_residual which reconstructs fluxes from predicted concentrations,
+    this function uses the edge fluxes and divergences directly predicted by the
+    operator model.
+
+    The conservation law is:
+        dS/dt = div(J) + F_in - F_out ≈ 0
+
+    where:
+        - div(J) is already computed by the model (from edge fluxes)
+        - F_in and F_out are computed from predicted concentrations
+
+    Args:
+        model_output: Dict containing:
+            - 'predictions': [N, 1] sucrose content predictions (standardized)
+            - 'edge_fluxes': [E] predicted edge fluxes
+            - 'divergences': [N] divergence values
+        data: Graph data containing features and parameters
+
+    Returns:
+        tuple: (residual_loss, physics_components_dict, physics_error_metrics)
+    """
+    device = model_output['predictions'].device
+    y_pred = model_output['predictions']
+    edge_fluxes_pred = model_output['edge_fluxes']
+    divergence_pred = model_output['divergences']
+
+    batch_vec = getattr(data, "batch", None)
+    N = y_pred.size(0)
+
+    # Inverse-transform features to original space
+    node_feat_standardized = data.node_feat.to(device)
+    node_feat_original = data.feature_scaler.inv_transform(node_feat_standardized)
+
+    edge_index = data.edge_index.to(device)
+    vol_ST = node_feat_original[:, 1]
+
+    # Extract parameters and node fields
+    params = utils.extract_parameters(data, device, batch_vec, N if batch_vec is None else None)
+    node_fields = utils.extract_node_fields(data, device)
+
+    # Convert predicted content to concentration
+    S_ST_pred = data.target_scaler.inv_transform(y_pred).squeeze(-1)
+    C_ST_pred = S_ST_pred / vol_ST
+
+    # Compute source/sink terms from predicted concentrations
+    F_in_pred = compute_phloem_loading(C_ST_pred, node_feat_original, params, node_fields, device)
+    F_out_pred = compute_sucrose_outflow(C_ST_pred, node_feat_original, params, node_fields, device)
+
+    # Physics residual using model's divergence directly
+    # dS/dt = divergence + F_in - F_out ≈ 0
+    dS_dt_tot_pred = divergence_pred + F_in_pred - F_out_pred
+
+    # Always compute ground truth physics terms for error metrics
+    y_true = data.y.to(device)
+    S_ST_true = data.target_scaler.inv_transform(y_true).squeeze(-1)
+    C_ST_true = S_ST_true / vol_ST
+
+    # Reconstruct true fluxes for comparison
+    edge_feat_standardized = data.edge_feat.to(device)
+    edge_feat_original = data.edge_scaler.inv_transform(edge_feat_standardized)
+
+    J_ax_true = compute_axial_flux(
+        C_ST_true, node_feat_original, edge_feat_original,
+        edge_index, batch_vec, device, y_pred.dtype
+    )
+    dS_dt_from_flux_true = compute_flux_divergence(J_ax_true, edge_index, N, device)
+
+    F_in_true = compute_phloem_loading(C_ST_true, node_feat_original, params, node_fields, device)
+    F_out_true = compute_sucrose_outflow(C_ST_true, node_feat_original, params, node_fields, device)
+    dS_dt_tot_true = dS_dt_from_flux_true + F_in_true - F_out_true
+
+    # Compute physics error metrics (include edge_index for antisymmetry calculation)
+    physics_errors = _compute_physics_error_metrics(
+        J_ax_true, edge_fluxes_pred,
+        dS_dt_from_flux_true, divergence_pred,
+        F_in_true, F_in_pred,
+        F_out_true, F_out_pred,
+        dS_dt_tot_true, dS_dt_tot_pred,
+        edge_index=edge_index,
+        C_ST_true=C_ST_true,
+        C_ST_pred=C_ST_pred,
+        batch_vec=batch_vec
+    )
+
+    if _ENABLE_PHYSICS_LOGGING:
+        with open(_PHYSICS_LOG_PATH, "a") as f:
+            msg = _log_header("DEBUG OUTPUT - OPERATOR MODEL PHYSICS RESIDUAL", batch_vec)
+            msg += _log_concentrations(C_ST_true, C_ST_pred)
+            msg += _log_fluxes(J_ax_true, edge_fluxes_pred)
+            msg += _log_divergence(dS_dt_from_flux_true, divergence_pred)
+            msg += _log_source_sink_terms(F_in_true, F_in_pred, F_out_true, F_out_pred)
+            msg += _log_total_residual(dS_dt_tot_true, dS_dt_tot_pred)
+            msg += _log_comparison_metrics(physics_errors)
+            f.write(msg)
+
+    # Compute loss
+    residual = dS_dt_tot_pred
+
+    # Add penalty for negative concentrations (after denormalization)
+    # This encourages the model to respect the physical constraint C_ST >= 0
+    negative_concentration_penalty = torch.relu(-C_ST_pred).pow(2).mean()
+
+    # Adaptive normalization
+    # with torch.no_grad():
+    #     scale = residual.abs().quantile(0.9).clamp(min=0.1, max=10000.0)
+    scale = 1.0
+    residual_node = (residual / scale).pow(2)
+
+    # Average per graph first, then across graphs
+    if batch_vec is not None:
+        residual_per_graph = scatter_mean(residual_node, batch_vec, dim=0)
+        physics_loss = residual_per_graph.mean()
+    else:
+        physics_loss = residual_node.mean()
+
+    # Combine physics residual with non-negativity penalty
+    # Weight the penalty strongly to enforce physical constraint
+    loss = physics_loss + PENALTY_WEIGHT * negative_concentration_penalty
+
+    # Log penalty monitoring information
+    if _ENABLE_PHYSICS_LOGGING:
+        with open(_PHYSICS_LOG_PATH, "a") as f:
+            msg = _log_penalty_monitoring(
+                physics_loss, negative_concentration_penalty,
+                PENALTY_WEIGHT, loss, "Operator"
+            )
+            f.write(msg)
+
+    # Prepare loss dict for logging
+    if batch_vec is not None:
+        F_in_per_graph = scatter_mean(F_in_pred.detach(), batch_vec, dim=0)
+        F_out_per_graph = scatter_mean(F_out_pred.detach(), batch_vec, dim=0)
+        divergence_per_graph = scatter_mean(divergence_pred.detach().abs(), batch_vec, dim=0)
+        dS_dt_per_graph = scatter_mean(dS_dt_tot_pred.detach().abs(), batch_vec, dim=0)
+
+        # Edge-level: map edges to graphs
+        if edge_fluxes_pred.size(0) > 0:
+            edge_batch = batch_vec[edge_index[0].to(device)]
+            J_ax_per_graph = scatter_mean(edge_fluxes_pred.detach().abs(), edge_batch, dim=0)
+            J_ax_avg = J_ax_per_graph.mean()
+        else:
+            J_ax_avg = torch.tensor(0.0, device=device)
+
+        loss_dict = {
+            'J_ax': J_ax_avg,
+            'F_in': F_in_per_graph.mean(),
+            'F_out': F_out_per_graph.mean(),
+            'dS_dt_from_flux': divergence_per_graph.mean(),
+            'dS_dt_tot': dS_dt_per_graph.mean()
+        }
+    else:
+        loss_dict = {
+            'J_ax': edge_fluxes_pred.detach().abs().mean() if edge_fluxes_pred.size(0) > 0 else torch.tensor(0.0, device=device),
+            'F_in': F_in_pred.detach().mean(),
+            'F_out': F_out_pred.detach().mean(),
+            'dS_dt_from_flux': divergence_pred.detach().abs().mean(),
+            'dS_dt_tot': dS_dt_tot_pred.detach().abs().mean()
+        }
+
+    return loss, loss_dict, physics_errors

@@ -24,21 +24,25 @@ class TrainingConfig:
     train_ratio: float = 0.8
     val_ratio: float = 0.1
 
+    # Model architecture
+    model_type: str = "nnconv"  # 'nnconv' or 'operator'
+
     # Training parameters
     lr: float = 3e-3
     weight_decay: float = 1e-5
     epochs: int = 100
     patience: int = 10
-    lambda_data: float = 1.0
 
     # Loss configuration
     loss_type: LossType = LossType.PHYSICS_WITH_IC_BC
+    lambda_data: float = 1.0
+    lambda_phys: float = 1.0
     lambda_ic: float = 1.0
     lambda_bc: float = 1.0
 
     # Adaptive loss balancing for physics mode
-    use_adaptive_physics_weighting: bool = True # Balance physics vs IC/BC dynamically
-    target_physics_ratio: float = 1             # Target ratio of physics loss to supervision loss
+    use_adaptive_physics_weighting: bool = False    # Balance physics vs IC/BC dynamically
+    target_physics_ratio: float = 1                 # Target ratio of physics loss to supervision loss
 
     # Reproducibility
     seed: int = 42
@@ -51,17 +55,29 @@ class TrainingConfig:
     clip_grad_norm: float = 1.0
 
     # Paths
-    model_save_dir: str = "results/best_model"
+    model_save_dir: str = "logs/model"
     model_filename: str = "best_model.pt"
-    tensorboard_log_dir: str = "results/tensorboard_logs"
+    physics_save_dir: str = "logs/physics"
+    physics_save_filename: str = "debugs.txt"
+    tensorboard_log_dir: str = "logs/tensorboard"
+
+    # Physics logging
+    enable_physics_logging: bool = False
 
     @property
     def model_save_path(self) -> str:
         """Get the full path for saving the model."""
         return str(Path(self.model_save_dir) / self.model_filename)
 
+    @property
+    def physics_save_path(self) -> str:
+        """Get the full path for saving physics debug logs."""
+        return str(Path(self.physics_save_dir) / self.physics_save_filename)
+
     def validate(self) -> None:
         """Validate configuration parameters."""
+        if self.model_type not in ["nnconv", "operator"]:
+            raise ValueError(f"model_type must be 'nnconv' or 'operator', got {self.model_type}")
         if not (0 < self.train_ratio < 1):
             raise ValueError(f"train_ratio must be between 0 and 1, got {self.train_ratio}")
         if not (0 < self.val_ratio < 1):
@@ -109,13 +125,69 @@ class PhysicsMetrics:
     J_ax: float = 0.0               # Axial flux magnitude
     F_in: float = 0.0               # Phloem loading rate
     F_out: float = 0.0              # Sucrose outflow rate
-    dS_dt: float = 0.0              # Model-predicted time derivative magnitude
     dS_dt_from_flux: float = 0.0    # Flux divergence magnitude
-    dS_dt_from_physics: float = 0.0 # Total physics-based rate of change
+    dS_dt_tot: float = 0.0          # Total physics-based rate of change
 
     def __str__(self) -> str:
         return (f"J_ax={self.J_ax:.3e} F_in={self.F_in:.3e} F_out={self.F_out:.3e} "
-                f"dS_dt={self.dS_dt:.3e} flux_div={self.dS_dt_from_flux:.3e}")
+                f"flux_div={self.dS_dt_from_flux:.3e} dS_dt_tot={self.dS_dt_tot:.3e}")
+
+
+@dataclass
+class PhysicsErrorMetrics:
+    """Container for physics error metrics (MSE, RMSE, Relative Error)."""
+    # J_ax errors
+    J_ax_mse: float = 0.0
+    J_ax_rmse: float = 0.0
+    J_ax_rel_error: float = 0.0
+
+    # divJ (divergence) errors - for mass conservation evaluation
+    divJ_mse: float = 0.0
+    divJ_rmse: float = 0.0
+    divJ_rel_error: float = 0.0
+    divJ_correlation: float = 0.0  # Pearson correlation between predicted and true divergence
+
+    # F_in errors
+    F_in_mse: float = 0.0
+    F_in_rmse: float = 0.0
+    F_in_rel_error: float = 0.0
+
+    # F_out errors
+    F_out_mse: float = 0.0
+    F_out_rmse: float = 0.0
+    F_out_rel_error: float = 0.0
+
+    # dS_dt_tot (total residual) errors
+    dS_dt_tot_mse: float = 0.0
+    dS_dt_tot_rmse: float = 0.0
+    dS_dt_tot_rel_error: float = 0.0
+
+    # J_ax antisymmetry error (operator model only)
+    J_ax_antisym_error: float = 0.0
+
+    # Flux direction consistency metrics (physical credibility)
+    J_ax_sign_accuracy: float = 0.0      # Fraction of edges with correct flux direction
+    J_ax_reversal_rate: float = 0.0      # Fraction of edges with wrong direction (1 - sign_accuracy)
+    delta_C_sign_accuracy: float = 0.0   # Fraction of edges with correct ΔC sign (osmotic effects)
+
+    # Physics score metrics (dimensionless residual-based consistency)
+    physics_rel_error: float = 0.0       # Normalized residual: E[|r|] / (E[|F_in|] + E[|F_out|] + eps)
+    physics_satisfaction_rate: float = 0.0  # Fraction of nodes satisfying conservation within tolerance
+
+    def __str__(self) -> str:
+        base = (f"J_ax: MSE={self.J_ax_mse:.3e} RMSE={self.J_ax_rmse:.3e} RelErr={self.J_ax_rel_error:.3e} SignAcc={self.J_ax_sign_accuracy:.3f} | "
+                f"divJ: MSE={self.divJ_mse:.3e} RMSE={self.divJ_rmse:.3e} RelErr={self.divJ_rel_error:.3e} Corr={self.divJ_correlation:.4f} | "
+                f"F_in: MSE={self.F_in_mse:.3e} RMSE={self.F_in_rmse:.3e} RelErr={self.F_in_rel_error:.3e} | "
+                f"F_out: MSE={self.F_out_mse:.3e} RMSE={self.F_out_rmse:.3e} RelErr={self.F_out_rel_error:.3e} | "
+                f"dS_dt_tot: MSE={self.dS_dt_tot_mse:.3e} RMSE={self.dS_dt_tot_rmse:.3e} RelErr={self.dS_dt_tot_rel_error:.3e}")
+        # Always include antisymmetry error and direction metrics
+        base += f" | J_ax_antisym={self.J_ax_antisym_error:.3e}"
+        if self.J_ax_reversal_rate > 0 or self.delta_C_sign_accuracy > 0:
+            base += f" | RevRate={self.J_ax_reversal_rate:.3f} deltaC_SignAcc={self.delta_C_sign_accuracy:.3f}"
+        # Add physics score metrics
+        if self.physics_rel_error > 0 or self.physics_satisfaction_rate > 0:
+            base += f" | PhysRelErr={self.physics_rel_error:.4f} PhysSatisf={self.physics_satisfaction_rate:.3f}"
+        return base
 
 
 @dataclass
@@ -132,6 +204,7 @@ class TrainingMetrics:
     bc_nodes: float = 0.0  # Average number of boundary nodes
     bc_pct: float = 0.0  # Average percentage of boundary nodes
     physics_details: Optional['PhysicsMetrics'] = None
+    physics_errors: Optional['PhysicsErrorMetrics'] = None
 
     def __str__(self) -> str:
         base_str = f"loss={self.loss:.3e} MSE={self.mse:.3e} RMSE={self.rmse:.3e} MAE={self.mae:.3e} RelErr={self.rel_error:.3e} physics={self.physics:.3e}"
@@ -151,6 +224,7 @@ class LossConfig:
     """Configuration for loss computation."""
     loss_type: LossType = LossType.PHYSICS_WITH_IC_BC
     lambda_data: float = 1.0
+    lambda_phys: float = 1.0
     lambda_ic: float = 1.0
     lambda_bc: float = 1.0
     use_adaptive_physics_weighting: bool = True
@@ -162,6 +236,7 @@ class LossConfig:
         return cls(
             loss_type=config.loss_type,
             lambda_data=config.lambda_data,
+            lambda_phys=config.lambda_phys,
             lambda_ic=config.lambda_ic,
             lambda_bc=config.lambda_bc,
             use_adaptive_physics_weighting=config.use_adaptive_physics_weighting,
@@ -180,12 +255,13 @@ class LossResult:
     phys: float
     ic: float
     bc: float
-    adaptive_weight: float = 0.0
+    phys_weight: float = 0.0
     bc_nodes: int = 0
     bc_pct: float = 0.0
     phys_contrib_pct: float = 0.0
     sup_or_data_contrib_pct: float = 0.0
     physics_metrics: Optional[PhysicsMetrics] = None
+    physics_errors: Optional[PhysicsErrorMetrics] = None
 
 
 @dataclass
@@ -200,7 +276,8 @@ class EpochResult:
     ic: float
     bc: float
     physics_metrics: Optional[PhysicsMetrics] = None
-    adaptive_weight: float = 0.0
+    physics_errors: Optional[PhysicsErrorMetrics] = None
+    phys_weight: float = 0.0
     supervision_weight: float = 0.0
     bc_nodes: float = 0.0
     bc_pct: float = 0.0
@@ -223,7 +300,8 @@ class EpochResult:
             ic=totals["ic"] / n_batches,
             bc=totals["bc"] / n_batches,
             physics_metrics=totals["last_phys_metrics"],
-            adaptive_weight=totals["adaptive_weight"] / n_batches,
+            physics_errors=totals.get("last_phys_errors", None),
+            phys_weight=totals["phys_weight"] / n_batches,
             supervision_weight=totals["supervision_weight"] / n_batches,
             bc_nodes=totals["bc_nodes"] / n_batches,
             bc_pct=totals["bc_pct"] / n_batches,

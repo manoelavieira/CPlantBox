@@ -7,6 +7,7 @@ import torch
 import torch_geometric
 
 from model.config import ModelConfig
+from model import physics
 
 import training.cli as cli
 import training.logging as logging
@@ -19,6 +20,12 @@ def main():
     """Main training function."""
     # Parse arguments and create configuration
     config = cli.parse_arguments()
+
+    # Configure physics logging
+    physics.set_physics_logging(
+        enable=config.enable_physics_logging,
+        log_path=config.physics_save_path
+    )
 
     # Setup environment
     device = setup.setup_environment(config)
@@ -37,7 +44,7 @@ def main():
           f"Test batches: {len(test_loader)}")
 
     # Setup model
-    model_setup = setup.setup_model_and_scalers(train_loader, device)
+    model_setup = setup.setup_model_and_scalers(train_loader, device, config.model_type)
     model_setup.model = model_setup.model.double()  # Convert to float64
 
     # Create model config for logging

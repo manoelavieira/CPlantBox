@@ -286,16 +286,13 @@ def prepare_model_inputs(
     else:
         time_standardized = time_standardized_value.expand(data.num_nodes)
 
-    # time_standardized: the standardized, differentiable input used by the GNN
+    # time_standardized: the standardized input used by the GNN
     # time_sigma: the conversion factor σ_t used to scale d/dτ -> d/dt
     # time_standardized and time_sigma are tensors of shape [N, 1]
     std_deviation_value = model.time_scaler.std.view(-1)[0].to(time_standardized.device)
     time_standardized = time_standardized.view(-1, 1).to(next(model.parameters()).device)
     time_sigma = std_deviation_value.expand_as(time_standardized).clone()
 
-    # Physics autograd needs time to require grad during training
-    if is_training and not time_standardized.requires_grad:
-        time_standardized.requires_grad_(True)
 
     # Attach time information to data
     if is_training:

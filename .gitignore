@@ -1,7 +1,7 @@
 # ignore data, plots and models generated during development
 /dev/cplantbox/data/
 /dev/cplantbox/plot/
-/dev/results/
+/dev/logs/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

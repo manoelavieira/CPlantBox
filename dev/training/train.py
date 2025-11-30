@@ -8,11 +8,12 @@ from torch_scatter import scatter_mean
 
 from typing import Tuple, Optional
 
+from model.physics import log_physics_values
 from model.config import ModelConfig
-from model.physics import physics_residual
+from model.physics import physics_residual, physics_residual_operator
 from .config import (
     TrainingConfig, TrainingState, TrainingMetrics, ModelSetup,
-    LossType, PhysicsMetrics, LossConfig, LossResult, EpochResult
+    LossType, PhysicsMetrics, PhysicsErrorMetrics, LossConfig, LossResult, EpochResult
 )
 
 import training.utils as utils
@@ -87,9 +88,10 @@ def accumulate_epoch_stats(
     totals["bc"] += result.bc
     totals["n_batches"] += 1
     totals["last_phys_metrics"] = result.physics_metrics
+    totals["last_phys_errors"] = result.physics_errors  # Store last physics errors
 
     # Accumulate statistics
-    totals["adaptive_weight"] += result.adaptive_weight
+    totals["phys_weight"] += result.phys_weight
     totals["supervision_weight"] += 0.0  # Deprecated, kept for compatibility
     totals["bc_nodes"] += result.bc_nodes
     totals["bc_pct"] += result.bc_pct
@@ -101,13 +103,30 @@ def accumulate_epoch_stats(
     totals["weighted_physics"] += weighted_physics
 
 
-def run_forward(model: nn.Module, data) -> torch.Tensor:
+def run_forward(model: nn.Module, data):
     """Forward pass on inputs.
 
     Returns:
-        Content predictions
+        For NNConv model: Tensor of predictions [N, 1]
+        For Operator model: Dict with 'predictions', 'edge_fluxes', 'divergences'
     """
-    return model(data)
+    output = model(data)
+    return output
+
+
+def _extract_predictions(model_output):
+    """Extract prediction tensor from model output.
+
+    Args:
+        model_output: Either a tensor (NNConv) or dict (Operator)
+
+    Returns:
+        torch.Tensor: Predictions [N, 1]
+    """
+    if isinstance(model_output, dict):
+        return model_output['predictions']
+    else:
+        return model_output
 
 
 def _to_physics_metrics(physics_res) -> Optional[PhysicsMetrics]:
@@ -117,9 +136,8 @@ def _to_physics_metrics(physics_res) -> Optional[PhysicsMetrics]:
             J_ax=float(physics_res['J_ax']),
             F_in=float(physics_res['F_in']),
             F_out=float(physics_res['F_out']),
-            dS_dt=float(physics_res['dS_dt']),
             dS_dt_from_flux=float(physics_res['dS_dt_from_flux']),
-            dS_dt_from_physics=float(physics_res['dS_dt_from_physics'])
+            dS_dt_tot=float(physics_res['dS_dt_tot'])
         )
     else:
         return None
@@ -128,43 +146,41 @@ def _to_physics_metrics(physics_res) -> Optional[PhysicsMetrics]:
 def compute_physics_residual_step(
     model: nn.Module,
     data,
-    pred: Optional[torch.Tensor],
-    require_time_grad: bool,
-) -> Tuple[torch.Tensor, Optional[PhysicsMetrics]]:
+    model_output = None,
+) -> Tuple[torch.Tensor, Optional[PhysicsMetrics], Optional[PhysicsErrorMetrics]]:
     """
-    Unified physics residual computation for train/eval without standardization.
+    Unified physics residual computation for train/eval.
 
-    - In training, use the already-built graph (pred computed under grad,
-      and data.time_per_node requires_grad=True from prepare_model_inputs).
-    - In eval, temporarily enable grad, rebuild a leaf for time_per_node, re-forward,
-      then compute and detach the scalar physics residual.
+    Handles both NNConv and Operator model types:
+    - NNConv: Reconstructs fluxes from predicted concentrations
+    - Operator: Uses directly predicted edge fluxes and divergences
 
-    Returns (phys_res_scalar_detached, PhysicsMetrics|None).
+    Args:
+        model: The neural network model
+        data: Graph data containing features and targets
+        model_output: Model output (tensor or dict). If None, will run forward pass.
+
+    Returns:
+        Tuple of (phys_res_scalar, PhysicsMetrics|None, PhysicsErrorMetrics|None)
     """
-    if require_time_grad:
-        # Training path: pred must already be computed under grad; time_per_node should require grad.
-        phys_res, phys_res_dict = physics_residual(pred, data)
+    # If output not provided, run forward pass
+    if model_output is None:
+        model_output = model(data)
+
+    # Determine model type based on output format
+    is_operator_model = isinstance(model_output, dict)
+
+    # Compute physics residual using appropriate function
+    if is_operator_model:
+        phys_res, phys_res_dict, phys_errors = physics_residual_operator(model_output, data)
     else:
-        # Eval path: re-enable grad for a one-off forward, then detach result.
-        original_time = data.time_per_node
-        try:
-            with torch.enable_grad():
-                time_leaf = original_time.detach().clone().requires_grad_(True)
-                data.time_per_node = time_leaf
-                pred_eval = model(data)
-                phys_res, phys_res_dict = physics_residual(pred_eval, data)
-        finally:
-            # Restore original attribute to avoid side effects
-            data.time_per_node = original_time
+        # NNConv model: model_output is a tensor
+        phys_res, phys_res_dict, phys_errors = physics_residual(model_output, data)
 
-    # Reduce to scalar; detach ONLY in eval (no grad) path
+    # Reduce to scalar if needed
     phys_res_scalar = phys_res if phys_res.dim() == 0 else phys_res.mean()
 
-    # Detach only in eval path
-    if not require_time_grad:
-        phys_res_scalar = phys_res_scalar.detach()
-
-    return phys_res_scalar, _to_physics_metrics(phys_res_dict)
+    return phys_res_scalar, _to_physics_metrics(phys_res_dict), phys_errors
 
 
 def compute_initial_condition_loss(
@@ -292,29 +308,39 @@ def compute_boundary_condition_loss(
     return bc_loss
 
 
-def compute_loss(loss_mse: torch.Tensor, loss_phys: torch.Tensor, loss_type: LossType,
-                 lambda_data: float = 1.0, loss_ic: torch.Tensor = None, lambda_ic: float = 1.0,
-                 loss_bc: torch.Tensor = None, lambda_bc: float = 1.0,
-                 use_adaptive_weighting: bool = True, target_physics_ratio: float = 0.5) -> tuple:
+def compute_loss(
+    loss_mse: torch.Tensor,
+    loss_phys: torch.Tensor,
+    loss_type: LossType,
+    loss_bc: torch.Tensor = None,
+    loss_ic: torch.Tensor = None,
+    lambda_data: float = 1.0,
+    lambda_phys: float = 1.0,
+    lambda_bc: float = 1.0,
+    lambda_ic: float = 1.0,
+    use_adaptive_weighting: bool = True,
+    target_physics_ratio: float = 0.5
+) -> tuple:
     """Compute loss based on the specified loss type configuration.
 
     Args:
         loss_mse: Mean squared error term
         loss_phys: Physics residual term
         loss_type: Type of loss to compute
-        lambda_data: Data loss weight (only used for COMBINED loss, weights the MSE term)
-        loss_ic: Initial condition loss term (only used for PHYSICS_WITH_IC_BC loss)
-        lambda_ic: Initial condition term weight (only used for PHYSICS_WITH_IC_BC loss)
         loss_bc: Boundary condition loss term (added to all physics-based losses)
+        loss_ic: Initial condition loss term (only used for PHYSICS_WITH_IC_BC loss)
+        lambda_data: Data loss weight (only used for COMBINED loss, weights the MSE term)
+        lambda_phys: Residual loss weight (only used with "combined" and "physics" loss)
         lambda_bc: Boundary condition term weight
+        lambda_ic: Initial condition term weight (only used for PHYSICS_WITH_IC_BC loss)
         use_adaptive_weighting: If True, adaptively balance losses
         target_physics_ratio: Target ratio of physics loss to supervision loss (for physics mode)
 
     Returns:
-        Tuple of (total_loss, adaptive_weight, phys_contrib_pct, ref_contrib_pct)
+        Tuple of (total_loss, physics_weight, phys_contrib_pct, ref_contrib_pct)
         where:
             - total_loss: Combined loss value
-            - adaptive_weight: Weight applied to physics term
+            - physics_weight: Weight applied to physics term
             - phys_contrib_pct: Percentage contribution of physics to total loss
             - ref_contrib_pct: Percentage contribution of reference loss to total loss
     """
@@ -332,13 +358,13 @@ def compute_loss(loss_mse: torch.Tensor, loss_phys: torch.Tensor, loss_type: Los
 
         # Compute adaptive weight and effective physics loss
         if use_adaptive_weighting:
-            adaptive_weight = _compute_adaptive_weight(
+            physics_weight = _compute_adaptive_weight(
                 supervision_loss, loss_phys, target_physics_ratio
             )
         else:
-            adaptive_weight = 1.0
+            physics_weight = lambda_phys
 
-        weighted_physics_loss = adaptive_weight * loss_phys
+        weighted_physics_loss = physics_weight * loss_phys
         total_loss = supervision_loss + weighted_physics_loss
 
         # Compute percentage contributions
@@ -349,7 +375,7 @@ def compute_loss(loss_mse: torch.Tensor, loss_phys: torch.Tensor, loss_type: Los
 
         return (
             total_loss,
-            utils.to_float(adaptive_weight),
+            utils.to_float(physics_weight),
             percentages['physics'],
             percentages['supervision']
         )
@@ -361,13 +387,13 @@ def compute_loss(loss_mse: torch.Tensor, loss_phys: torch.Tensor, loss_type: Los
 
         # Compute adaptive weight for physics term
         if use_adaptive_weighting:
-            adaptive_weight = _compute_adaptive_weight(
+            physics_weight = _compute_adaptive_weight(
                 weighted_data_loss, loss_phys, target_physics_ratio
             )
         else:
-            adaptive_weight = 1.0
+            physics_weight = lambda_phys
 
-        weighted_physics_loss = adaptive_weight * loss_phys
+        weighted_physics_loss = physics_weight * loss_phys
         total_loss = weighted_data_loss + weighted_physics_loss
 
         # Compute percentage contributions
@@ -378,7 +404,7 @@ def compute_loss(loss_mse: torch.Tensor, loss_phys: torch.Tensor, loss_type: Los
 
         return (
             total_loss,
-            utils.to_float(adaptive_weight),
+            utils.to_float(physics_weight),
             percentages['physics'],
             percentages['data']
         )
@@ -397,6 +423,7 @@ def compute_loss_and_metrics(
     batch_vec: torch.Tensor = None,
     data = None,
     phys_metrics: Optional[PhysicsMetrics] = None,
+    phys_errors: Optional['PhysicsErrorMetrics'] = None,
 ) -> LossResult:
     """Compute loss and metrics with per-graph aggregation (consistent with physics residual).
 
@@ -414,6 +441,7 @@ def compute_loss_and_metrics(
         batch_vec: Batch assignment for each node [N] (None for single graph)
         data: Graph data object (required for PHYSICS_WITH_IC_BC to check timesteps)
         phys_metrics: Optional physics metrics for detailed tracking
+        phys_errors: Optional physics error metrics (MSE, RMSE, Relative Error)
 
     Returns:
         LossResult containing all computed metrics
@@ -437,11 +465,17 @@ def compute_loss_and_metrics(
     )
 
     # Compute total loss based on configuration
-    # Returns: (total_loss, adaptive_weight, phys_%, ref_%)
-    total_loss, adaptive_weight, phys_contrib_pct, ref_contrib_pct = compute_loss(
-        loss_mse, loss_phys, loss_config.loss_type,
-        loss_config.lambda_data, loss_ic, loss_config.lambda_ic,
-        loss_bc, loss_config.lambda_bc,
+    # Returns: (total_loss, phys_weight, phys_%, ref_%)
+    total_loss, phys_weight, phys_contrib_pct, ref_contrib_pct = compute_loss(
+        loss_mse,
+        loss_phys,
+        loss_config.loss_type,
+        loss_bc,
+        loss_ic,
+        loss_config.lambda_data,
+        loss_config.lambda_phys,
+        loss_config.lambda_bc,
+        loss_config.lambda_ic,
         use_adaptive_weighting=loss_config.use_adaptive_physics_weighting,
         target_physics_ratio=loss_config.target_physics_ratio
     )
@@ -455,12 +489,13 @@ def compute_loss_and_metrics(
         phys=utils.to_float(loss_phys),
         ic=utils.to_float(loss_ic),
         bc=utils.to_float(loss_bc),
-        adaptive_weight=adaptive_weight,
+        phys_weight=phys_weight,
         bc_nodes=bc_node_count,
         bc_pct=bc_node_pct,
         phys_contrib_pct=phys_contrib_pct,
         sup_or_data_contrib_pct=ref_contrib_pct,
-        physics_metrics=phys_metrics
+        physics_metrics=phys_metrics,
+        physics_errors=phys_errors
     )
 
 
@@ -617,11 +652,14 @@ def train_epoch(
         RuntimeError: If no training samples are processed
     """
     model.train()
-    totals = {"loss": 0.0, "mse": 0.0, "mae": 0.0, "rmse": 0.0, "rel_error": 0.0, "phys": 0.0, "ic": 0.0, "bc": 0.0,
-              "adaptive_weight": 0.0, "supervision_weight": 0.0, "bc_nodes": 0, "bc_pct": 0.0,
-              "phys_contrib_pct": 0.0, "sup_contrib_pct": 0.0,
+    totals = {"loss": 0.0, "mse": 0.0, "mae": 0.0,
+              "rmse": 0.0, "rel_error": 0.0,
+              "phys": 0.0, "ic": 0.0, "bc": 0.0,
+              "phys_weight": 0.0, "supervision_weight": 0.0,
               "weighted_supervision": 0.0, "weighted_physics": 0.0,
-              "n_batches": 0, "last_phys_metrics": None}
+              "phys_contrib_pct": 0.0, "sup_contrib_pct": 0.0,
+              "bc_nodes": 0, "bc_pct": 0.0,
+              "n_batches": 0, "last_phys_metrics": None, "last_phys_errors": None}
 
     for batch_idx, data in enumerate(loader):
         optimizer.zero_grad(set_to_none=True)
@@ -633,18 +671,22 @@ def train_epoch(
             is_training=True
         )
 
-        # Forward pass (no standardization, already in original space)
-        pred = run_forward(model, data)
+        # Forward pass (returns tensor or dict depending on model type)
+        model_output = run_forward(model, data)
 
-        # Compute physics residual
+        # Extract predictions tensor for metric computation
+        pred = _extract_predictions(model_output)
+
+        # Compute physics residual (handles both model types)
         if loss_config.loss_type == LossType.DATA_ONLY:
-            phys_res, phys_res_metrics = torch.tensor(0.0, device=pred.device), None
+            phys_res = torch.tensor(0.0, device=pred.device)
+            # Log physics values for analysis and get metrics for terminal display
+            phys_res_metrics, phys_res_errors = log_physics_values(model_output, data)
         else:
-            phys_res, phys_res_metrics = compute_physics_residual_step(
+            phys_res, phys_res_metrics, phys_res_errors = compute_physics_residual_step(
                 model=model,
                 data=data,
-                pred=pred,
-                require_time_grad=True
+                model_output=model_output
             )
 
         # Compute loss and metrics (no physics scaling needed)
@@ -657,24 +699,9 @@ def train_epoch(
             getattr(data, 'is_boundary_node', None),
             getattr(data, 'batch', None),
             data,
-            phys_res_metrics
+            phys_res_metrics,
+            phys_res_errors
         )
-
-        if loss_config.loss_type == LossType.DATA_ONLY:
-            mean_y = data.y.mean().item()
-            mean_pred = pred.mean().item()
-
-            log_path = "results/debug_output.txt"
-            with open(log_path, "a") as f:
-                if batch_idx == 0 or batch_idx == len(loader) - 1:
-                    msg = (
-                        f"\nEpoch {epoch:03d} | Batch {batch_idx} | Number of nodes: {data.y.shape[0]}\n"
-                        f"S_ST true:\n{data.y.detach().cpu().numpy()[:10]}\n"
-                        f"S_ST pred:\n{pred.detach().cpu().numpy()[:10]}\n"
-                        f"Mean S_ST true: {mean_y:.6e}, Mean S_ST pred: {mean_pred:.6e}\n"
-                    )
-                    # print(msg)
-                    f.write(msg + "\n")
 
         # Convert LossResult.total_loss back to tensor for backward
         loss_tensor = torch.tensor(result.total_loss, device=pred.device, requires_grad=True)
@@ -688,7 +715,6 @@ def train_epoch(
             y_flat = data.y.squeeze(-1)
             squared_error = (pred_flat - y_flat).pow(2)
             if getattr(data, 'batch', None) is not None:
-                from torch_scatter import scatter_mean
                 mse_per_graph = scatter_mean(squared_error, data.batch, dim=0)
                 loss_mse_tensor = mse_per_graph.mean()
             else:
@@ -700,9 +726,15 @@ def train_epoch(
 
             # Recompute total loss as tensor
             loss_tensor, _, _, _ = compute_loss(
-                loss_mse_tensor, phys_res, loss_config.loss_type,
-                loss_config.lambda_data, loss_ic_tensor, loss_config.lambda_ic,
-                loss_bc_tensor, loss_config.lambda_bc,
+                loss_mse_tensor,
+                phys_res,
+                loss_config.loss_type,
+                loss_bc_tensor,
+                loss_ic_tensor,
+                loss_config.lambda_data,
+                loss_config.lambda_phys,
+                loss_config.lambda_bc,
+                loss_config.lambda_ic,
                 use_adaptive_weighting=loss_config.use_adaptive_physics_weighting,
                 target_physics_ratio=loss_config.target_physics_ratio
             )
@@ -722,10 +754,10 @@ def train_epoch(
             # Calculate actual weighted components for this batch
             if loss_config.loss_type == LossType.PHYSICS_WITH_IC_BC:
                 batch_weighted_sup = (loss_config.lambda_ic * result.ic) + (loss_config.lambda_bc * result.bc)
-                batch_weighted_phys = result.adaptive_weight * result.phys
+                batch_weighted_phys = result.phys_weight * result.phys
             elif loss_config.loss_type == LossType.COMBINED:
                 batch_weighted_sup = loss_config.lambda_data * result.mse
-                batch_weighted_phys = result.adaptive_weight * result.phys
+                batch_weighted_phys = result.phys_weight * result.phys
             else:
                 batch_weighted_sup = 0.0
                 batch_weighted_phys = 0.0
@@ -818,14 +850,32 @@ def train_model(
 
         # Create metrics objects
         tr_metrics = TrainingMetrics(
-            tr_result.loss, tr_result.mse, tr_result.mae, tr_result.rmse,
-            tr_result.rel_error, tr_result.phys, tr_result.ic, tr_result.bc,
-            tr_result.bc_nodes, tr_result.bc_pct, tr_result.physics_metrics
+            tr_result.loss,
+            tr_result.mse,
+            tr_result.mae,
+            tr_result.rmse,
+            tr_result.rel_error,
+            tr_result.phys,
+            tr_result.ic,
+            tr_result.bc,
+            tr_result.bc_nodes,
+            tr_result.bc_pct,
+            tr_result.physics_metrics,
+            tr_result.physics_errors
         )
         val_metrics = TrainingMetrics(
-            val_result.loss, val_result.mse, val_result.mae, val_result.rmse,
-            val_result.rel_error, val_result.phys, val_result.ic, val_result.bc,
-            val_result.bc_nodes, val_result.bc_pct, val_result.physics_metrics
+            val_result.loss,
+            val_result.mse,
+            val_result.mae,
+            val_result.rmse,
+            val_result.rel_error,
+            val_result.phys,
+            val_result.ic,
+            val_result.bc,
+            val_result.bc_nodes,
+            val_result.bc_pct,
+            val_result.physics_metrics,
+            val_result.physics_errors
         )
 
         # Log metrics to TensorBoard
@@ -834,28 +884,26 @@ def train_model(
         # Console logging
         # Only print BC nodes info on first epoch (since it remains constant)
         if epoch == 1:
-            base_log = f"BC nodes = {tr_result.bc_nodes:.1f}({tr_result.bc_pct:.1f}%)\n"
+            base_log = f"BC nodes = {tr_result.bc_nodes:.1f}({tr_result.bc_pct:.1f}%)\n\n"
         else:
             base_log = ""
 
-        base_log += (f"\nEpoch {epoch:03d} | "
+        base_log += (f"\n==== Epoch {epoch:03d} ==== "
                     f"train_tot={tr_result.loss:.3e} train_mse={tr_result.mse:.3e} "
-                    f"train_phys={tr_result.phys:.3e} train_rmse={tr_result.rmse:.3e} "
-                    f"train_relerr={tr_result.rel_error:.3e}")
-        base_log += f" train_ic={tr_result.ic:.3e} train_bc={tr_result.bc:.3e}"
+                    f"train_relerr={tr_result.rel_error:.3e} |")
+        base_log += f" train_phys={tr_result.phys:.3e} train_ic={tr_result.ic:.3e} train_bc={tr_result.bc:.3e}"
 
         # Add weighted component info if using adaptive weighting
         if config.use_adaptive_physics_weighting and config.loss_type == LossType.PHYSICS_WITH_IC_BC:
             base_log += (f" | sup_w={tr_result.weighted_supervision:.3e}({tr_result.sup_contrib_pct:.1f}%) "
                         f"phys_w={tr_result.weighted_physics:.3e}({tr_result.phys_contrib_pct:.1f}%)")
-        elif config.loss_type == LossType.COMBINED:
+        elif config.use_adaptive_physics_weighting and config.loss_type == LossType.COMBINED:
             base_log += (f" | data_w={tr_result.weighted_supervision:.3e}({tr_result.sup_contrib_pct:.1f}%) "
                         f"phys_w={tr_result.weighted_physics:.3e}({tr_result.phys_contrib_pct:.1f}%)")
 
         base_log += (f" | val_tot={val_result.loss:.3e} val_mse={val_result.mse:.3e} "
-                    f"val_phys={val_result.phys:.3e} val_rmse={val_result.rmse:.3e} "
-                    f"val_relerr={val_result.rel_error:.3e}")
-        base_log += f" val_ic={val_result.ic:.3e} val_bc={val_result.bc:.3e}"
+                    f"val_phys={val_result.phys:.3e} val_relerr={val_result.rel_error:.3e}")
+        # base_log += f" val_ic={val_result.ic:.3e} val_bc={val_result.bc:.3e}"
 
         # Add physics details to console output if available
         if tr_result.physics_metrics is not None:
@@ -863,6 +911,12 @@ def train_model(
             print(base_log + physics_log)
         else:
             print(base_log)
+
+        # Add physics error metrics to console output if available
+        if tr_result.physics_errors is not None:
+            print(f"Physics Errors (Train): {tr_result.physics_errors}")
+        if val_result.physics_errors is not None:
+            print(f"Physics Errors (Valid): {val_result.physics_errors}")
 
         # Model saving and early stopping (use combined validation loss)
         if training_state.update_best(val_result.loss, epoch):
@@ -941,7 +995,7 @@ def test_model(
 
     # Log adaptive weighting metrics if available
     if config.use_adaptive_physics_weighting and config.loss_type == LossType.PHYSICS_WITH_IC_BC:
-        writer.add_scalar('final/test_adaptive_weight', test_result.adaptive_weight, training_state.best_epoch)
+        writer.add_scalar('final/test_phys_weight', test_result.phys_weight, training_state.best_epoch)
         writer.add_scalar('final/test_supervision_weight', test_result.supervision_weight, training_state.best_epoch)
         writer.add_scalar('final/test_bc_nodes', test_result.bc_nodes, training_state.best_epoch)
         writer.add_scalar('final/test_bc_pct', test_result.bc_pct, training_state.best_epoch)
@@ -960,7 +1014,7 @@ def test_model(
 
     # Add adaptive weighting info if available
     if config.use_adaptive_physics_weighting and config.loss_type == LossType.PHYSICS_WITH_IC_BC:
-        final_summary += (f"\nAdaptive Weight: {test_result.adaptive_weight:.3f}\n"
+        final_summary += (f"\nAdaptive Weight: {test_result.phys_weight:.3f}\n"
                          f"Supervision Weight: {test_result.supervision_weight:.3f}\n"
                          f"Physics Contribution: {test_result.phys_contrib_pct:.1f}%\n"
                          f"Supervision Contribution: {test_result.sup_contrib_pct:.1f}%\n"
@@ -972,13 +1026,13 @@ def test_model(
     writer.add_text('final/results', final_summary)
 
     # Console output with adaptive weighting info
-    console_msg = (f"\nFinal test metrics!  Loss: {test_result.loss:.3e}, Physics Loss: {test_result.phys:.3e}, "
+    console_msg = (f"\nFinal test metrics!\nLoss: {test_result.loss:.3e}, Physics Loss: {test_result.phys:.3e}, "
                    f"IC Loss: {test_result.ic:.3e}, BC Loss: {test_result.bc:.3e} | "
                    f"MSE: {test_result.mse:.3e}, RMSE: {test_result.rmse:.3e}, "
                    f"MAE: {test_result.mae:.3e}, RelErr: {test_result.rel_error:.3e}")
 
     if config.use_adaptive_physics_weighting and config.loss_type == LossType.PHYSICS_WITH_IC_BC:
-        console_msg += (f"\n  Adaptive Weight: {test_result.adaptive_weight:.3f}, "
+        console_msg += (f"\n  Adaptive Weight: {test_result.phys_weight:.3f}, "
                        f"Supervision Weight: {test_result.supervision_weight:.3f}\n"
                        f"  Physics Contribution: {test_result.phys_contrib_pct:.1f}%, "
                        f"Supervision Contribution: {test_result.sup_contrib_pct:.1f}%\n"
@@ -1011,11 +1065,14 @@ def eval_model(
         EpochResult containing averaged metrics from evaluation
     """
     model.eval()
-    totals = {"loss": 0.0, "mse": 0.0, "mae": 0.0, "rmse": 0.0, "rel_error": 0.0, "phys": 0.0, "ic": 0.0, "bc": 0.0,
-              "adaptive_weight": 0.0, "supervision_weight": 0.0, "bc_nodes": 0, "bc_pct": 0.0,
-              "phys_contrib_pct": 0.0, "sup_contrib_pct": 0.0,
+    totals = {"loss": 0.0, "mse": 0.0, "mae": 0.0,
+              "rmse": 0.0, "rel_error": 0.0,
+              "phys": 0.0, "ic": 0.0, "bc": 0.0,
+              "phys_weight": 0.0, "supervision_weight": 0.0,
               "weighted_supervision": 0.0, "weighted_physics": 0.0,
-              "n_batches": 0, "last_phys_metrics": None}
+              "phys_contrib_pct": 0.0, "sup_contrib_pct": 0.0,
+              "bc_nodes": 0, "bc_pct": 0.0,
+              "n_batches": 0, "last_phys_metrics": None, "last_phys_errors": None}
 
     with torch.no_grad():
         for batch_idx, data in enumerate(loader):
@@ -1026,18 +1083,22 @@ def eval_model(
                 is_training=False
             )
 
-            # Forward pass with prepared data (no standardization)
-            pred = run_forward(model, data)
+            # Forward pass (returns tensor or dict depending on model type)
+            model_output = run_forward(model, data)
 
-            # Compute physics residual (eval path re-enables grad internally)
+            # Extract predictions tensor for metric computation
+            pred = _extract_predictions(model_output)
+
+            # Compute physics residual (handles both model types)
             if loss_config.loss_type == LossType.DATA_ONLY:
-                phys_res, phys_res_metrics = torch.tensor(0.0, device=pred.device), None
+                phys_res = torch.tensor(0.0, device=pred.device)
+                # Log physics values for analysis and get metrics for terminal display
+                phys_res_metrics, phys_res_errors = log_physics_values(model_output, data)
             else:
-                phys_res, phys_res_metrics = compute_physics_residual_step(
+                phys_res, phys_res_metrics, phys_res_errors = compute_physics_residual_step(
                     model=model,
                     data=data,
-                    pred=None,
-                    require_time_grad=False
+                    model_output=model_output
                 )
 
             # Compute loss and metrics (no physics scaling needed)
@@ -1050,16 +1111,17 @@ def eval_model(
                 getattr(data, 'is_boundary_node', None),
                 getattr(data, 'batch', None),
                 data,
-                phys_res_metrics
+                phys_res_metrics,
+                phys_res_errors
             )
 
             # Calculate actual weighted components for this batch (for eval)
             if loss_config.loss_type == LossType.PHYSICS_WITH_IC_BC:
                 batch_weighted_sup = (loss_config.lambda_ic * result.ic) + (loss_config.lambda_bc * result.bc)
-                batch_weighted_phys = result.adaptive_weight * result.phys
+                batch_weighted_phys = result.phys_weight * result.phys
             elif loss_config.loss_type == LossType.COMBINED:
                 batch_weighted_sup = loss_config.lambda_data * result.mse
-                batch_weighted_phys = result.adaptive_weight * result.phys
+                batch_weighted_phys = result.phys_weight * result.phys
             else:
                 batch_weighted_sup = 0.0
                 batch_weighted_phys = 0.0

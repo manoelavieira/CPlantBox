@@ -76,8 +76,8 @@ class TrainingConfig:
 
     def validate(self) -> None:
         """Validate configuration parameters."""
-        if self.model_type not in ["nnconv", "operator"]:
-            raise ValueError(f"model_type must be 'nnconv' or 'operator', got {self.model_type}")
+        if self.model_type not in ["nnconv", "operator", "physics"]:
+            raise ValueError(f"model_type must be 'nnconv', 'operator', or 'physics', got {self.model_type}")
         if not (0 < self.train_ratio < 1):
             raise ValueError(f"train_ratio must be between 0 and 1, got {self.train_ratio}")
         if not (0 < self.val_ratio < 1):

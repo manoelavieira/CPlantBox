@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 from pathlib import Path
 
 from torch_scatter import scatter_mean
@@ -11,11 +12,18 @@ from . import config
 
 PENALTY_WEIGHT = 1000.0     # Weight for penalizing non-positive concentrations
 EPSILON = 1e-12             # Small constant to prevent division by zero
+SMOOTH_WIDTH = 0.001        # Default smooth width for smooth ReLU approximation
 
 # Module-level physics logging configuration
 # Default values are imported from TrainingConfig to ensure consistency
 _ENABLE_PHYSICS_LOGGING = TrainingConfig.enable_physics_logging
 _PHYSICS_LOG_PATH = str(Path(TrainingConfig.physics_save_dir) / TrainingConfig.physics_save_filename)
+
+
+def smooth_relu(x: torch.Tensor, delta: float) -> torch.Tensor:
+    # Smooth approximation of max(x, 0)
+    # For |x| >> delta, behaves like ReLU
+    return delta * F.softplus(x / delta)
 
 
 def set_physics_logging(enable: bool, log_path: str = None):
@@ -767,7 +775,7 @@ def compute_sucrose_outflow(
     node_feat_original: torch.Tensor,
     params: dict,
     node_fields: dict,
-    device: torch.device
+    smooth_width: float = 0.0,
 ) -> torch.Tensor:
     """Compute sucrose outflow F_out per node.
 
@@ -791,8 +799,17 @@ def compute_sucrose_outflow(
     CSTi_positive = torch.clamp(C_ST, min=0.0)
 
     # Apply CSTimin threshold for usage
-    CSTi_effective = torch.clamp(CSTi_positive - params["CSTimin"], min=0.0)
-    CSTi_delta = torch.clamp(CSTi_effective - node_fields["Csoil_node"], min=0.0)
+    raw = CSTi_positive - params["CSTimin"]
+    if smooth_width > 0.0:
+        CSTi_effective = smooth_relu(raw, smooth_width)
+    else:
+        CSTi_effective = torch.clamp(raw, min=0.0)
+
+    raw_delta = CSTi_effective - node_fields["Csoil_node"]
+    if smooth_width > 0.0:
+        CSTi_delta = smooth_relu(raw_delta, smooth_width)
+    else:
+        CSTi_delta = torch.clamp(raw_delta, min=0.0)
 
     # Temperature-dependent maintenance respiration
     R_mmax = (Q_Rmmax + params["krm2v"] * CSTi_effective) * \
@@ -872,10 +889,10 @@ def log_physics_values(y_pred: torch.Tensor, data: Data, model_output=None):
         dS_dt_from_flux_true = compute_flux_divergence(J_ax_true, edge_index, N, device)
 
         F_in_pred = compute_phloem_loading(C_ST_pred, node_feat_original, params, node_fields, device)
-        F_out_pred = compute_sucrose_outflow(C_ST_pred, node_feat_original, params, node_fields, device)
+        F_out_pred = compute_sucrose_outflow(C_ST_pred, node_feat_original, params, node_fields, smooth_width=SMOOTH_WIDTH)
 
         F_in_true = compute_phloem_loading(C_ST_true, node_feat_original, params, node_fields, device)
-        F_out_true = compute_sucrose_outflow(C_ST_true, node_feat_original, params, node_fields, device)
+        F_out_true = compute_sucrose_outflow(C_ST_true, node_feat_original, params, node_fields, smooth_width=0.0)
 
         dS_dt_tot_true = dS_dt_from_flux_true + F_in_true - F_out_true
         dS_dt_tot_pred = divergence_pred + F_in_pred - F_out_pred
@@ -949,7 +966,7 @@ def log_physics_values(y_pred: torch.Tensor, data: Data, model_output=None):
         dS_dt_from_flux_pred = compute_flux_divergence(J_ax_pred, edge_index, N, device)
 
         F_in_pred = compute_phloem_loading(C_ST_pred, node_feat_original, params, node_fields, device)
-        F_out_pred = compute_sucrose_outflow(C_ST_pred, node_feat_original, params, node_fields, device)
+        F_out_pred = compute_sucrose_outflow(C_ST_pred, node_feat_original, params, node_fields, smooth_width=SMOOTH_WIDTH)
         dS_dt_tot_pred = dS_dt_from_flux_pred + F_in_pred - F_out_pred
 
         # Compute true values
@@ -958,7 +975,7 @@ def log_physics_values(y_pred: torch.Tensor, data: Data, model_output=None):
         dS_dt_from_flux_true = compute_flux_divergence(J_ax_true, edge_index, N, device)
 
         F_in_true = compute_phloem_loading(C_ST_true, node_feat_original, params, node_fields, device)
-        F_out_true = compute_sucrose_outflow(C_ST_true, node_feat_original, params, node_fields, device)
+        F_out_true = compute_sucrose_outflow(C_ST_true, node_feat_original, params, node_fields, smooth_width=0.0)
         dS_dt_tot_true = dS_dt_from_flux_true + F_in_true - F_out_true
 
         # Compute error metrics
@@ -1079,7 +1096,7 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
 
     # Compute phloem loading and outflow from predictions
     F_in_pred = compute_phloem_loading(C_ST_pred, node_feat_original, params, node_fields, device)
-    F_out_pred = compute_sucrose_outflow(C_ST_pred, node_feat_original, params, node_fields, device)
+    F_out_pred = compute_sucrose_outflow(C_ST_pred, node_feat_original, params, node_fields, smooth_width=SMOOTH_WIDTH)
 
     # Total physics-based derivative from predictions (in physical units: mmol/h)
     dS_dt_tot_pred = dS_dt_from_flux_pred + F_in_pred - F_out_pred
@@ -1094,7 +1111,7 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
     dS_dt_from_flux_true = compute_flux_divergence(J_ax_true, edge_index, N, device)
 
     F_in_true = compute_phloem_loading(C_ST_true, node_feat_original, params, node_fields, device)
-    F_out_true = compute_sucrose_outflow(C_ST_true, node_feat_original, params, node_fields, device)
+    F_out_true = compute_sucrose_outflow(C_ST_true, node_feat_original, params, node_fields, smooth_width=0.0)
     dS_dt_tot_true = dS_dt_from_flux_true + F_in_true - F_out_true
 
     # Compute physics error metrics (include edge_index for antisymmetry calculation)
@@ -1251,7 +1268,7 @@ def physics_residual_operator(
 
     # Compute source/sink terms from predicted concentrations
     F_in_pred = compute_phloem_loading(C_ST_pred, node_feat_original, params, node_fields, device)
-    F_out_pred = compute_sucrose_outflow(C_ST_pred, node_feat_original, params, node_fields, device)
+    F_out_pred = compute_sucrose_outflow(C_ST_pred, node_feat_original, params, node_fields, smooth_width=SMOOTH_WIDTH)
 
     # Physics residual using model's divergence directly
     # dS/dt = divergence + F_in - F_out ≈ 0
@@ -1273,7 +1290,7 @@ def physics_residual_operator(
     dS_dt_from_flux_true = compute_flux_divergence(J_ax_true, edge_index, N, device)
 
     F_in_true = compute_phloem_loading(C_ST_true, node_feat_original, params, node_fields, device)
-    F_out_true = compute_sucrose_outflow(C_ST_true, node_feat_original, params, node_fields, device)
+    F_out_true = compute_sucrose_outflow(C_ST_true, node_feat_original, params, node_fields, smooth_width=0.0)
     dS_dt_tot_true = dS_dt_from_flux_true + F_in_true - F_out_true
 
     # Compute physics error metrics (include edge_index for antisymmetry calculation)

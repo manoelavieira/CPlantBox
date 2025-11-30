@@ -526,3 +526,304 @@ class PhloemOperatorGNN(nn.Module):
             'divergences': divergences_raw,  # Per-node divergence (mol/s)
         }
 
+
+class PhysicsMessagePassingLayer(nn.Module):
+    """Physics-baked message passing layer that acts as a discrete operator.
+
+    Each layer performs one complete physics iteration:
+    1. Compute physical fluxes J_ax from current concentration C
+    2. Compute divergence divJ for each node
+    3. Update concentration: C_next = C + ΔC
+
+    where ΔC is predicted by an MLP from [C, divJ, psi, Temp, ...].
+
+    Uses layer normalization and residual connections for stable training.
+    """
+
+    def __init__(
+        self,
+        edge_feat_dim: int,
+        num_org_types: int,
+        hidden_size: int = 64,
+        dropout: float = 0.1,
+    ):
+        """Initialize physics message passing layer.
+
+        Args:
+            edge_feat_dim: Continuous edge feature dimension
+            num_org_types: Number of organ type categories
+            hidden_size: Hidden dimension for MLPs
+            dropout: Dropout probability for update MLP
+        """
+        super().__init__()
+
+        self.num_org_types = num_org_types
+
+        # Reuse physical flux computation logic
+        # This computes J_ax and divJ from concentration C
+        self.flux_module = PhysicalFluxModule(
+            edge_feat_dim=edge_feat_dim,
+            num_org_types=num_org_types,
+            hidden_size=hidden_size,
+        )
+
+        # MLP to predict concentration update ΔC
+        # Input: [C_current, divJ, psi, Temp, vol, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, time]
+        # node_feat_phys has 8 features, C is 1 feature, divJ is 1 feature -> 10 total
+        update_input_dim = 1 + 1 + 8  # C + divJ + node_feat_phys
+        self.update_mlp = nn.Sequential(
+            nn.Linear(update_input_dim, hidden_size),
+            nn.LayerNorm(hidden_size),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size, hidden_size),
+            nn.LayerNorm(hidden_size),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size, 1)  # Predict ΔC
+        )
+
+        # Learnable scaling factor for residual connection
+        self.residual_scale = nn.Parameter(torch.ones(1))
+
+        self.double()
+
+    def forward(
+        self,
+        C: torch.Tensor,
+        node_feat_phys: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_features: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Forward pass: compute fluxes, divergence, and update concentration.
+
+        Args:
+            C: Current concentration [N, 1] (mol/m³)
+            node_feat_phys: Physical node features [N, 8]
+            edge_index: Edge connectivity [2, E]
+            edge_features: Edge features [E, D+1]
+
+        Returns:
+            tuple: (C_next [N, 1], edge_fluxes [E], divergences [N])
+        """
+        # Compute physical fluxes and divergence from current C
+        edge_fluxes, divergences = self.flux_module(
+            C_ST=C,
+            node_feat_phys=node_feat_phys,
+            edge_index=edge_index,
+            edge_features=edge_features,
+        )
+
+        # Prepare input for update MLP: [C, divJ, node_feat_phys]
+        divJ = divergences.unsqueeze(-1)  # [N, 1]
+        update_input = torch.cat([C, divJ, node_feat_phys], dim=-1)  # [N, 10]
+
+        # Predict concentration change with residual connection
+        delta_C = self.update_mlp(update_input)  # [N, 1]
+
+        # Scaled residual: C_next = C + scale * ΔC
+        # This allows the model to control update magnitude
+        C_next = C + self.residual_scale * delta_C
+
+        return C_next, edge_fluxes, divergences
+
+
+class PhloemPhysicsLayerGNN(nn.Module):
+    """Physics-baked GNN where each layer is a discrete physical operator.
+
+    Architecture:
+    Each layer performs: C^(k) → (J_ax^(k), divJ^(k)) → C^(k+1)
+
+    Unlike PhloemOperatorGNN which applies physics only at the end, this model
+    integrates physics into every message passing iteration. Each layer:
+    1. Computes physical fluxes from current concentration state
+    2. Computes divergence for each node
+    3. Predicts concentration update based on [C, divJ, physical_features]
+
+    Returns a dictionary with:
+        - 'predictions': Node-wise sucrose content predictions [N, 1]
+        - 'edge_fluxes': Edge-wise flux predictions [E] (from final layer)
+        - 'divergences': Node-wise divergence values [N] (from final layer)
+    """
+
+    def __init__(self, cfg: ModelConfig):
+        super().__init__()
+
+        self.cfg = cfg
+        self._validated_input = False
+
+        # Input projection: physical features → initial concentration C_0
+        # Input: [psi, vol, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp, time]
+        in_node_dim = cfg.node_feat_dim + 1
+        self.input_proj = nn.Sequential(
+            nn.Linear(in_node_dim, cfg.hidden_size),
+            nn.LayerNorm(cfg.hidden_size),
+            nn.ReLU(),
+            nn.Dropout(cfg.dropout),
+            nn.Linear(cfg.hidden_size, cfg.hidden_size),
+            nn.LayerNorm(cfg.hidden_size),
+            nn.ReLU(),
+            nn.Linear(cfg.hidden_size, 1)  # Output: initial concentration C_0
+        )
+
+        # Stack of physics layers
+        physics_layers = []
+        for _ in range(cfg.num_layers):
+            layer = PhysicsMessagePassingLayer(
+                edge_feat_dim=cfg.edge_feat_dim,
+                num_org_types=cfg.num_org_types,
+                hidden_size=cfg.hidden_size,
+                dropout=cfg.dropout,
+            )
+            physics_layers.append(layer)
+
+        self.physics_layers = nn.ModuleList(physics_layers)
+
+        # Do NOT apply dropout to concentration state
+        # Dropout is already applied inside each PhysicsMessagePassingLayer
+        self._init_weights()
+        self.double()
+
+    def _init_weights(self):
+        """Initialize model weights."""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+        # Initialize the final layer of input_proj with small weights
+        # This makes initial C_0 close to zero (which gets added to physical baseline)
+        # Helps the model start from a physically reasonable state
+        final_layer = self.input_proj[-1]
+        nn.init.normal_(final_layer.weight, mean=0.0, std=0.01)
+        if final_layer.bias is not None:
+            nn.init.zeros_(final_layer.bias)
+
+    def _concentration_to_sucrose_content(
+        self,
+        C_ST: torch.Tensor,
+        vol_ST: torch.Tensor,
+        data: Data
+    ) -> torch.Tensor:
+        """Convert concentration to standardized sucrose content.
+
+        This is the inverse of _compute_concentration from PhloemOperatorGNN.
+
+        Args:
+            C_ST: Concentration [N, 1] in mol/m³
+            vol_ST: Sieve tube volume [N, 1]
+            data: Data object (may contain norm_stats)
+
+        Returns:
+            S_ST: Standardized sucrose content [N, 1]
+        """
+        # Compute sucrose content: S = C * vol
+        S = C_ST * vol_ST
+
+        # Standardization: S_ST = (S - mean) / std
+        if hasattr(data, 'norm_stats') and 'S_ST' in data.norm_stats:
+            S_mean = data.norm_stats['S_ST']['mean']
+            S_std = data.norm_stats['S_ST']['std']
+            S_ST = (S - S_mean) / (S_std + 1e-10)
+        else:
+            # If no normalization stats, return S directly
+            S_ST = S
+
+        return S_ST
+
+    def _validate_input(self, data: Data) -> None:
+        """Validate input data dimensions and types."""
+        if self._validated_input:
+            return
+
+        must_have = ["node_feat", "edge_feat", "edge_index", "edge_org",
+                     "node_fields", "sim_params", "step_params"]
+
+        for k in must_have:
+            if not hasattr(data, k):
+                raise ValueError(f"Data must have {k} attribute")
+        if not (isinstance(data.edge_index, torch.Tensor) and
+                data.edge_index.ndim == 2 and data.edge_index.size(0) == 2):
+            raise ValueError(f"edge_index must be [2, E], got {getattr(data.edge_index, 'shape', None)}")
+        if data.edge_index.dtype != torch.long:
+            raise ValueError(f"edge_index must be torch.long, got {data.edge_index.dtype}")
+        if data.node_feat.size(1) != self.cfg.node_feat_dim:
+            raise ValueError(f"Expected node_feat dim {self.cfg.node_feat_dim}, got {data.node_feat.size(1)}")
+        if data.edge_feat.size(1) != self.cfg.edge_feat_dim:
+            raise ValueError(f"Expected edge_feat dim {self.cfg.edge_feat_dim}, got {data.edge_feat.size(1)}")
+        if data.time_per_node is None:
+            raise ValueError("time_per_node is required")
+        if data.time_per_node.ndim != 2 or data.time_per_node.size(1) != 1:
+            raise ValueError(f"time_per_node must be [N,1], got {tuple(data.time_per_node.shape)}")
+
+        self._validated_input = True
+        print("Input validation successful (PhloemPhysicsLayerGNN)")
+
+    def forward(self, data: Data) -> dict:
+        """Forward pass returning predictions, edge fluxes, and divergences.
+
+        Args:
+            data: Graph data object
+
+        Returns:
+            dict with keys:
+                - 'predictions': [N, 1] sucrose content S_ST (standardized)
+                - 'edge_fluxes': [E] physical edge fluxes (mol/s)
+                - 'divergences': [N] divergence values (mol/s)
+        """
+        self._validate_input(data)
+        device = next(self.parameters()).device
+        dtype = next(self.parameters()).dtype
+
+        # Prepare inputs
+        edge_index = data.edge_index.to(device)
+        edge_feat = data.edge_feat.to(device=device, dtype=dtype)
+        edge_org = data.edge_org.to(device)
+        time_per_node = data.time_per_node.to(device=device, dtype=dtype)
+
+        if time_per_node.dim() != 2 or time_per_node.size(1) != 1:
+            raise RuntimeError(f"time_per_node must be [N,1]; got {tuple(time_per_node.shape)}")
+
+        # Physical features: [psi, vol, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp, time]
+        node_feat_phys = torch.cat([data.node_feat.to(device, dtype), time_per_node], dim=1)  # [N, 8]
+
+        # Prepare edge features (continuous + categorical)
+        edge_features = torch.empty(
+            edge_feat.size(0), edge_feat.size(1) + 1,
+            device=device, dtype=dtype
+        )
+        edge_features[:, :-1] = edge_feat
+        edge_features[:, -1] = edge_org.to(dtype)
+
+        # Initialize concentration C_0 from physical features
+        C = self.input_proj(node_feat_phys)  # [N, 1]
+
+        # Apply physics layers sequentially
+        edge_fluxes_final = None
+        divergences_final = None
+
+        for layer in self.physics_layers:
+            # Each layer: C^(k) → (J_ax^(k), divJ^(k)) → C^(k+1)
+            C, edge_fluxes, divergences = layer(
+                C=C,
+                node_feat_phys=node_feat_phys,
+                edge_index=edge_index,
+                edge_features=edge_features,
+            )
+
+            # Store final layer outputs (no dropout on concentration!)
+            edge_fluxes_final = edge_fluxes
+            divergences_final = divergences
+
+        # Convert final concentration C_L to sucrose content S_ST
+        vol_ST = node_feat_phys[:, 1:2]  # Extract volume from physical features
+        S_ST = self._concentration_to_sucrose_content(C, vol_ST, data)
+
+        # Return dictionary with all outputs
+        return {
+            'predictions': S_ST,  # Standardized sucrose content
+            'edge_fluxes': edge_fluxes_final,  # Physical fluxes from final layer
+            'divergences': divergences_final,  # Per-node divergence from final layer
+        }
+

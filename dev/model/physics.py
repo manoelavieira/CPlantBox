@@ -1042,23 +1042,35 @@ def log_physics_values(y_pred: torch.Tensor, data: Data, model_output=None):
             )
 
 
-def physics_residual(y_pred: torch.Tensor, data: Data):
+def physics_residual(
+    y_pred: torch.Tensor,
+    data: Data,
+    prev_sucrose: torch.Tensor = None,
+    is_first_timestep: bool = False,
+    prev_time: float = None
+):
     """Compute physics-informed residual term based on sucrose transport equations.
 
     Implements the governing equation for content-based sucrose transport in sieve-tubes:
     dS/dt = divJ + (F_in - F_out) ≈ 0
 
     where:
+    - dS/dt is the discrete time derivative (S(t) - S(t-1)) / Δt
     - divJ is the divergence of axial sucrose flux
     - F_in is the phloem loading rate
     - F_out is the sucrose outflow
 
-    Physics loss is computed by minimizing dS_dt_tot_pred to enforce
-    the conservation law on predicted concentrations.
+    For time-series mode, physics loss is computed by minimizing:
+        residual = dS/dt - (divJ + F_in - F_out)
+
+    where dS/dt is computed from the change in sucrose content between timesteps.
 
     Args:
-        y_pred: Predicted sucrose content [N, 1]
+        y_pred: Predicted sucrose content [N, 1] (standardized)
         data: Graph data containing topology, features, simulation parameters, and node fields
+        prev_sucrose: Previous timestep sucrose content [N, 1] (standardized). None for first timestep.
+        is_first_timestep: Whether this is the first timestep (skip dS/dt residual if True)
+        prev_time: Time at previous timestep (hours). If None and prev_sucrose provided, will try to extract from data.
 
     Returns:
         tuple: (residual_loss, physics_components_dict, physics_error_metrics) where:
@@ -1098,9 +1110,6 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
     F_in_pred = compute_phloem_loading(C_ST_pred, node_feat_original, params, node_fields, device)
     F_out_pred = compute_sucrose_outflow(C_ST_pred, node_feat_original, params, node_fields, smooth_width=SMOOTH_WIDTH)
 
-    # Total physics-based derivative from predictions (in physical units: mmol/h)
-    dS_dt_tot_pred = dS_dt_from_flux_pred + F_in_pred - F_out_pred
-
     # Always compute physics terms from true values for error metrics
     y_true = data.y.to(device)
     S_ST_true = data.target_scaler.inv_transform(y_true).squeeze(-1)
@@ -1113,6 +1122,9 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
     F_in_true = compute_phloem_loading(C_ST_true, node_feat_original, params, node_fields, device)
     F_out_true = compute_sucrose_outflow(C_ST_true, node_feat_original, params, node_fields, smooth_width=0.0)
     dS_dt_tot_true = dS_dt_from_flux_true + F_in_true - F_out_true
+
+    # Total physics-based derivative for residual calculation
+    dS_dt_tot_pred = dS_dt_from_flux_pred + F_in_pred - F_out_pred
 
     # Compute physics error metrics (include edge_index for antisymmetry calculation)
     physics_errors = _compute_physics_error_metrics(
@@ -1142,12 +1154,72 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
             f.write(msg)
 
     # ============================
-    # Compute physics residual: minimize dS_dt_tot_pred to zero
+    # Compute physics residual: enforce dS/dt = divJ + F_in - F_out
     # ============================
-    # Physics loss: enforce conservation law by minimizing the residual
-    # dS/dt = divJ + F_in - F_out ≈ 0
-    # residual = divJ_pred + F_in_pred - F_out_pred
-    residual = dS_dt_tot_pred
+    # For time-series mode, compute discrete time derivative dS/dt from state change
+    if not is_first_timestep and prev_sucrose is not None:
+        # Denormalize current and previous sucrose content
+        S_ST_curr = data.target_scaler.inv_transform(y_pred).squeeze(-1)
+        S_ST_prev = data.target_scaler.inv_transform(prev_sucrose).squeeze(-1)
+
+        # Get current and previous time (assuming data.time is a scalar tensor)
+        # If batched, we'd need to handle per-graph times, but we assume batch_size=1 for time-series
+        if hasattr(data, 'time'):
+            curr_time = data.time.item() if isinstance(data.time, torch.Tensor) else data.time
+        else:
+            # Fallback: extract from node features (column 7 is time)
+            curr_time = node_feat_original[0, 7].item()
+
+        # Compute delta_t from actual time difference
+        if prev_time is not None:
+            delta_t = curr_time - prev_time
+        else:
+            # Fallback: try to extract from node features if available
+            # This assumes node features have time information and prev_sucrose was provided
+            # but prev_time was not explicitly passed
+            # Use a typical value as last resort
+            delta_t = 1.0  # hours (default fallback)
+            if _ENABLE_PHYSICS_LOGGING:
+                with open(_PHYSICS_LOG_PATH, "a") as f:
+                    f.write(f"WARNING: prev_time not provided, using default delta_t = {delta_t} hours\n")
+
+        if delta_t <= 0:
+            raise ValueError(f"Invalid delta_t: {delta_t}. Current time: {curr_time}, Previous time: {prev_time}")
+
+        # Discrete time derivative: (S(t) - S(t-1)) / Δt  [mmol/h]
+        dS_dt_from_state = (S_ST_curr - S_ST_prev) / delta_t
+
+        # Physics-based derivative from fluxes and sources/sinks
+        dS_dt_from_physics = dS_dt_from_flux_pred + F_in_pred - F_out_pred
+
+        # Residual: difference between state-based and physics-based derivatives
+        # R = dS/dt_state - dS/dt_physics
+        # We want this to be close to zero
+        residual = dS_dt_from_state - dS_dt_from_physics
+
+        if _ENABLE_PHYSICS_LOGGING:
+            with open(_PHYSICS_LOG_PATH, "a") as f:
+                msg = f"\n--- TIME-SERIES MODE: Discrete Time Derivative ---\n"
+                msg += f"delta_t: {delta_t} hours\n"
+                msg += f"dS_dt_from_state (mean): {dS_dt_from_state.mean().item():.6e}\n"
+                msg += f"dS_dt_from_state (first 10): {dS_dt_from_state[:10].detach().cpu().numpy()}\n"
+                msg += f"dS_dt_from_physics (mean): {dS_dt_from_physics.mean().item():.6e}\n"
+                msg += f"dS_dt_from_physics (first 10): {dS_dt_from_physics[:10].detach().cpu().numpy()}\n"
+                msg += f"residual (mean abs): {residual.abs().mean().item():.6e}\n"
+                msg += f"residual (first 10): {residual[:10].detach().cpu().numpy()}\n"
+                f.write(msg)
+    else:
+        # First timestep or no previous state: fall back to steady-state assumption
+        # Minimize dS/dt_physics directly (assume dS/dt ≈ 0)
+        residual = dS_dt_tot_pred
+
+        if _ENABLE_PHYSICS_LOGGING:
+            with open(_PHYSICS_LOG_PATH, "a") as f:
+                msg = f"\n--- STEADY-STATE MODE (First Timestep or No Prev State) ---\n"
+                msg += f"is_first_timestep: {is_first_timestep}\n"
+                msg += f"prev_sucrose is None: {prev_sucrose is None}\n"
+                msg += f"Using steady-state assumption: residual = dS/dt_physics\n"
+                f.write(msg)
 
     # Add penalty for negative concentrations (after denormalization)
     # This encourages the model to respect the physical constraint C_ST >= 0
@@ -1218,7 +1290,10 @@ def physics_residual(y_pred: torch.Tensor, data: Data):
 
 def physics_residual_operator(
     model_output: dict,
-    data: Data
+    data: Data,
+    prev_sucrose: torch.Tensor = None,
+    is_first_timestep: bool = False,
+    prev_time: float = None
 ) -> tuple[torch.Tensor, dict]:
     """Compute physics residual for operator-based GNN.
 
@@ -1229,9 +1304,8 @@ def physics_residual_operator(
     The conservation law is:
         dS/dt = div(J) + F_in - F_out ≈ 0
 
-    where:
-        - div(J) is already computed by the model (from edge fluxes)
-        - F_in and F_out are computed from predicted concentrations
+    For time-series mode, dS/dt is computed from the discrete change in sucrose content:
+        dS/dt ≈ (S(t) - S(t-1)) / Δt
 
     Args:
         model_output: Dict containing:
@@ -1239,6 +1313,9 @@ def physics_residual_operator(
             - 'edge_fluxes': [E] predicted edge fluxes
             - 'divergences': [N] divergence values
         data: Graph data containing features and parameters
+        prev_sucrose: Previous timestep sucrose content [N, 1] (standardized). None for first timestep.
+        is_first_timestep: Whether this is the first timestep (skip dS/dt residual if True)
+        prev_time: Time at previous timestep (hours). If None and prev_sucrose provided, will try to extract from data.
 
     Returns:
         tuple: (residual_loss, physics_components_dict, physics_error_metrics)
@@ -1293,6 +1370,11 @@ def physics_residual_operator(
     F_out_true = compute_sucrose_outflow(C_ST_true, node_feat_original, params, node_fields, smooth_width=0.0)
     dS_dt_tot_true = dS_dt_from_flux_true + F_in_true - F_out_true
 
+    # ============================
+    # USE TRUE F_in AND F_out FOR SUPERVISED NODES (if enabled)
+    # Total physics-based derivative for residual calculation
+    dS_dt_tot_pred = divergence_pred + F_in_pred - F_out_pred
+
     # Compute physics error metrics (include edge_index for antisymmetry calculation)
     physics_errors = _compute_physics_error_metrics(
         J_ax_true, edge_fluxes_pred,
@@ -1317,8 +1399,70 @@ def physics_residual_operator(
             msg += _log_comparison_metrics(physics_errors)
             f.write(msg)
 
-    # Compute loss
-    residual = dS_dt_tot_pred
+    # ============================
+    # Compute physics residual: enforce dS/dt = divJ + F_in - F_out
+    # ============================
+    # For time-series mode, compute discrete time derivative dS/dt from state change
+    if not is_first_timestep and prev_sucrose is not None:
+        # Denormalize current and previous sucrose content
+        S_ST_curr = data.target_scaler.inv_transform(y_pred).squeeze(-1)
+        S_ST_prev = data.target_scaler.inv_transform(prev_sucrose).squeeze(-1)
+
+        # Get current time
+        if hasattr(data, 'time'):
+            curr_time = data.time.item() if isinstance(data.time, torch.Tensor) else data.time
+        else:
+            # Fallback: extract from node features (column 7 is time)
+            curr_time = node_feat_original[0, 7].item()
+
+        # Compute delta_t from actual time difference
+        if prev_time is not None:
+            delta_t = curr_time - prev_time
+        else:
+            # Fallback: try to extract from node features if available
+            # This assumes node features have time information and prev_sucrose was provided
+            # but prev_time was not explicitly passed
+            # Use a typical value as last resort
+            delta_t = 1.0  # hours (default fallback)
+            if _ENABLE_PHYSICS_LOGGING:
+                with open(_PHYSICS_LOG_PATH, "a") as f:
+                    f.write(f"WARNING: prev_time not provided, using default delta_t = {delta_t} hours\n")
+
+        if delta_t <= 0:
+            raise ValueError(f"Invalid delta_t: {delta_t}. Current time: {curr_time}, Previous time: {prev_time}")
+
+        # Discrete time derivative: (S(t) - S(t-1)) / Δt  [mmol/h]
+        dS_dt_from_state = (S_ST_curr - S_ST_prev) / delta_t
+
+        # Physics-based derivative from fluxes and sources/sinks
+        # For operator model, divergence is already predicted
+        dS_dt_from_physics = divergence_pred + F_in_pred - F_out_pred
+
+        # Residual: difference between state-based and physics-based derivatives
+        residual = dS_dt_from_state - dS_dt_from_physics
+
+        if _ENABLE_PHYSICS_LOGGING:
+            with open(_PHYSICS_LOG_PATH, "a") as f:
+                msg = f"\n--- TIME-SERIES MODE: Discrete Time Derivative (Operator) ---\n"
+                msg += f"delta_t: {delta_t} hours\n"
+                msg += f"dS_dt_from_state (mean): {dS_dt_from_state.mean().item():.6e}\n"
+                msg += f"dS_dt_from_state (first 10): {dS_dt_from_state[:10].detach().cpu().numpy()}\n"
+                msg += f"dS_dt_from_physics (mean): {dS_dt_from_physics.mean().item():.6e}\n"
+                msg += f"dS_dt_from_physics (first 10): {dS_dt_from_physics[:10].detach().cpu().numpy()}\n"
+                msg += f"residual (mean abs): {residual.abs().mean().item():.6e}\n"
+                msg += f"residual (first 10): {residual[:10].detach().cpu().numpy()}\n"
+                f.write(msg)
+    else:
+        # First timestep or no previous state: fall back to steady-state assumption
+        residual = dS_dt_tot_pred
+
+        if _ENABLE_PHYSICS_LOGGING:
+            with open(_PHYSICS_LOG_PATH, "a") as f:
+                msg = f"\n--- STEADY-STATE MODE (Operator - First Timestep or No Prev State) ---\n"
+                msg += f"is_first_timestep: {is_first_timestep}\n"
+                msg += f"prev_sucrose is None: {prev_sucrose is None}\n"
+                msg += f"Using steady-state assumption: residual = dS/dt_physics\n"
+                f.write(msg)
 
     # Add penalty for negative concentrations (after denormalization)
     # This encourages the model to respect the physical constraint C_ST >= 0

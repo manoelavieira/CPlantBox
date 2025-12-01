@@ -22,6 +22,162 @@ import training.logging as logging
 EPSILON = 1e-12
 
 
+def initialize_prev_state(max_nodes: int, device: torch.device, dtype: torch.dtype) -> dict:
+    """Initialize prev_state dictionary for tracking sucrose across timesteps.
+
+    Args:
+        max_nodes: Maximum number of nodes expected
+        device: Device to allocate tensors on
+        dtype: Data type for tensors
+
+    Returns:
+        Dictionary with 'sucrose' [max_nodes, 1], 'seen' [max_nodes] boolean mask, and 'time' scalar
+    """
+    return {
+        'sucrose': torch.zeros(max_nodes, 1, device=device, dtype=dtype),
+        'seen': torch.zeros(max_nodes, dtype=torch.bool, device=device),
+        'time': None  # Will be set to the time of the previous graph
+    }
+
+
+def get_prev_sucrose_for_batch(
+    data,
+    prev_state: dict,
+    loss_type: LossType,
+    is_first_timestep: bool = False
+) -> torch.Tensor:
+    """Get previous sucrose content for current batch, handling teacher forcing.
+
+    For time-series training, we use:
+    - Ground-truth S(t-1) for IC nodes (at t=min_time) and BC nodes (all times) in PHYSICS_WITH_IC_BC mode
+    - Ground-truth S(t-1) for ALL nodes in COMBINED mode
+    - Predicted S(t-1) from prev_state for other nodes
+    - Ground-truth S(t) for new nodes (first appearance)
+
+    Args:
+        data: Current batch data
+        prev_state: Dictionary with previous timestep state
+        loss_type: Type of loss being used (determines supervision strategy)
+        is_first_timestep: Whether this is the very first timestep (t=min_time)
+
+    Returns:
+        prev_sucrose: [N, 1] tensor with previous sucrose content (standardized)
+    """
+    device = data.y.device
+    dtype = data.y.dtype
+    N = data.y.size(0)
+
+    # Initialize with zeros
+    prev_sucrose = torch.zeros(N, 1, device=device, dtype=dtype)
+
+    # For the very first timestep, use ground truth as initial state
+    if is_first_timestep:
+        prev_sucrose = data.y.clone()
+        return prev_sucrose
+
+    # Determine node indices (handle both single graph and batched cases)
+    if hasattr(data, 'batch') and data.batch is not None:
+        num_graphs = data.batch.max().item() + 1
+        if num_graphs > 1:
+            # Batched case: need to map batch indices to global node IDs
+            # For simplicity in initial implementation, assume node IDs are consistent within a sequence
+            raise NotImplementedError("Batched time-series training not yet implemented. Use batch_size=1.")
+
+    # Single graph case: node indices are just 0..N-1
+    node_ids = torch.arange(N, device=device)
+
+    # Detect new nodes (nodes that haven't been seen before)
+    has_prev_state = prev_state['seen'][node_ids]
+    is_new_node = ~has_prev_state
+
+    # For new nodes: use ground-truth S(t) as their "previous" state
+    if is_new_node.any():
+        prev_sucrose[is_new_node] = data.y[is_new_node]
+
+    # For existing nodes: determine whether to use ground truth or prediction
+    if has_prev_state.any():
+        if loss_type == LossType.COMBINED:
+            # COMBINED mode: use ground truth for ALL existing nodes (full teacher forcing)
+            prev_sucrose[has_prev_state] = data.y[has_prev_state]
+
+        elif loss_type == LossType.PHYSICS_WITH_IC_BC:
+            # PHYSICS mode: use ground truth only for IC and BC nodes
+            # For other nodes, use predicted values from prev_state
+
+            # Check if this is initial time for IC supervision
+            tolerance = 1e-6
+            is_t0 = (torch.abs(data.time - data.min_time) < tolerance).any() if hasattr(data, 'time') else False
+
+            # IC nodes: only at t=min_time
+            use_gt_for_ic = data.is_initial_node & is_t0 if is_t0 else torch.zeros_like(has_prev_state)
+
+            # BC nodes: always use ground truth
+            use_gt_for_bc = data.is_boundary_node if hasattr(data, 'is_boundary_node') else torch.zeros_like(has_prev_state)
+
+            # Combine IC and BC masks
+            use_ground_truth = (use_gt_for_ic | use_gt_for_bc) & has_prev_state
+            use_prediction = has_prev_state & ~use_ground_truth
+
+            # Apply ground truth where specified
+            if use_ground_truth.any():
+                prev_sucrose[use_ground_truth] = data.y[use_ground_truth]
+
+            # Apply predictions from prev_state for other nodes
+            if use_prediction.any():
+                prev_sucrose[use_prediction] = prev_state['sucrose'][node_ids[use_prediction]]
+
+        else:  # DATA_ONLY mode
+            # Use predictions from prev_state
+            prev_sucrose[has_prev_state] = prev_state['sucrose'][node_ids[has_prev_state]]
+
+    return prev_sucrose
+
+
+def update_prev_state(
+    prev_state: dict,
+    predictions: torch.Tensor,
+    data
+) -> None:
+    """Update prev_state with new predictions for next timestep.
+
+    Args:
+        prev_state: Dictionary to update in-place
+        predictions: Current timestep predictions [N, 1] (standardized)
+        data: Current batch data
+    """
+    device = predictions.device
+    N = predictions.size(0)
+
+    # Check if this is actually a batched graph (multiple graphs batched together)
+    if hasattr(data, 'batch') and data.batch is not None:
+        num_graphs = data.batch.max().item() + 1
+        if num_graphs > 1:
+            raise NotImplementedError("Batched time-series training not yet implemented. Use batch_size=1.")
+
+    # Single graph: update all nodes
+    node_ids = torch.arange(N, device=device)
+
+    # Store predictions
+    prev_state['sucrose'][node_ids] = predictions.detach()
+
+    # Mark nodes as seen
+    prev_state['seen'][node_ids] = True
+
+    # Store current time for next timestep's delta_t calculation
+    if hasattr(data, 'time'):
+        prev_state['time'] = data.time.item() if isinstance(data.time, torch.Tensor) else data.time
+    else:
+        # Fallback: try to extract from node features (column 7 is time)
+        if hasattr(data, 'node_feat') and data.node_feat.size(1) > 7:
+            # Denormalize if needed
+            if hasattr(data, 'feature_scaler'):
+                node_feat_original = data.feature_scaler.inv_transform(data.node_feat)
+                prev_state['time'] = node_feat_original[0, 7].item()
+            else:
+                prev_state['time'] = data.node_feat[0, 7].item()
+
+
+
 def _compute_adaptive_weight(
     reference_loss: torch.Tensor,
     physics_loss: torch.Tensor,
@@ -103,14 +259,19 @@ def accumulate_epoch_stats(
     totals["weighted_physics"] += weighted_physics
 
 
-def run_forward(model: nn.Module, data):
-    """Forward pass on inputs.
+def run_forward(model: nn.Module, data, prev_sucrose: torch.Tensor):
+    """Forward pass on inputs with previous timestep sucrose.
+
+    Args:
+        model: The neural network model
+        data: Graph data
+        prev_sucrose: Previous timestep sucrose content [N, 1] (standardized)
 
     Returns:
         For NNConv model: Tensor of predictions [N, 1]
         For Operator model: Dict with 'predictions', 'edge_fluxes', 'divergences'
     """
-    output = model(data)
+    output = model(data, prev_sucrose)
     return output
 
 
@@ -147,35 +308,52 @@ def compute_physics_residual_step(
     model: nn.Module,
     data,
     model_output = None,
+    prev_sucrose: torch.Tensor = None,
+    is_first_timestep: bool = False,
+    loss_type: LossType = LossType.COMBINED,
+    prev_time: float = None,
 ) -> Tuple[torch.Tensor, Optional[PhysicsMetrics], Optional[PhysicsErrorMetrics]]:
     """
-    Unified physics residual computation for train/eval.
+    Unified physics residual computation for train/eval with time-series support.
 
     Handles both NNConv and Operator model types:
     - NNConv: Reconstructs fluxes from predicted concentrations
     - Operator: Uses directly predicted edge fluxes and divergences
 
+    Source/sink term handling:
+    - COMBINED mode: Uses TRUE F_in/F_out for ALL nodes (isolates flux divergence quality)
+    - PHYSICS_WITH_IC_BC mode: Uses TRUE F_in/F_out only for IC/BC nodes
+    - DATA_ONLY mode: No physics residual (uses predicted F_in/F_out for logging only)
+
     Args:
         model: The neural network model
         data: Graph data containing features and targets
         model_output: Model output (tensor or dict). If None, will run forward pass.
+        prev_sucrose: Previous timestep sucrose content [N, 1] (standardized). Required for discrete time derivative.
+        is_first_timestep: Whether this is the first timestep (skip dS/dt residual if True)
+        loss_type: Type of loss being used (determines source/sink term substitution strategy)
+        prev_time: Time at previous timestep (hours). Used to compute delta_t for discrete derivative.
 
     Returns:
         Tuple of (phys_res_scalar, PhysicsMetrics|None, PhysicsErrorMetrics|None)
     """
     # If output not provided, run forward pass
     if model_output is None:
-        model_output = model(data)
+        raise ValueError("model_output must be provided (forward pass should be done before calling this function)")
 
     # Determine model type based on output format
     is_operator_model = isinstance(model_output, dict)
 
     # Compute physics residual using appropriate function
     if is_operator_model:
-        phys_res, phys_res_dict, phys_errors = physics_residual_operator(model_output, data)
+        phys_res, phys_res_dict, phys_errors = physics_residual_operator(
+            model_output, data, prev_sucrose, is_first_timestep, prev_time
+        )
     else:
         # NNConv model: model_output is a tensor
-        phys_res, phys_res_dict, phys_errors = physics_residual(model_output, data)
+        phys_res, phys_res_dict, phys_errors = physics_residual(
+            model_output, data, prev_sucrose, is_first_timestep, prev_time
+        )
 
     # Reduce to scalar if needed
     phys_res_scalar = phys_res if phys_res.dim() == 0 else phys_res.mean()
@@ -661,6 +839,11 @@ def train_epoch(
               "bc_nodes": 0, "bc_pct": 0.0,
               "n_batches": 0, "last_phys_metrics": None, "last_phys_errors": None}
 
+    # Initialize state tracking for time-series learning
+    device = next(model.parameters()).device
+    dtype = next(model.parameters()).dtype
+    prev_state = initialize_prev_state(max_nodes=10000, device=device, dtype=dtype)
+
     for batch_idx, data in enumerate(loader):
         optimizer.zero_grad(set_to_none=True)
 
@@ -671,8 +854,22 @@ def train_epoch(
             is_training=True
         )
 
-        # Forward pass (returns tensor or dict depending on model type)
-        model_output = run_forward(model, data)
+        # Determine if this is the first timestep
+        tolerance = 1e-6
+        is_first_timestep = False
+        if hasattr(data, 'time') and hasattr(data, 'min_time'):
+            is_first_timestep = (torch.abs(data.time - data.min_time) < tolerance).any().item()
+
+        # Get previous sucrose content for time-series learning
+        prev_sucrose = get_prev_sucrose_for_batch(
+            data,
+            prev_state,
+            loss_config.loss_type,
+            is_first_timestep
+        )
+
+        # Forward pass with temporal context (returns tensor or dict depending on model type)
+        model_output = run_forward(model, data, prev_sucrose)
 
         # Extract predictions tensor for metric computation
         pred = _extract_predictions(model_output)
@@ -686,7 +883,11 @@ def train_epoch(
             phys_res, phys_res_metrics, phys_res_errors = compute_physics_residual_step(
                 model=model,
                 data=data,
-                model_output=model_output
+                model_output=model_output,
+                prev_sucrose=prev_sucrose,
+                is_first_timestep=is_first_timestep,
+                loss_type=loss_config.loss_type,
+                prev_time=prev_state.get('time', None) if prev_state is not None else None
             )
 
         # Compute loss and metrics (no physics scaling needed)
@@ -751,6 +952,9 @@ def train_epoch(
 
         # Accumulate metrics for epoch averaging
         with torch.no_grad():
+            # Update prev_state with current predictions for next timestep
+            update_prev_state(prev_state, pred, data)
+
             # Calculate actual weighted components for this batch
             if loss_config.loss_type == LossType.PHYSICS_WITH_IC_BC:
                 batch_weighted_sup = (loss_config.lambda_ic * result.ic) + (loss_config.lambda_bc * result.bc)
@@ -1074,6 +1278,11 @@ def eval_model(
               "bc_nodes": 0, "bc_pct": 0.0,
               "n_batches": 0, "last_phys_metrics": None, "last_phys_errors": None}
 
+    # Initialize state tracking for time-series evaluation
+    device = next(model.parameters()).device
+    dtype = next(model.parameters()).dtype
+    prev_state = initialize_prev_state(max_nodes=10000, device=device, dtype=dtype)
+
     with torch.no_grad():
         for batch_idx, data in enumerate(loader):
             # Prepare data for model: add time info
@@ -1083,8 +1292,22 @@ def eval_model(
                 is_training=False
             )
 
-            # Forward pass (returns tensor or dict depending on model type)
-            model_output = run_forward(model, data)
+            # Determine if this is the first timestep
+            tolerance = 1e-6
+            is_first_timestep = False
+            if hasattr(data, 'time') and hasattr(data, 'min_time'):
+                is_first_timestep = (torch.abs(data.time - data.min_time) < tolerance).any().item()
+
+            # Get previous sucrose content for time-series learning
+            prev_sucrose = get_prev_sucrose_for_batch(
+                data,
+                prev_state,
+                loss_config.loss_type,
+                is_first_timestep
+            )
+
+            # Forward pass with temporal context (returns tensor or dict depending on model type)
+            model_output = run_forward(model, data, prev_sucrose)
 
             # Extract predictions tensor for metric computation
             pred = _extract_predictions(model_output)
@@ -1098,7 +1321,11 @@ def eval_model(
                 phys_res, phys_res_metrics, phys_res_errors = compute_physics_residual_step(
                     model=model,
                     data=data,
-                    model_output=model_output
+                    model_output=model_output,
+                    prev_sucrose=prev_sucrose,
+                    is_first_timestep=is_first_timestep,
+                    loss_type=loss_config.loss_type,
+                    prev_time=prev_state.get('time', None) if prev_state is not None else None
                 )
 
             # Compute loss and metrics (no physics scaling needed)
@@ -1114,6 +1341,9 @@ def eval_model(
                 phys_res_metrics,
                 phys_res_errors
             )
+
+            # Update prev_state with current predictions for next timestep
+            update_prev_state(prev_state, pred, data)
 
             # Calculate actual weighted components for this batch (for eval)
             if loss_config.loss_type == LossType.PHYSICS_WITH_IC_BC:

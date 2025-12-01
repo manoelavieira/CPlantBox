@@ -23,7 +23,6 @@ class TrainingConfig:
     batch_size: int = 2
     train_ratio: float = 0.8
     val_ratio: float = 0.1
-    time_series: bool = True  # If True, use time-series splitting; if False, use random splitting
 
     # Model architecture
     model_type: str = "nnconv"  # 'nnconv' or 'operator'

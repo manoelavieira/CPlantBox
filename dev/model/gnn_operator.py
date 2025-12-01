@@ -267,7 +267,6 @@ class PhysicalFluxModule(nn.Module):
         delta_psi = psi_src - psi_dst
         delta_C = C_src - C_dst
 
-
         # Antisymmetric linear combination: a_ij = w_psi * Δpsi + w_C * ΔC
         antisym_input = torch.cat([delta_psi, delta_C], dim=-1)  # [E, 2]
         a_ij = self.antisym_linear(antisym_input).squeeze(-1)    # [E]
@@ -336,10 +335,11 @@ class PhloemOperatorGNN(nn.Module):
         self.cfg = cfg
         self._validated_input = False
 
-        # Node input = continuous node features + time
-        in_node_dim = cfg.node_feat_dim + 1  # Physical features: [psi, vol, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp, time]
+        # Node input for time-series mode: [psi, vol, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp, time, S(t-1)]
+        # Always includes previous sucrose content for temporal modeling
+        in_node_dim = cfg.node_feat_dim + 1 + 1  # base features + time + prev_sucrose
 
-        # Project physical features to latent space
+        # Project physical features + prev_sucrose to latent space
         self.input_proj = nn.Linear(in_node_dim, cfg.hidden_size)
 
         conv_layers = []
@@ -444,11 +444,14 @@ class PhloemOperatorGNN(nn.Module):
         self._validated_input = True
         print("Input validation successful (PhloemOperatorGNN)")
 
-    def forward(self, data: Data) -> dict:
+    def forward(self, data: Data, prev_sucrose: torch.Tensor) -> dict:
         """Forward pass returning predictions, edge fluxes, and divergences.
 
         Args:
             data: Graph data object
+            prev_sucrose: Previous timestep sucrose content [N, 1] (standardized).
+                         Required for time-series learning. For first timestep or new nodes,
+                         should be initialized with appropriate values (e.g., ground truth).
 
         Returns:
             dict with keys:
@@ -469,12 +472,19 @@ class PhloemOperatorGNN(nn.Module):
         if time_per_node.dim() != 2 or time_per_node.size(1) != 1:
             raise RuntimeError(f"time_per_node must be [N,1]; got {tuple(time_per_node.shape)}")
 
-        # Physical features: [psi, vol, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp, time]
-        # This tensor is kept unchanged throughout all layers
-        node_feat_phys = torch.cat([data.node_feat.to(device, dtype), time_per_node], dim=1)  # [N, 8]
+        # Prepare prev_sucrose
+        prev_sucrose_tensor = prev_sucrose.to(device=device, dtype=dtype)
+        if prev_sucrose_tensor.dim() == 1:
+            prev_sucrose_tensor = prev_sucrose_tensor.unsqueeze(-1)
 
-        # Initialize latent state from physical features
-        h = self.input_proj(node_feat_phys)  # [N, hidden_size]
+        # Physical features for flux computation (no prev_sucrose): [psi, vol, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp, time]
+        node_feat_phys_for_flux = torch.cat([data.node_feat.to(device, dtype), time_per_node], dim=1)  # [N, 8]
+
+        # Full node features for message passing (includes prev_sucrose): [psi, vol, ..., Temp, time, S(t-1)]
+        node_feat_with_history = torch.cat([node_feat_phys_for_flux, prev_sucrose_tensor], dim=1)  # [N, 9]
+
+        # Initialize latent state from physical features + temporal context
+        h = self.input_proj(node_feat_with_history)  # [N, hidden_size]
 
         # Prepare edge features (continuous + categorical)
         edge_features = torch.empty(
@@ -508,13 +518,13 @@ class PhloemOperatorGNN(nn.Module):
         S_ST = self.head(h)
 
         # Compute C_ST from S_ST for flux calculation
-        vol_ST = node_feat_phys[:, 1:2]
+        vol_ST = node_feat_phys_for_flux[:, 1:2]
         C_ST = self._compute_concentration(S_ST, vol_ST, data)
 
         # Compute raw physical fluxes from predicted concentrations
         edge_fluxes_raw, divergences_raw = self.flux_module(
             C_ST=C_ST,
-            node_feat_phys=node_feat_phys,
+            node_feat_phys=node_feat_phys_for_flux,
             edge_index=edge_index,
             edge_features=edge_features
         )
@@ -652,9 +662,9 @@ class PhloemPhysicsLayerGNN(nn.Module):
         self.cfg = cfg
         self._validated_input = False
 
-        # Input projection: physical features → initial concentration C_0
-        # Input: [psi, vol, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp, time]
-        in_node_dim = cfg.node_feat_dim + 1
+        # Input projection: physical features + prev_sucrose → initial concentration C_0
+        # Input: [psi, vol, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp, time, S(t-1)]
+        in_node_dim = cfg.node_feat_dim + 1 + 1  # base features + time + prev_sucrose
         self.input_proj = nn.Sequential(
             nn.Linear(in_node_dim, cfg.hidden_size),
             nn.LayerNorm(cfg.hidden_size),
@@ -760,11 +770,13 @@ class PhloemPhysicsLayerGNN(nn.Module):
         self._validated_input = True
         print("Input validation successful (PhloemPhysicsLayerGNN)")
 
-    def forward(self, data: Data) -> dict:
+    def forward(self, data: Data, prev_sucrose: torch.Tensor) -> dict:
         """Forward pass returning predictions, edge fluxes, and divergences.
 
         Args:
             data: Graph data object
+            prev_sucrose: Previous timestep sucrose content [N, 1] (standardized).
+                         Required for time-series learning.
 
         Returns:
             dict with keys:
@@ -785,8 +797,19 @@ class PhloemPhysicsLayerGNN(nn.Module):
         if time_per_node.dim() != 2 or time_per_node.size(1) != 1:
             raise RuntimeError(f"time_per_node must be [N,1]; got {tuple(time_per_node.shape)}")
 
-        # Physical features: [psi, vol, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp, time]
-        node_feat_phys = torch.cat([data.node_feat.to(device, dtype), time_per_node], dim=1)  # [N, 8]
+        # Prepare prev_sucrose
+        prev_sucrose_tensor = prev_sucrose.to(device=device, dtype=dtype)
+        if prev_sucrose_tensor.dim() == 1:
+            prev_sucrose_tensor = prev_sucrose_tensor.unsqueeze(-1)
+
+        # Physical features for flux computation: [psi, vol, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp, time]
+        node_feat_phys_base = torch.cat([data.node_feat.to(device, dtype), time_per_node], dim=1)  # [N, 8]
+
+        # Full features with temporal context: [psi, vol, ..., Temp, time, S(t-1)]
+        node_feat_with_history = torch.cat([node_feat_phys_base, prev_sucrose_tensor], dim=1)  # [N, 9]
+
+        # Initialize concentration C_0 from physical features + temporal context
+        C = self.input_proj(node_feat_with_history)  # [N, 1]
 
         # Prepare edge features (continuous + categorical)
         edge_features = torch.empty(
@@ -796,9 +819,6 @@ class PhloemPhysicsLayerGNN(nn.Module):
         edge_features[:, :-1] = edge_feat
         edge_features[:, -1] = edge_org.to(dtype)
 
-        # Initialize concentration C_0 from physical features
-        C = self.input_proj(node_feat_phys)  # [N, 1]
-
         # Apply physics layers sequentially
         edge_fluxes_final = None
         divergences_final = None
@@ -807,7 +827,7 @@ class PhloemPhysicsLayerGNN(nn.Module):
             # Each layer: C^(k) → (J_ax^(k), divJ^(k)) → C^(k+1)
             C, edge_fluxes, divergences = layer(
                 C=C,
-                node_feat_phys=node_feat_phys,
+                node_feat_phys=node_feat_phys_base,
                 edge_index=edge_index,
                 edge_features=edge_features,
             )
@@ -817,7 +837,7 @@ class PhloemPhysicsLayerGNN(nn.Module):
             divergences_final = divergences
 
         # Convert final concentration C_L to sucrose content S_ST
-        vol_ST = node_feat_phys[:, 1:2]  # Extract volume from physical features
+        vol_ST = node_feat_phys_base[:, 1:2]  # Extract volume from physical features
         S_ST = self._concentration_to_sucrose_content(C, vol_ST, data)
 
         # Return dictionary with all outputs

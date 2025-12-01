@@ -24,10 +24,6 @@ def parse_arguments() -> TrainingConfig:
                        help='Ratio of data to use for training')
     parser.add_argument('--val-ratio', type=float, default=0.1,
                        help='Ratio of data to use for validation')
-    parser.add_argument('--time-series', action='store_true', default=True,
-                       help='Use time-series splitting (contiguous chunks by time) instead of random shuffling')
-    parser.add_argument('--random-split', dest='time_series', action='store_false',
-                       help='Use random shuffling instead of time-series splitting')
     parser.add_argument('--lr', type=float, default=3e-3,
                        help='Initial learning rate')
     parser.add_argument('--weight-decay', type=float, default=1e-5,
@@ -63,7 +59,6 @@ def parse_arguments() -> TrainingConfig:
         batch_size=args.batch_size,
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
-        time_series=args.time_series,
         lr=args.lr,
         weight_decay=args.weight_decay,
         patience=args.patience,

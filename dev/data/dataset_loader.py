@@ -474,69 +474,51 @@ def train_test_split(
         train_ratio: float,
         val_ratio: float,
         batch_size: int = 8,
-        random_seed: int = 42,
-        time_series: bool = True
+        random_seed: int = 42
     ) -> Tuple[List[Data], List[Data], List[Data]]:
-    """Split graphs into train/val/test sets.
+    """Split graphs into train/val/test sets using time-series splitting.
+
+    Graphs are sorted by time and split into contiguous chunks:
+    - train: earliest times
+    - val: middle times
+    - test: latest times
 
     Args:
         graphs: List of PyG Data objects
         train_ratio: Proportion of data to use for training
         val_ratio: Proportion of data to use for validation
         batch_size: Batch size for DataLoaders
-        random_seed: Random seed for reproducibility (only used if time_series=False)
-        time_series: If True, sorts graphs by time and creates contiguous chunks.
-                     If False, uses random shuffling (original behavior).
+        random_seed: Random seed (kept for API compatibility but not used in time-series mode)
 
     Returns:
-        train_graphs, val_graphs, test_graphs: Lists of graphs for each split
+        train_loader, val_loader, test_loader: DataLoaders for each split
     """
     n_samples = len(graphs)
     n_train = int(train_ratio * n_samples)
     n_val = int(val_ratio * n_samples)
     n_test = n_samples - n_train - n_val
 
-    if time_series:
-        # Sort graphs by their time attribute for time-series splitting
-        # Extract time values for sorting
-        times = [graph.time.item() for graph in graphs]
+    # Sort graphs by their time attribute for time-series splitting
+    times = [graph.time.item() for graph in graphs]
+    sorted_indices = sorted(range(n_samples), key=lambda i: times[i])
 
-        # Get indices that would sort the graphs by time
-        sorted_indices = sorted(range(n_samples), key=lambda i: times[i])
+    # Create contiguous chunks: train (earliest), val (middle), test (latest)
+    train_idx = sorted_indices[:n_train]
+    val_idx = sorted_indices[n_train:n_train + n_val]
+    test_idx = sorted_indices[n_train + n_val:]
 
-        # Create contiguous chunks: train (earliest), val (middle), test (latest)
-        train_idx = sorted_indices[:n_train]
-        val_idx = sorted_indices[n_train:n_train + n_val]
-        test_idx = sorted_indices[n_train + n_val:]
-
-        print(f"\nTime-series split:")
-        print(f"  Train: {len(train_idx)} graphs, time range [{times[train_idx[0]]:.2f}, {times[train_idx[-1]]:.2f}]")
-        print(f"  Val:   {len(val_idx)} graphs, time range [{times[val_idx[0]]:.2f}, {times[val_idx[-1]]:.2f}]")
-        print(f"  Test:  {len(test_idx)} graphs, time range [{times[test_idx[0]]:.2f}, {times[test_idx[-1]]:.2f}]")
-    else:
-        # Original behavior: random shuffling
-        generator = torch.Generator().manual_seed(random_seed)
-        indices = torch.randperm(n_samples, generator=generator)
-
-        train_idx = indices[:n_train]
-        val_idx = indices[n_train:n_train + n_val]
-        test_idx = indices[n_train + n_val:]
-
-        print(f"\nRandom split with seed {random_seed}:")
-        print(f"  Train: {len(train_idx)} graphs")
-        print(f"  Val:   {len(val_idx)} graphs")
-        print(f"  Test:  {len(test_idx)} graphs")
+    print(f"\nTime-series split:")
+    print(f"  Train: {len(train_idx)} graphs, time range [{times[train_idx[0]]:.2f}, {times[train_idx[-1]]:.2f}]")
+    print(f"  Val:   {len(val_idx)} graphs, time range [{times[val_idx[0]]:.2f}, {times[val_idx[-1]]:.2f}]")
+    print(f"  Test:  {len(test_idx)} graphs, time range [{times[test_idx[0]]:.2f}, {times[test_idx[-1]]:.2f}]")
 
     train_graphs = [graphs[i] for i in train_idx]
     val_graphs = [graphs[i] for i in val_idx]
     test_graphs = [graphs[i] for i in test_idx]
 
-    # Only shuffle for non-time-series (i.e., iid snapshot) training
-    # In time-series mode, preserve chronological order
-    shuffle_train = not time_series
-
+    # Preserve chronological order (no shuffling)
     train_loader = DataLoader(train_graphs, batch_size=batch_size,
-                              shuffle=shuffle_train, collate_fn=collate_graphs)
+                              shuffle=False, collate_fn=collate_graphs)
     val_loader = DataLoader(val_graphs, batch_size=batch_size,
                             shuffle=False, collate_fn=collate_graphs)
     test_loader = DataLoader(test_graphs, batch_size=batch_size,
@@ -550,19 +532,19 @@ def load_phloem_data(
        batch_size: int = 8,
        train_ratio: float = 0.8,
        val_ratio: float = 0.1,
-       random_seed: int = 42,
-       time_series: bool = True
+       random_seed: int = 42
    ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """Load phloem simulation data and create train/val/test DataLoaders.
+
+    Uses time-series splitting: sorts graphs by time and creates contiguous chunks
+    for train (earliest), val (middle), and test (latest).
 
     Args:
         h5_path: Path to HDF5 file or directory containing HDF5 files with simulation data
         batch_size: Batch size for DataLoaders
         train_ratio: Proportion of data to use for training
         val_ratio: Proportion of data to use for validation
-        random_seed: Random seed for reproducibility (only used if time_series=False)
-        time_series: If True, sorts graphs by time and creates contiguous chunks.
-                     If False, uses random shuffling.
+        random_seed: Random seed for reproducibility (kept for API compatibility)
 
     Returns:
         train_loader, val_loader, test_loader: DataLoaders for each split
@@ -587,7 +569,7 @@ def load_phloem_data(
     print(f"\nSuccessfully loaded {len(graphs)} total graphs")
 
     train_loader, val_loader, test_loader = train_test_split(
-        graphs, train_ratio, val_ratio, batch_size, random_seed, time_series
+        graphs, train_ratio, val_ratio, batch_size, random_seed
     )
 
     return train_loader, val_loader, test_loader

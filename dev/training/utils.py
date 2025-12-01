@@ -59,7 +59,8 @@ def get_dataloaders(config: TrainingConfig) -> Tuple[DataLoader, DataLoader, Dat
         batch_size=config.batch_size,
         train_ratio=config.train_ratio,
         val_ratio=config.val_ratio,
-        random_seed=config.seed
+        random_seed=config.seed,
+        time_series=config.time_series
     )
 
     return train_loader, val_loader, test_loader
@@ -98,13 +99,33 @@ def get_dataloaders_with_train_graphs(config: TrainingConfig):
     n_train = int(config.train_ratio * n_samples)
     n_val = int(config.val_ratio * n_samples)
 
-    # Shuffle with fixed seed
-    generator = torch.Generator().manual_seed(config.seed)
-    indices = torch.randperm(n_samples, generator=generator)
+    if config.time_series:
+        # Sort graphs by their time attribute for time-series splitting
+        times = [graph.time.item() for graph in graphs]
+        sorted_indices = sorted(range(n_samples), key=lambda i: times[i])
 
-    train_idx = indices[:n_train]
-    val_idx = indices[n_train:n_train + n_val]
-    test_idx = indices[n_train + n_val:]
+        # Create contiguous chunks: train (earliest), val (middle), test (latest)
+        train_idx = sorted_indices[:n_train]
+        val_idx = sorted_indices[n_train:n_train + n_val]
+        test_idx = sorted_indices[n_train + n_val:]
+
+        print(f"\nTime-series split for curriculum learning:")
+        print(f"  Train: {len(train_idx)} graphs, time range [{times[train_idx[0]]:.2f}, {times[train_idx[-1]]:.2f}]")
+        print(f"  Val:   {len(val_idx)} graphs, time range [{times[val_idx[0]]:.2f}, {times[val_idx[-1]]:.2f}]")
+        print(f"  Test:  {len(test_idx)} graphs, time range [{times[test_idx[0]]:.2f}, {times[test_idx[-1]]:.2f}]")
+    else:
+        # Original behavior: random shuffling
+        generator = torch.Generator().manual_seed(config.seed)
+        indices = torch.randperm(n_samples, generator=generator)
+
+        train_idx = indices[:n_train]
+        val_idx = indices[n_train:n_train + n_val]
+        test_idx = indices[n_train + n_val:]
+
+        print(f"\nRandom split for curriculum learning with seed {config.seed}:")
+        print(f"  Train: {len(train_idx)} graphs")
+        print(f"  Val:   {len(val_idx)} graphs")
+        print(f"  Test:  {len(test_idx)} graphs")
 
     # Get train graphs as list (for curriculum filtering)
     train_graphs = [graphs[i] for i in train_idx]

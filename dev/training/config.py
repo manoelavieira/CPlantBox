@@ -76,8 +76,8 @@ class TrainingConfig:
 
     def validate(self) -> None:
         """Validate configuration parameters."""
-        if self.model_type not in ["nnconv", "operator", "physics"]:
-            raise ValueError(f"model_type must be 'nnconv', 'operator', or 'physics', got {self.model_type}")
+        if self.model_type not in ["nnconv", "operator"]:
+            raise ValueError(f"model_type must be 'nnconv' or 'operator', got {self.model_type}")
         if not (0 < self.train_ratio < 1):
             raise ValueError(f"train_ratio must be between 0 and 1, got {self.train_ratio}")
         if not (0 < self.val_ratio < 1):
@@ -173,6 +173,12 @@ class PhysicsErrorMetrics:
     # Physics score metrics (dimensionless residual-based consistency)
     physics_rel_error: float = 0.0       # Normalized residual: E[|r|] / (E[|F_in|] + E[|F_out|] + eps)
     physics_satisfaction_rate: float = 0.0  # Fraction of nodes satisfying conservation within tolerance
+
+    # Temporal consistency metrics (time-series mode)
+    temporal_rel_error_pred: float = 0.0    # Normalized temporal residual for predictions
+    temporal_consistency_pred: float = 0.0  # Fraction of predicted nodes satisfying temporal tolerance
+    temporal_rel_error_true: float = 0.0    # Normalized temporal residual for ground truth
+    temporal_consistency_true: float = 0.0  # Fraction of ground-truth nodes satisfying temporal tolerance
 
     def __str__(self) -> str:
         base = (f"J_ax: MSE={self.J_ax_mse:.3e} RMSE={self.J_ax_rmse:.3e} RelErr={self.J_ax_rel_error:.3e} SignAcc={self.J_ax_sign_accuracy:.3f} | "

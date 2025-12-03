@@ -237,19 +237,27 @@ def _log_comparison_metrics(physics_errors: PhysicsErrorMetrics):
     msg += f"dS_dt_tot | MSE: {physics_errors.dS_dt_tot_mse:.6e}, RMSE: {physics_errors.dS_dt_tot_rmse:.6e}, RelErr: {physics_errors.dS_dt_tot_rel_error:.6e}\n"
 
     # Flux direction consistency (physical credibility)
-    if physics_errors.J_ax_sign_accuracy > 0:
-        msg += f"\n--- FLUX DIRECTION CONSISTENCY ---\n"
-        msg += f"J_ax Sign Accuracy: {physics_errors.J_ax_sign_accuracy:.4f} ({physics_errors.J_ax_sign_accuracy*100:.2f}%)\n"
-        msg += f"J_ax Reversal Rate: {physics_errors.J_ax_reversal_rate:.4f} ({physics_errors.J_ax_reversal_rate*100:.2f}%)\n"
-        msg += f"ΔC Sign Accuracy:   {physics_errors.delta_C_sign_accuracy:.4f} ({physics_errors.delta_C_sign_accuracy*100:.2f}%)\n"
+    msg += f"\n--- FLUX DIRECTION CONSISTENCY ---\n"
+    msg += f"J_ax Sign Accuracy: {physics_errors.J_ax_sign_accuracy:.4f} ({physics_errors.J_ax_sign_accuracy*100:.2f}%)\n"
+    msg += f"J_ax Reversal Rate: {physics_errors.J_ax_reversal_rate:.4f} ({physics_errors.J_ax_reversal_rate*100:.2f}%)\n"
+    msg += f"ΔC Sign Accuracy:   {physics_errors.delta_C_sign_accuracy:.4f} ({physics_errors.delta_C_sign_accuracy*100:.2f}%)\n"
 
     # Physics score (dimensionless residual-based consistency)
-    if physics_errors.physics_rel_error > 0 or physics_errors.physics_satisfaction_rate > 0:
-        msg += f"\n--- PHYSICS SCORE (CONSERVATION QUALITY) ---\n"
-        msg += f"Normalized Residual Error: {physics_errors.physics_rel_error:.6f}\n"
-        msg += f"  (Interpretation: < 0.05 tight, ~ 1 moderate violation, >> 1 poor conservation)\n"
-        msg += f"Physics Satisfaction Rate: {physics_errors.physics_satisfaction_rate:.4f} ({physics_errors.physics_satisfaction_rate*100:.2f}%)\n"
-        msg += f"  (Nodes within 1% tolerance of local source/sink scale)\n"
+    msg += f"\n--- PHYSICS SCORE (CONSERVATION QUALITY) ---\n"
+    msg += f"Normalized Residual Error: {physics_errors.physics_rel_error:.6f}\n"
+    msg += f"  (Interpretation: < 0.05 tight, ~ 1 moderate violation, >> 1 poor conservation)\n"
+    msg += f"Physics Satisfaction Rate: {physics_errors.physics_satisfaction_rate:.4f} ({physics_errors.physics_satisfaction_rate*100:.2f}%)\n"
+    msg += f"  (Nodes within 1% tolerance of local source/sink scale)\n"
+
+    # Temporal consistency (time-series mode only)
+    msg += f"\n--- TEMPORAL CONSISTENCY (TIME-SERIES MODE) ---\n"
+    msg += f"Predictions:\n"
+    msg += f"  Temporal Rel Error: {physics_errors.temporal_rel_error_pred:.6f}\n"
+    msg += f"  Temporal Satisfaction Rate: {physics_errors.temporal_consistency_pred:.4f} ({physics_errors.temporal_consistency_pred*100:.2f}%)\n"
+    msg += f"Ground Truth:\n"
+    msg += f"  Temporal Rel Error: {physics_errors.temporal_rel_error_true:.6f}\n"
+    msg += f"  Temporal Satisfaction Rate: {physics_errors.temporal_consistency_true:.4f} ({physics_errors.temporal_consistency_true*100:.2f}%)\n"
+    msg += f"  (Validates that ground truth data has temporal consistency)\n"
 
     return msg
 
@@ -313,29 +321,27 @@ def compute_flux_direction_metrics(
 
 def compute_physics_score(
     residual: torch.Tensor,
-    F_in: torch.Tensor,
-    F_out: torch.Tensor,
+    dS_dt_from_physics: torch.Tensor,
     batch_vec: torch.Tensor = None,
     tolerance_factor: float = 0.01
 ) -> tuple[float, float]:
-    """Compute dimensionless physics consistency score from conservation residual.
+    """Compute dimensionless physics consistency score for time-series data.
 
-    This metric evaluates how well mass conservation is satisfied:
-        r_i = (divJ + F_in - F_out)_i ≈ 0
+    Evaluates temporal consistency: r_i = dS/dt_state - dS/dt_physics
+    Checks if state change matches expected physics-based rate of change.
+    Metrics based on residual vs physics-based derivative magnitude.
 
     Two metrics are computed:
     (1) Normalized Relative Error (PhysRelError):
-        For each graph g: PhysRelError_g = E_i[|r_i|] / (E_i[|F_in,i|] + E_i[|F_out,i|] + eps)
-        Then average over graphs.
+        E[|r|] / (E[|dS/dt_physics|] + eps)
 
         Interpretation:
-        - PhysRelErr << 1 (e.g., 0.01-0.05): Physics is tight, good conservation
+        - PhysRelErr << 1 (e.g., 0.01-0.05): Physics is tight, good consistency
         - PhysRelErr ~ 1: Physics moderately violated
         - PhysRelErr >> 1: Physics badly violated
 
     (2) Physics Satisfaction Rate:
-        Fraction of nodes satisfying: |r_i| <= tolerance * (|F_in_i| + |F_out_i| + eps)
-        where tolerance is typically 0.01 (1% tolerance).
+        Fraction satisfying |r_i| <= tolerance * |dS/dt_physics_i|
 
         Interpretation:
         - Rate > 0.95: Excellent physics satisfaction
@@ -343,9 +349,10 @@ def compute_physics_score(
         - Rate < 0.8: Poor physics satisfaction
 
     Args:
-        residual: Conservation residual r = divJ + F_in - F_out [N] (mmol/h)
-        F_in: Phloem loading [N] (mmol/h)
-        F_out: Sucrose outflow [N] (mmol/h)
+        residual: Physics residual [N] (mmol/h)
+            Time-series: r = dS/dt_state - dS/dt_physics
+        dS_dt_from_physics: Physics-based derivative [N] (mmol/h)
+            Expected rate of change: divJ + F_in - F_out
         batch_vec: Batch indices for multiple graphs [N] (optional)
         tolerance_factor: Relative tolerance for satisfaction check (default: 0.01 = 1%)
 
@@ -358,22 +365,19 @@ def compute_physics_score(
 
     # Compute absolute values
     abs_residual = residual.abs()
-    abs_F_in = F_in.abs()
-    abs_F_out = F_out.abs()
+    abs_dS_dt = dS_dt_from_physics.abs()
 
-    # Local scale for each node: sum of source and sink magnitudes
-    local_scale = abs_F_in + abs_F_out + EPSILON
+    # Local scale for each node: expected physics-based rate of change
+    local_scale = abs_dS_dt + EPSILON
 
     if batch_vec is not None:
         from torch_scatter import scatter_mean
 
         # (1) Normalized Relative Error per graph
-        # For each graph: mean(|r|) / (mean(|F_in|) + mean(|F_out|) + eps)
         mean_abs_residual_per_graph = scatter_mean(abs_residual, batch_vec, dim=0)
-        mean_abs_F_in_per_graph = scatter_mean(abs_F_in, batch_vec, dim=0)
-        mean_abs_F_out_per_graph = scatter_mean(abs_F_out, batch_vec, dim=0)
+        mean_abs_dS_dt_per_graph = scatter_mean(abs_dS_dt, batch_vec, dim=0)
 
-        scale_per_graph = mean_abs_F_in_per_graph + mean_abs_F_out_per_graph + EPSILON
+        scale_per_graph = mean_abs_dS_dt_per_graph + EPSILON
         rel_error_per_graph = mean_abs_residual_per_graph / scale_per_graph
         physics_rel_error = rel_error_per_graph.mean().detach().cpu().item()
 
@@ -386,10 +390,9 @@ def compute_physics_score(
         # Single graph case
         # (1) Normalized Relative Error
         mean_abs_residual = abs_residual.mean()
-        mean_abs_F_in = abs_F_in.mean()
-        mean_abs_F_out = abs_F_out.mean()
+        mean_abs_dS_dt = abs_dS_dt.mean()
 
-        scale = mean_abs_F_in + mean_abs_F_out + EPSILON
+        scale = mean_abs_dS_dt + EPSILON
         physics_rel_error = (mean_abs_residual / scale).detach().cpu().item()
 
         # (2) Satisfaction rate
@@ -503,7 +506,7 @@ def _compute_physics_error_metrics(
 
     # Compute physics score from residual (dimensionless consistency metric)
     phys_rel_err, phys_sat_rate = compute_physics_score(
-        dS_dt_tot_pred, F_in_pred, F_out_pred, batch_vec, tolerance_factor=0.01
+        dS_dt_tot_pred, dS_dt_tot_pred, batch_vec, tolerance_factor=0.01
     )
 
     return PhysicsErrorMetrics(

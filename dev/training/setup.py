@@ -9,7 +9,7 @@ from pathlib import Path
 
 from model.config import ModelConfig
 from model.gnn import PhloemNNConv
-from model.gnn_operator import PhloemOperatorGNN, PhloemPhysicsLayerGNN
+from model.gnn_operator import PhloemOperatorGNN
 from .config import TrainingConfig, ModelSetup
 
 from torch.utils.data import DataLoader
@@ -65,10 +65,8 @@ def setup_model_and_scalers(
         model = PhloemNNConv(model_cfg).to(device)
     elif model_type == "operator":
         model = PhloemOperatorGNN(model_cfg).to(device)
-    elif model_type == "physics":
-        model = PhloemPhysicsLayerGNN(model_cfg).to(device)
     else:
-        raise ValueError(f"Unknown model_type: {model_type}. Must be 'nnconv', 'operator', or 'physics'")
+        raise ValueError(f"Unknown model_type: {model_type}. Must be 'nnconv' or 'operator'")
 
     print(f"Created model: {model.__class__.__name__} (type={model_type})")
 

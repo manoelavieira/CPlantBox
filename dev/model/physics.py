@@ -1205,10 +1205,6 @@ def physics_residual(
                                    edge_index, batch_vec, device, y_pred.dtype)
     dS_dt_from_flux_pred = compute_flux_divergence(J_ax_pred, edge_index, N, device)
 
-    # Compute phloem loading and outflow from predictions
-    F_in_pred = compute_phloem_loading(C_ST_pred, node_feat_original, params, node_fields, device)
-    F_out_pred = compute_sucrose_outflow(C_ST_pred, node_feat_original, params, node_fields, smooth_width=SMOOTH_WIDTH)
-
     # Always compute physics terms from true values for error metrics
     y_true = data.y.to(device)
     S_ST_true = data.target_scaler.inv_transform(y_true).squeeze(-1)
@@ -1222,8 +1218,20 @@ def physics_residual(
     F_out_true = compute_sucrose_outflow(C_ST_true, node_feat_original, params, node_fields, smooth_width=0.0)
     dS_dt_tot_true = dS_dt_from_flux_true + F_in_true - F_out_true
 
+    # ============================
+    # Compute F_in and F_out from TRUE values (external to the system)
+    # Detach to prevent gradients flowing through these terms
+    # ============================
+    F_in_true_detached = F_in_true.detach()
+    F_out_true_detached = F_out_true.detach()
+
+    # Also compute from predictions for logging/comparison (not used in loss)
+    F_in_pred = compute_phloem_loading(C_ST_pred, node_feat_original, params, node_fields, device)
+    F_out_pred = compute_sucrose_outflow(C_ST_pred, node_feat_original, params, node_fields, smooth_width=SMOOTH_WIDTH)
+
     # Total physics-based derivative for residual calculation
-    dS_dt_tot_pred = dS_dt_from_flux_pred + F_in_pred - F_out_pred
+    # Use TRUE values of F_in and F_out (detached)
+    dS_dt_tot_pred = dS_dt_from_flux_pred + F_in_true_detached - F_out_true_detached
 
     if _ENABLE_PHYSICS_LOGGING:
         with open(_PHYSICS_LOG_PATH, "a") as f:
@@ -1286,7 +1294,7 @@ def physics_residual(
         # dS_dt_from_state_true = (S_ST_true_curr - S_ST_true_prev) / delta_t
 
         # Physics-based derivative from fluxes and sources/sinks
-        dS_dt_from_physics = dS_dt_from_flux_pred + F_in_pred - F_out_pred
+        dS_dt_from_physics = dS_dt_from_flux_pred + F_in_true_detached - F_out_true_detached
 
         # Residual: difference between state-based and physics-based derivatives
         # R = dS/dt_state - dS/dt_physics
@@ -1472,14 +1480,6 @@ def physics_residual_operator(
     S_ST_pred = data.target_scaler.inv_transform(y_pred).squeeze(-1)
     C_ST_pred = S_ST_pred / vol_ST
 
-    # Compute source/sink terms from predicted concentrations
-    F_in_pred = compute_phloem_loading(C_ST_pred, node_feat_original, params, node_fields, device)
-    F_out_pred = compute_sucrose_outflow(C_ST_pred, node_feat_original, params, node_fields, smooth_width=SMOOTH_WIDTH)
-
-    # Physics residual using LEARNED divergence from operator model
-    # dS/dt = divergence_pred + F_in - F_out ≈ 0
-    dS_dt_tot_pred = divergence_pred + F_in_pred - F_out_pred
-
     # Always compute ground truth physics terms for error metrics
     y_true = data.y.to(device)
     S_ST_true = data.target_scaler.inv_transform(y_true).squeeze(-1)
@@ -1498,6 +1498,22 @@ def physics_residual_operator(
     F_in_true = compute_phloem_loading(C_ST_true, node_feat_original, params, node_fields, device)
     F_out_true = compute_sucrose_outflow(C_ST_true, node_feat_original, params, node_fields, smooth_width=0.0)
     dS_dt_tot_true = dS_dt_from_flux_true + F_in_true - F_out_true
+
+    # ============================
+    # Compute F_in and F_out from TRUE values (external to the system)
+    # Detach to prevent gradients flowing through these terms
+    # ============================
+    F_in_true_detached = F_in_true.detach()
+    F_out_true_detached = F_out_true.detach()
+
+    # Also compute from predictions for logging/comparison (not used in loss)
+    F_in_pred = compute_phloem_loading(C_ST_pred, node_feat_original, params, node_fields, device)
+    F_out_pred = compute_sucrose_outflow(C_ST_pred, node_feat_original, params, node_fields, smooth_width=SMOOTH_WIDTH)
+
+    # Physics residual using LEARNED divergence from operator model
+    # dS/dt = divergence_pred + F_in_true - F_out_true ≈ 0
+    # Use TRUE values of F_in and F_out (detached)
+    dS_dt_tot_pred = divergence_pred + F_in_true_detached - F_out_true_detached
 
     if _ENABLE_PHYSICS_LOGGING:
         with open(_PHYSICS_LOG_PATH, "a") as f:
@@ -1550,7 +1566,7 @@ def physics_residual_operator(
 
         # Physics-based derivative from fluxes and sources/sinks
         # Using LEARNED divergence from operator model
-        dS_dt_from_physics = divergence_pred + F_in_pred - F_out_pred
+        dS_dt_from_physics = divergence_pred + F_in_true_detached - F_out_true_detached
 
         # Residual: difference between state-based and physics-based derivatives
         residual = dS_dt_from_state_pred - dS_dt_from_physics
@@ -1748,13 +1764,6 @@ def physics_residual_operator_analytical(
     )
     dS_dt_from_flux_pred = compute_flux_divergence(J_ax_pred, edge_index, N, device)
 
-    # Compute source/sink terms from predicted concentrations
-    F_in_pred = compute_phloem_loading(C_ST_pred, node_feat_original, params, node_fields, device)
-    F_out_pred = compute_sucrose_outflow(C_ST_pred, node_feat_original, params, node_fields, smooth_width=SMOOTH_WIDTH)
-
-    # Total rate of change from physics (analytical)
-    dS_dt_tot_pred = dS_dt_from_flux_pred + F_in_pred - F_out_pred
-
     # Always compute ground truth physics terms for error metrics
     y_true = data.y.to(device)
     S_ST_true = data.target_scaler.inv_transform(y_true).squeeze(-1)
@@ -1769,6 +1778,21 @@ def physics_residual_operator_analytical(
     F_in_true = compute_phloem_loading(C_ST_true, node_feat_original, params, node_fields, device)
     F_out_true = compute_sucrose_outflow(C_ST_true, node_feat_original, params, node_fields, smooth_width=0.0)
     dS_dt_tot_true = dS_dt_from_flux_true + F_in_true - F_out_true
+
+    # ============================
+    # Compute F_in and F_out from TRUE values (external to the system)
+    # Detach to prevent gradients flowing through these terms
+    # ============================
+    F_in_true_detached = F_in_true.detach()
+    F_out_true_detached = F_out_true.detach()
+
+    # Also compute from predictions for logging/comparison (not used in loss)
+    F_in_pred = compute_phloem_loading(C_ST_pred, node_feat_original, params, node_fields, device)
+    F_out_pred = compute_sucrose_outflow(C_ST_pred, node_feat_original, params, node_fields, smooth_width=SMOOTH_WIDTH)
+
+    # Total rate of change from physics (analytical)
+    # Use TRUE values of F_in and F_out (detached)
+    dS_dt_tot_pred = dS_dt_from_flux_pred + F_in_true_detached - F_out_true_detached
 
     # ============================
     # LOGGING
@@ -1851,7 +1875,7 @@ def physics_residual_operator_analytical(
         dS_dt_from_state_pred = (S_ST_curr - S_ST_prev) / delta_t
 
         # Physics-based derivative from analytical fluxes
-        dS_dt_from_physics = dS_dt_from_flux_pred + F_in_pred - F_out_pred
+        dS_dt_from_physics = dS_dt_from_flux_pred + F_in_true_detached - F_out_true_detached
 
         # Residual: difference between state-based and physics-based derivatives
         residual = dS_dt_from_state_pred - dS_dt_from_physics

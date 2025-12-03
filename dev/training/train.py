@@ -48,15 +48,19 @@ def get_prev_sucrose_for_batch(
 ) -> torch.Tensor:
     """Get previous sucrose content for current batch, handling teacher forcing.
 
-    For time-series training, we use:
-    - Ground-truth S(t-1) for IC nodes (at t=min_time) and BC nodes (all times) in PHYSICS_WITH_IC_BC mode
-    - Ground-truth S(t-1) for ALL nodes in COMBINED mode
-    - Predicted S(t-1) from prev_state for other nodes
-    - Ground-truth S(t) for new nodes (first appearance)
+    For time-series training, we use values from the PREVIOUS timestep stored in prev_state:
+    - COMBINED mode: Uses ground-truth S(t-1) for ALL nodes (full teacher forcing)
+    - PHYSICS_WITH_IC_BC mode: Uses ground-truth S(t-1) for BC nodes, predictions for others
+    - DATA_ONLY mode: Uses predicted S(t-1) for all nodes
+
+    For NEW nodes (first appearance): Initialize with zeros (no history available)
+
+    Note: prev_state is updated at the end of each iteration by update_prev_state(),
+    which stores either predictions or ground truth depending on the loss_type.
 
     Args:
         data: Current batch data
-        prev_state: Dictionary with previous timestep state
+        prev_state: Dictionary with previous timestep state (contains sucrose values from t-1)
         loss_type: Type of loss being used (determines supervision strategy)
         is_first_timestep: Whether this is the very first timestep (t=min_time)
 
@@ -90,37 +94,39 @@ def get_prev_sucrose_for_batch(
     has_prev_state = prev_state['seen'][node_ids]
     is_new_node = ~has_prev_state
 
-    # For new nodes: use ground-truth S(t) as their "previous" state
+    # For new nodes: initialize with zeros (they have no history)
+    # The model will learn to predict from zero initial state for newly appeared nodes
     if is_new_node.any():
-        prev_sucrose[is_new_node] = data.y[is_new_node]
+        prev_sucrose[is_new_node] = 0.0
 
     # For existing nodes: determine whether to use ground truth or prediction
     if has_prev_state.any():
         if loss_type == LossType.COMBINED:
-            # COMBINED mode: use ground truth for ALL existing nodes (full teacher forcing)
-            prev_sucrose[has_prev_state] = data.y[has_prev_state]
+            # COMBINED mode: use ground truth from PREVIOUS timestep for ALL existing nodes (full teacher forcing)
+            # We use the stored prev_state['sucrose'] which was updated with ground truth at the end of the previous iteration
+            prev_sucrose[has_prev_state] = prev_state['sucrose'][node_ids[has_prev_state]]
 
         elif loss_type == LossType.PHYSICS_WITH_IC_BC:
-            # PHYSICS mode: use ground truth only for IC and BC nodes
+            # PHYSICS mode: use ground truth from previous timestep only for IC and BC nodes
             # For other nodes, use predicted values from prev_state
 
             # Check if this is initial time for IC supervision
             tolerance = 1e-6
             is_t0 = (torch.abs(data.time - data.min_time) < tolerance).any() if hasattr(data, 'time') else False
 
-            # IC nodes: only at t=min_time
+            # IC nodes: only at t=min_time (but this shouldn't happen for existing nodes since t>0)
             use_gt_for_ic = data.is_initial_node & is_t0 if is_t0 else torch.zeros_like(has_prev_state)
 
-            # BC nodes: always use ground truth
+            # BC nodes: always use ground truth from previous timestep (stored in prev_state)
             use_gt_for_bc = data.is_boundary_node if hasattr(data, 'is_boundary_node') else torch.zeros_like(has_prev_state)
 
             # Combine IC and BC masks
             use_ground_truth = (use_gt_for_ic | use_gt_for_bc) & has_prev_state
             use_prediction = has_prev_state & ~use_ground_truth
 
-            # Apply ground truth where specified
+            # Apply stored values from prev_state (which contains either ground truth or predictions from t-1)
             if use_ground_truth.any():
-                prev_sucrose[use_ground_truth] = data.y[use_ground_truth]
+                prev_sucrose[use_ground_truth] = prev_state['sucrose'][node_ids[use_ground_truth]]
 
             # Apply predictions from prev_state for other nodes
             if use_prediction.any():
@@ -136,14 +142,19 @@ def get_prev_sucrose_for_batch(
 def update_prev_state(
     prev_state: dict,
     predictions: torch.Tensor,
-    data
+    data,
+    loss_type: LossType = LossType.DATA_ONLY
 ) -> None:
-    """Update prev_state with new predictions for next timestep.
+    """Update prev_state with new predictions or ground truth for next timestep.
+
+    For teacher forcing modes (COMBINED, PHYSICS_WITH_IC_BC), we need to store
+    ground truth values for certain nodes so they can be used in the next iteration.
 
     Args:
         prev_state: Dictionary to update in-place
         predictions: Current timestep predictions [N, 1] (standardized)
         data: Current batch data
+        loss_type: Type of loss being used (determines what to store for teacher forcing)
     """
     device = predictions.device
     N = predictions.size(0)
@@ -157,8 +168,23 @@ def update_prev_state(
     # Single graph: update all nodes
     node_ids = torch.arange(N, device=device)
 
-    # Store predictions
-    prev_state['sucrose'][node_ids] = predictions.detach()
+    # Determine what to store based on loss type (for teacher forcing)
+    if loss_type == LossType.COMBINED:
+        # COMBINED mode: store ground truth for ALL nodes (full teacher forcing)
+        prev_state['sucrose'][node_ids] = data.y.detach()
+    elif loss_type == LossType.PHYSICS_WITH_IC_BC:
+        # PHYSICS mode: store ground truth only for BC nodes, predictions for others
+        # Start with predictions for all nodes
+        prev_state['sucrose'][node_ids] = predictions.detach()
+
+        # Override with ground truth for BC nodes
+        if hasattr(data, 'is_boundary_node') and data.is_boundary_node is not None:
+            bc_mask = data.is_boundary_node
+            if bc_mask.any():
+                prev_state['sucrose'][node_ids[bc_mask]] = data.y[bc_mask].detach()
+    else:  # DATA_ONLY mode
+        # Store predictions for all nodes
+        prev_state['sucrose'][node_ids] = predictions.detach()
 
     # Mark nodes as seen
     prev_state['seen'][node_ids] = True
@@ -952,8 +978,8 @@ def train_epoch(
 
         # Accumulate metrics for epoch averaging
         with torch.no_grad():
-            # Update prev_state with current predictions for next timestep
-            update_prev_state(prev_state, pred, data)
+            # Update prev_state with current predictions/ground truth for next timestep
+            update_prev_state(prev_state, pred, data, loss_config.loss_type)
 
             # Calculate actual weighted components for this batch
             if loss_config.loss_type == LossType.PHYSICS_WITH_IC_BC:
@@ -1342,8 +1368,8 @@ def eval_model(
                 phys_res_errors
             )
 
-            # Update prev_state with current predictions for next timestep
-            update_prev_state(prev_state, pred, data)
+            # Update prev_state with current predictions/ground truth for next timestep
+            update_prev_state(prev_state, pred, data, loss_config.loss_type)
 
             # Calculate actual weighted components for this batch (for eval)
             if loss_config.loss_type == LossType.PHYSICS_WITH_IC_BC:

@@ -10,7 +10,7 @@ from typing import Tuple, Optional
 
 from model.physics import log_physics_values
 from model.config import ModelConfig
-from model.physics import physics_residual, physics_residual_operator
+from model.physics import physics_residual, physics_residual_operator, physics_residual_operator_analytical
 from .config import (
     TrainingConfig, TrainingState, TrainingMetrics, ModelSetup,
     LossType, PhysicsMetrics, PhysicsErrorMetrics, LossConfig, LossResult, EpochResult
@@ -338,6 +338,7 @@ def compute_physics_residual_step(
     is_first_timestep: bool = False,
     loss_type: LossType = LossType.COMBINED,
     prev_time: float = None,
+    phase: str = None,
 ) -> Tuple[torch.Tensor, Optional[PhysicsMetrics], Optional[PhysicsErrorMetrics]]:
     """
     Unified physics residual computation for train/eval with time-series support.
@@ -372,13 +373,13 @@ def compute_physics_residual_step(
 
     # Compute physics residual using appropriate function
     if is_operator_model:
-        phys_res, phys_res_dict, phys_errors = physics_residual_operator(
-            model_output, data, prev_sucrose, is_first_timestep, prev_time
+        phys_res, phys_res_dict, phys_errors = physics_residual_operator_analytical(
+            model_output, data, prev_sucrose, is_first_timestep, prev_time, phase=phase
         )
     else:
         # NNConv model: model_output is a tensor
         phys_res, phys_res_dict, phys_errors = physics_residual(
-            model_output, data, prev_sucrose, is_first_timestep, prev_time
+            model_output, data, prev_sucrose, is_first_timestep, prev_time, phase=phase
         )
 
     # Reduce to scalar if needed
@@ -894,6 +895,19 @@ def train_epoch(
             is_first_timestep
         )
 
+        # # Prefer running the scaler on a tensor (consistent with other code paths)
+        # if hasattr(data, 'target_scaler'):
+        #     # scaler expects standardized tensor input; keep on-device until scaler runs
+        #     prev_sucrose_orig = data.target_scaler.inv_transform(prev_sucrose).detach().cpu().numpy()
+        # else:
+        #     prev_sucrose_orig = prev_sucrose.detach().cpu().numpy()
+
+        # # Print the very first batch (batch_idx == 0) for debugging
+        # if batch_idx == 7:
+        #     # flatten for compact printing
+        #     print(f"Number of nodes in batch: {data.num_nodes}")
+        #     print(f"Epoch {epoch}: First batch prev_sucrose (first 10): {prev_sucrose_orig[:10].flatten()}")
+
         # Forward pass with temporal context (returns tensor or dict depending on model type)
         model_output = run_forward(model, data, prev_sucrose)
 
@@ -904,7 +918,7 @@ def train_epoch(
         if loss_config.loss_type == LossType.DATA_ONLY:
             phys_res = torch.tensor(0.0, device=pred.device)
             # Log physics values for analysis and get metrics for terminal display
-            phys_res_metrics, phys_res_errors = log_physics_values(model_output, data)
+            phys_res_metrics, phys_res_errors = log_physics_values(model_output, data, phase='train')
         else:
             phys_res, phys_res_metrics, phys_res_errors = compute_physics_residual_step(
                 model=model,
@@ -913,7 +927,8 @@ def train_epoch(
                 prev_sucrose=prev_sucrose,
                 is_first_timestep=is_first_timestep,
                 loss_type=loss_config.loss_type,
-                prev_time=prev_state.get('time', None) if prev_state is not None else None
+                prev_time=prev_state.get('time', None) if prev_state is not None else None,
+                phase='train'
             )
 
         # Compute loss and metrics (no physics scaling needed)
@@ -1342,7 +1357,7 @@ def eval_model(
             if loss_config.loss_type == LossType.DATA_ONLY:
                 phys_res = torch.tensor(0.0, device=pred.device)
                 # Log physics values for analysis and get metrics for terminal display
-                phys_res_metrics, phys_res_errors = log_physics_values(model_output, data)
+                phys_res_metrics, phys_res_errors = log_physics_values(model_output, data, phase=phase)
             else:
                 phys_res, phys_res_metrics, phys_res_errors = compute_physics_residual_step(
                     model=model,
@@ -1351,7 +1366,8 @@ def eval_model(
                     prev_sucrose=prev_sucrose,
                     is_first_timestep=is_first_timestep,
                     loss_type=loss_config.loss_type,
-                    prev_time=prev_state.get('time', None) if prev_state is not None else None
+                    prev_time=prev_state.get('time', None) if prev_state is not None else None,
+                    phase=phase
                 )
 
             # Compute loss and metrics (no physics scaling needed)

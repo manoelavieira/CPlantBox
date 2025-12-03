@@ -93,8 +93,9 @@ class PhloemNNConv(nn.Module):
         self.cfg = cfg
         self._validated_input = False   # Track if input has been validated
 
-        # Node input = continuous node features + time
-        in_node_dim = cfg.node_feat_dim + 1
+        # Node input = continuous node features + time + prev_sucrose
+        # Includes previous sucrose content for temporal modeling
+        in_node_dim = cfg.node_feat_dim + 1 + 1  # base features + time + prev_sucrose
         current_dim = in_node_dim
 
         conv_layers = []
@@ -186,15 +187,19 @@ class PhloemNNConv(nn.Module):
         """Move the model to the specified device."""
         return super().to(device)
 
-    def forward(self, data: Data) -> torch.Tensor:
+    def forward(self, data: Data, prev_sucrose: torch.Tensor = None) -> torch.Tensor:
         """Forward pass of the model.
 
         IMPORTANT: This method expects data.time_per_node to be present;
-        which is essential for physics-informed loss computation. Always use the same
-        data object for both model forward pass and physics_residual calculation.
+        which is essential for physics-informed loss computation. The
+        `prev_sucrose` argument provides temporal context for time-series learning,
+        enabling the model to learn dynamics between timesteps.
 
         Args:
             data: Graph data object containing node features, edge features, topology and time
+            prev_sucrose: Previous-timestep sucrose content [N,1] (standardized).
+                         Required for time-series learning. For first timestep or initialization,
+                         should be provided (e.g., ground truth or zeros).
 
         Returns:
             torch.Tensor: Predicted sucrose concentration for each node [N, 1]
@@ -216,8 +221,23 @@ class PhloemNNConv(nn.Module):
                 f"`time_per_node` must be [N,1]; got {tuple(time_per_node.shape)} with N={node_feat.size(0)}."
             )
 
-        # Concatenate as extra channel
-        node_feat = torch.cat([node_feat, time_per_node], dim=1)
+        # Prepare prev_sucrose (required for temporal modeling)
+        if prev_sucrose is None:
+            raise ValueError("prev_sucrose is required for time-series learning. "
+                           "For first timestep, initialize with ground truth or zeros.")
+
+        prev_sucrose_tensor = prev_sucrose.to(device=device, dtype=dtype)
+        if prev_sucrose_tensor.dim() == 1:
+            prev_sucrose_tensor = prev_sucrose_tensor.unsqueeze(-1)
+
+        if prev_sucrose_tensor.size(0) != node_feat.size(0):
+            raise RuntimeError(
+                f"`prev_sucrose` must have same number of nodes as node_feat; "
+                f"got prev_sucrose: {prev_sucrose_tensor.size(0)}, node_feat: {node_feat.size(0)}"
+            )
+
+        # Concatenate node features: [base_features, time, prev_sucrose]
+        node_feat = torch.cat([node_feat, time_per_node, prev_sucrose_tensor], dim=1)
 
         # Pre-allocate tensor for edge features (continuous + categorical)
         # Use the same dtype as edge_feat to maintain consistency

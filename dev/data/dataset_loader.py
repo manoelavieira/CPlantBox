@@ -16,6 +16,7 @@ import warnings
 import os
 from pathlib import Path
 from model import physics
+import random
 
 # CPlantBox organ type constants for reference
 CPLANTBOX_ORGAN_TYPES = {
@@ -476,49 +477,47 @@ def train_test_split(
         batch_size: int = 8,
         random_seed: int = 42
     ) -> Tuple[List[Data], List[Data], List[Data]]:
-    """Split graphs into train/val/test sets using time-series splitting.
+    """Split graphs into train/val/test sets using random shuffling.
 
-    Graphs are sorted by time and split into contiguous chunks:
-    - train: earliest times
-    - val: middle times
-    - test: latest times
+    Graphs are randomly shuffled and then split into train/val/test sets.
 
     Args:
         graphs: List of PyG Data objects
         train_ratio: Proportion of data to use for training
         val_ratio: Proportion of data to use for validation
         batch_size: Batch size for DataLoaders
-        random_seed: Random seed (kept for API compatibility but not used in time-series mode)
+        random_seed: Random seed for reproducibility
 
     Returns:
         train_loader, val_loader, test_loader: DataLoaders for each split
     """
+    # Split graphs into train/val/test
     n_samples = len(graphs)
     n_train = int(train_ratio * n_samples)
     n_val = int(val_ratio * n_samples)
     n_test = n_samples - n_train - n_val
 
-    # Sort graphs by their time attribute for time-series splitting
-    times = [graph.time.item() for graph in graphs]
-    sorted_indices = sorted(range(n_samples), key=lambda i: times[i])
+    # Shuffle with fixed seed
+    generator = torch.Generator().manual_seed(random_seed)
+    indices = torch.randperm(n_samples, generator=generator)
 
-    # Create contiguous chunks: train (earliest), val (middle), test (latest)
-    train_idx = sorted_indices[:n_train]
-    val_idx = sorted_indices[n_train:n_train + n_val]
-    test_idx = sorted_indices[n_train + n_val:]
+    # Split shuffled indices
+    train_idx = indices[:n_train]
+    val_idx = indices[n_train:n_train + n_val]
+    test_idx = indices[n_train + n_val:]
 
-    print(f"\nTime-series split:")
-    print(f"  Train: {len(train_idx)} graphs, time range [{times[train_idx[0]]:.2f}, {times[train_idx[-1]]:.2f}]")
-    print(f"  Val:   {len(val_idx)} graphs, time range [{times[val_idx[0]]:.2f}, {times[val_idx[-1]]:.2f}]")
-    print(f"  Test:  {len(test_idx)} graphs, time range [{times[test_idx[0]]:.2f}, {times[test_idx[-1]]:.2f}]")
+    print(f"\nRandom split:")
+    print(f"  Train: {len(train_idx)} graphs")
+    print(f"  Val:   {len(val_idx)} graphs")
+    print(f"  Test:  {len(test_idx)} graphs")
 
     train_graphs = [graphs[i] for i in train_idx]
     val_graphs = [graphs[i] for i in val_idx]
     test_graphs = [graphs[i] for i in test_idx]
 
-    # Preserve chronological order (no shuffling)
+    # Shuffle training data during loading
     train_loader = DataLoader(train_graphs, batch_size=batch_size,
-                              shuffle=False, collate_fn=collate_graphs)
+                              shuffle=True, collate_fn=collate_graphs)
     val_loader = DataLoader(val_graphs, batch_size=batch_size,
                             shuffle=False, collate_fn=collate_graphs)
     test_loader = DataLoader(test_graphs, batch_size=batch_size,
@@ -536,15 +535,14 @@ def load_phloem_data(
    ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """Load phloem simulation data and create train/val/test DataLoaders.
 
-    Uses time-series splitting: sorts graphs by time and creates contiguous chunks
-    for train (earliest), val (middle), and test (latest).
+    Uses random shuffling to split graphs into train/val/test sets.
 
     Args:
         h5_path: Path to HDF5 file or directory containing HDF5 files with simulation data
         batch_size: Batch size for DataLoaders
         train_ratio: Proportion of data to use for training
         val_ratio: Proportion of data to use for validation
-        random_seed: Random seed for reproducibility (kept for API compatibility)
+        random_seed: Random seed for reproducibility
 
     Returns:
         train_loader, val_loader, test_loader: DataLoaders for each split

@@ -52,7 +52,7 @@ def set_physics_logging(enable: bool, log_path: str = None):
 
         # Clear existing log file
         with open(_PHYSICS_LOG_PATH, 'w') as f:
-            f.write(f"{'='*60}")
+            f.write(f"{'='*60}\n")
             f.write(f"Physics Debug Log - Session Started\n")
             f.write(f"{'='*60}\n")
         print(f"  Log file initialized: {_PHYSICS_LOG_PATH}")
@@ -249,22 +249,11 @@ def _log_total_residual(
     return msg
 
 
-def _log_comparison_metrics(physics_errors: PhysicsErrorMetrics, temporal_tensors: dict = None):
+def _log_comparison_metrics(physics_errors: PhysicsErrorMetrics):
     """Log comparison metrics from PhysicsErrorMetrics.
 
     Args:
         physics_errors: PhysicsErrorMetrics object containing MSE, RMSE, and Relative Error
-        temporal_tensors: Optional dict with temporal tensors to display. Expected keys:
-            {
-                'pred': {
-                    'dS_dt_from_state': Tensor or None,
-                    'dS_dt_from_physics': Tensor or None,   # typically dS_dt_tot_pred
-                },
-                'true': {
-                    'dS_dt_from_state': Tensor or None,
-                    'dS_dt_from_physics': Tensor or None,   # typically dS_dt_tot_true
-                }
-            }
 
     Returns:
         str: Formatted comparison metrics log
@@ -287,7 +276,6 @@ def _log_comparison_metrics(physics_errors: PhysicsErrorMetrics, temporal_tensor
     msg += f"\n--- FLUX DIRECTION CONSISTENCY ---\n"
     msg += f"J_ax Sign Accuracy: {physics_errors.J_ax_sign_accuracy:.4f} ({physics_errors.J_ax_sign_accuracy*100:.2f}%)\n"
     msg += f"J_ax Reversal Rate: {physics_errors.J_ax_reversal_rate:.4f} ({physics_errors.J_ax_reversal_rate*100:.2f}%)\n"
-    msg += f"ΔC Sign Accuracy:   {physics_errors.delta_C_sign_accuracy:.4f} ({physics_errors.delta_C_sign_accuracy*100:.2f}%)\n"
 
     # Physics score (dimensionless residual-based consistency)
     msg += f"\n--- PHYSICS SCORE (CONSERVATION QUALITY) ---\n"
@@ -296,58 +284,12 @@ def _log_comparison_metrics(physics_errors: PhysicsErrorMetrics, temporal_tensor
     msg += f"Physics Satisfaction Rate: {physics_errors.physics_satisfaction_rate:.4f} ({physics_errors.physics_satisfaction_rate*100:.2f}%)\n"
     msg += f"  (Nodes within XX% tolerance of local source/sink scale)\n"
 
-    # Temporal consistency (time-series mode only)
-    msg += f"\n--- TEMPORAL CONSISTENCY (TIME-SERIES MODE) ---\n"
-    msg += f"Predictions:\n"
-    msg += f"  Temporal Rel Error: {physics_errors.temporal_rel_error_pred:.6f}\n"
-    msg += f"  Temporal Satisfaction Rate: {physics_errors.temporal_consistency_pred:.4f} ({physics_errors.temporal_consistency_pred*100:.2f}%)\n"
-    msg += f"Ground Truth:\n"
-    msg += f"  Temporal Rel Error: {physics_errors.temporal_rel_error_true:.6f}\n"
-    msg += f"  Temporal Satisfaction Rate: {physics_errors.temporal_consistency_true:.4f} ({physics_errors.temporal_consistency_true*100:.2f}%)\n"
-    msg += f"  (Validates that ground truth data has temporal consistency)\n"
-
-    # If caller provided tensors for temporal debugging, print first 10 node values
-    if temporal_tensors is not None:
-        try:
-            pred = temporal_tensors.get('pred', {})
-            true = temporal_tensors.get('true', {})
-
-            if pred:
-                dstate = pred.get('dS_dt_from_state', None)
-                dphys = pred.get('dS_dt_from_physics', None)
-                if dstate is not None:
-                    msg += f"\n--- TEMPORAL VARIABLES (PREDICTIONS) ---\n"
-                    msg += f"dS_dt_from_state (first 10): {dstate[:10].detach().cpu().numpy()}\n"
-                if dphys is not None:
-                    msg += f"dS_dt_from_physics (first 10): {dphys[:10].detach().cpu().numpy()}\n"
-                if dstate is not None and dphys is not None:
-                    resid = dstate - dphys
-                    msg += f"residual = dS_dt_state - dS_dt_physics (first 10): {resid[:10].detach().cpu().numpy()}\n"
-
-            if true:
-                dstate_t = true.get('dS_dt_from_state', None)
-                dphys_t = true.get('dS_dt_from_physics', None)
-                if dstate_t is not None:
-                    msg += f"\n--- TEMPORAL VARIABLES (GROUND TRUTH) ---\n"
-                    msg += f"dS_dt_from_state (first 10): {dstate_t[:10].detach().cpu().numpy()}\n"
-                if dphys_t is not None:
-                    msg += f"dS_dt_from_physics (first 10): {dphys_t[:10].detach().cpu().numpy()}\n"
-                if dstate_t is not None and dphys_t is not None:
-                    resid_t = dstate_t - dphys_t
-                    msg += f"residual = dS_dt_state - dS_dt_physics (first 10): {resid_t[:10].detach().cpu().numpy()}\n"
-        except Exception:
-            # Defensive: don't let logging fail
-            msg += "\n(Note: failed to dump temporal tensors for debugging)\n"
-
     return msg
 
 
 def compute_flux_direction_metrics(
     J_ax_true: torch.Tensor,
     J_ax_pred: torch.Tensor,
-    C_ST_true: torch.Tensor,
-    C_ST_pred: torch.Tensor,
-    edge_index: torch.Tensor
 ) -> tuple[float, float, float]:
     """Compute flux direction consistency metrics.
 
@@ -362,12 +304,11 @@ def compute_flux_direction_metrics(
         edge_index: Edge connectivity [2, E]
 
     Returns:
-        tuple: (sign_accuracy, reversal_rate, delta_C_sign_accuracy)
+        tuple: (sign_accuracy, reversal_rate)
             - sign_accuracy: Fraction of edges where sign(J_pred) == sign(J_true)
             - reversal_rate: Fraction of edges with wrong direction (1 - sign_accuracy)
-            - delta_C_sign_accuracy: Fraction of edges where sign(ΔC_pred) == sign(ΔC_true)
     """
-    # (1) Flux sign accuracy: Does predicted flux have correct direction?
+    # Flux sign accuracy: Does predicted flux have correct direction?
     sign_true = torch.sign(J_ax_true)
     sign_pred = torch.sign(J_ax_pred)
 
@@ -376,21 +317,7 @@ def compute_flux_direction_metrics(
     sign_accuracy = sign_matches.mean().detach().cpu().item()
     reversal_rate = 1.0 - sign_accuracy
 
-    # (2) Concentration gradient sign accuracy: Does model capture osmotic effects correctly?
-    src, dst = edge_index[0], edge_index[1]
-
-    # Compute concentration differences
-    delta_C_true = C_ST_true[src] - C_ST_true[dst]
-    delta_C_pred = C_ST_pred[src] - C_ST_pred[dst]
-
-    # Check if signs match
-    delta_C_sign_true = torch.sign(delta_C_true)
-    delta_C_sign_pred = torch.sign(delta_C_pred)
-
-    delta_C_sign_matches = (delta_C_sign_true == delta_C_sign_pred).float()
-    delta_C_sign_accuracy = delta_C_sign_matches.mean().detach().cpu().item()
-
-    return sign_accuracy, reversal_rate, delta_C_sign_accuracy
+    return sign_accuracy, reversal_rate
 
 
 def compute_physics_score(
@@ -401,7 +328,6 @@ def compute_physics_score(
 ) -> tuple[float, float]:
     """Compute dimensionless physics consistency score for time-series data.
 
-    Evaluates temporal consistency: r_i = dS/dt_state - dS/dt_physics
     Checks if state change matches expected physics-based rate of change.
     Metrics based on residual vs physics-based derivative magnitude.
 
@@ -481,11 +407,7 @@ def _compute_physics_error_metrics(
     dS_dt_tot_true: torch.Tensor,
     dS_dt_tot_pred: torch.Tensor,
     edge_index: torch.Tensor = None,
-    C_ST_true: torch.Tensor = None,
-    C_ST_pred: torch.Tensor = None,
-    batch_vec: torch.Tensor = None,
-    dS_dt_from_state_true: torch.Tensor = None,
-    dS_dt_from_state_pred: torch.Tensor = None
+    batch_vec: torch.Tensor = None
 ) -> PhysicsErrorMetrics:
     """Compute MSE, RMSE, Relative Error, direction consistency, and physics score.
 
@@ -502,8 +424,6 @@ def _compute_physics_error_metrics(
         dS_dt_tot_pred: Predicted total residual
         J_ax_antisym_error: Antisymmetry error for operator model (optional)
         edge_index: Edge connectivity for antisymmetry and direction calculations (optional)
-        C_ST_true: True concentrations for ΔC sign accuracy (optional)
-        C_ST_pred: Predicted concentrations for ΔC sign accuracy (optional)
         batch_vec: Batch indices for multiple graphs (optional)
 
     Returns:
@@ -532,8 +452,8 @@ def _compute_physics_error_metrics(
     antisym_err = compute_flux_antisymmetry_error(J_ax_pred, edge_index)
 
     # Compute flux direction consistency metrics if concentrations are provided
-    sign_acc, rev_rate, delta_C_acc = compute_flux_direction_metrics(
-        J_ax_true, J_ax_pred, C_ST_true, C_ST_pred, edge_index
+    sign_acc, rev_rate = compute_flux_direction_metrics(
+        J_ax_true, J_ax_pred
     )
 
     # Compute physics score from operator mismatch (pred vs true)
@@ -544,33 +464,6 @@ def _compute_physics_error_metrics(
         batch_vec,
         tolerance_factor=0.1
     )
-
-    # Compute temporal consistency metrics (time-series mode)
-    temporal_rel_error_pred = 0.0
-    temporal_consistency_pred = 0.0
-    temporal_rel_error_true = 0.0
-    temporal_consistency_true = 0.0
-
-    # Compute temporal residual for predictions ONLY if available
-    if dS_dt_from_state_pred is not None:
-        # Compute temporal residual for predictions: r = dS/dt_state - dS/dt_physics
-        residual_pred = dS_dt_from_state_pred - dS_dt_tot_pred
-        temporal_rel_error_pred, temporal_consistency_pred = compute_physics_score(
-            residual_pred,
-            dS_dt_tot_pred,
-            batch_vec,
-            tolerance_factor=0.1
-        )
-
-    if dS_dt_from_state_true is not None:
-        # Compute temporal residual for ground truth: r = dS/dt_state - dS/dt_physics
-        residual_true = dS_dt_from_state_true - dS_dt_tot_true
-        temporal_rel_error_true, temporal_consistency_true = compute_physics_score(
-            residual_true,
-            dS_dt_tot_true,
-            batch_vec,
-            tolerance_factor=0.1
-        )
 
     return PhysicsErrorMetrics(
         J_ax_mse=J_ax_mse,
@@ -585,45 +478,9 @@ def _compute_physics_error_metrics(
         J_ax_antisym_error=antisym_err,
         J_ax_sign_accuracy=sign_acc,
         J_ax_reversal_rate=rev_rate,
-        delta_C_sign_accuracy=delta_C_acc,
         physics_rel_error=phys_rel_err,
-        physics_satisfaction_rate=phys_sat_rate,
-        temporal_rel_error_pred=temporal_rel_error_pred,
-        temporal_consistency_pred=temporal_consistency_pred,
-        temporal_rel_error_true=temporal_rel_error_true,
-        temporal_consistency_true=temporal_consistency_true
+        physics_satisfaction_rate=phys_sat_rate
     )
-
-
-def _log_penalty_monitoring(
-    physics_loss: torch.Tensor,
-    negative_concentration_penalty: torch.Tensor,
-    penalty_weight: float,
-    total_loss: torch.Tensor,
-    model_type: str = "NNConv"
-):
-    """Log penalty monitoring information.
-
-    Args:
-        physics_loss: Physics residual loss component
-        negative_concentration_penalty: Penalty for negative concentrations
-        penalty_weight: Weight applied to penalty
-        total_loss: Combined total loss
-        model_type: Type of model (for labeling)
-
-    Returns:
-        str: Formatted penalty monitoring log
-    """
-    ratio = (penalty_weight * negative_concentration_penalty) / (physics_loss + 1e-10)
-    msg = f"\n--- PENALTY MONITORING ({model_type}) ---\n"
-    msg += f"Physics loss: {physics_loss.item():.6e}\n"
-    msg += f"Penalty (unweighted): {negative_concentration_penalty.item():.6e}\n"
-    msg += f"Penalty (weighted): {(penalty_weight * negative_concentration_penalty).item():.6e}\n"
-    msg += f"Penalty weight: {penalty_weight:.1f}\n"
-    msg += f"Total loss: {total_loss.item():.6e}\n"
-    msg += f"Penalty/Physics ratio: {ratio.item():.2f}\n"
-    msg += f"{'='*60}\n"
-    return msg
 
 
 def compute_axial_flux(
@@ -969,8 +826,6 @@ def log_physics_values(y_pred: torch.Tensor, data: Data, model_output=None, phas
             dS_dt_tot_true,
             dS_dt_tot_pred,
             edge_index=edge_index,
-            C_ST_true=C_ST_true,
-            C_ST_pred=C_ST_pred,
             batch_vec=batch_vec
         )
 
@@ -1051,8 +906,6 @@ def log_physics_values(y_pred: torch.Tensor, data: Data, model_output=None, phas
             dS_dt_tot_true,
             dS_dt_tot_pred,
             edge_index=edge_index,
-            C_ST_true=C_ST_true,
-            C_ST_pred=C_ST_pred,
             batch_vec=batch_vec
         )
 
@@ -1110,10 +963,6 @@ def log_physics_values(y_pred: torch.Tensor, data: Data, model_output=None, phas
 def physics_residual(
     y_pred: torch.Tensor,
     data: Data,
-    prev_sucrose: torch.Tensor = None,
-    is_first_timestep: bool = False,
-    prev_time: float = None,
-    prev_y_true: torch.Tensor = None,
     phase: str = None
 ):
     """Compute physics-informed residual term based on sucrose transport equations.
@@ -1121,24 +970,13 @@ def physics_residual(
     Implements the governing equation for content-based sucrose transport in sieve-tubes:
     dS/dt = divJ + (F_in - F_out) ≈ 0
 
-    where:
-    - dS/dt is the discrete time derivative (S(t) - S(t-1)) / Δt
-    - divJ is the divergence of axial sucrose flux
-    - F_in is the phloem loading rate
-    - F_out is the sucrose outflow
-
-    For time-series mode, physics loss is computed by minimizing:
-        residual = dS/dt - (divJ + F_in - F_out)
-
-    where dS/dt is computed from the change in sucrose content between timesteps.
+    For steady-state assumption, physics loss is computed by minimizing:
+        residual = divJ + F_in - F_out
 
     Args:
         y_pred: Predicted sucrose content [N, 1] (standardized)
         data: Graph data containing topology, features, simulation parameters, and node fields
-        prev_sucrose: Previous timestep sucrose content [N, 1] (standardized). None for first timestep.
-        is_first_timestep: Whether this is the first timestep (skip dS/dt residual if True)
-        prev_time: Time at previous timestep (hours). If None and prev_sucrose provided, will try to extract from data.
-        prev_y_true: Previous timestep ground truth sucrose content [N, 1] (standardized). None for first timestep.
+        phase: Training phase ('train', 'val', 'test') for logging
 
     Returns:
         tuple: (residual_loss, physics_components_dict, physics_error_metrics) where:
@@ -1202,6 +1040,18 @@ def physics_residual(
     # Use TRUE values of F_in and F_out (detached)
     dS_dt_tot_pred = dS_dt_from_flux_pred + F_in_true_detached - F_out_true_detached
 
+    # Compute error metrics
+    physics_errors = _compute_physics_error_metrics(
+        J_ax_true,
+        J_ax_pred,
+        dS_dt_from_flux_true,
+        dS_dt_from_flux_pred,
+        dS_dt_tot_true,
+        dS_dt_tot_pred,
+        edge_index=edge_index,
+        batch_vec=batch_vec
+    )
+
     if _ENABLE_PHYSICS_LOGGING:
         with open(_PHYSICS_LOG_PATH, "a") as f:
             msg = _log_header("DEBUG OUTPUT - NNCONV MODEL (PHYSICS RESIDUAL)", batch_vec, data=data, phase=phase)
@@ -1211,72 +1061,17 @@ def physics_residual(
             msg += _log_source_sink_terms(F_in_true, F_in_pred, F_out_true, F_out_pred)
             msg += _log_divergence(dS_dt_from_flux_true, dS_dt_from_flux_pred)
             msg += _log_total_residual(dS_dt_tot_true, dS_dt_tot_pred)
-            msg += f"\n--- PHYSICS RESIDUAL (should approach zero) ---\n"
-            msg += f"dS_dt_tot_pred (first 10 nodes): {dS_dt_tot_pred[:10].detach().cpu().numpy()}\n"
-            msg += f"Mean absolute residual: {dS_dt_tot_pred.abs().mean().detach().cpu().item():.6e}\n"
+            msg += _log_comparison_metrics(physics_errors)
+            msg += f"{'='*60}\n"
             f.write(msg)
 
     # ============================
-    # Compute physics residual: enforce dS/dt = divJ + F_in - F_out
+    # Compute physics residual
     # ============================
-    # Initialize temporal derivatives (will be set if not first timestep)
-    dS_dt_from_state_pred = None
-    dS_dt_from_state_true = None
-
-    # For time-series mode, compute discrete time derivative dS/dt from state change
-    if not is_first_timestep and prev_sucrose is not None:
-        # Denormalize current and previous sucrose content
-        S_ST_curr = data.target_scaler.inv_transform(y_pred).squeeze(-1)
-        S_ST_prev = data.target_scaler.inv_transform(prev_sucrose).squeeze(-1)
-
-        # Get current and previous time (assuming data.time is a scalar tensor)
-        # If batched, we'd need to handle per-graph times, but we assume batch_size=1 for time-series
-        if hasattr(data, 'time'):
-            curr_time = data.time.item() if isinstance(data.time, torch.Tensor) else data.time
-        else:
-            # Fallback: extract from node features (column 7 is time)
-            curr_time = node_feat_original[0, 7].item()
-
-        # Compute delta_t from actual time difference
-        if prev_time is not None:
-            delta_t = curr_time - prev_time
-        else:
-            # Fallback: try to extract from node features if available
-            # This assumes node features have time information and prev_sucrose was provided
-            # but prev_time was not explicitly passed
-            # Use a typical value as last resort
-            delta_t = 1.0  # hours (default fallback)
-            if _ENABLE_PHYSICS_LOGGING:
-                with open(_PHYSICS_LOG_PATH, "a") as f:
-                    f.write(f"WARNING: prev_time not provided, using default delta_t = {delta_t} hours\n")
-
-        if delta_t <= 0:
-            raise ValueError(f"Invalid delta_t: {delta_t}. Current time: {curr_time}, Previous time: {prev_time}")
-
-        # Discrete time derivative from predictions: (S(t) - S(t-1)) / Δt  [mmol/h]
-        dS_dt_from_state_pred = (S_ST_curr - S_ST_prev) / delta_t
-
-        # Also compute temporal derivative from ground truth for metrics
-        S_ST_true_curr = data.target_scaler.inv_transform(y_true).squeeze(-1)
-        # Compute ground truth temporal derivative if previous ground truth is available
-        if prev_y_true is not None:
-            S_ST_true_prev = data.target_scaler.inv_transform(prev_y_true).squeeze(-1)
-            dS_dt_from_state_true = (S_ST_true_curr - S_ST_true_prev) / delta_t
-
-        # Physics-based derivative from fluxes and sources/sinks
-        dS_dt_from_physics = dS_dt_from_flux_pred + F_in_true_detached - F_out_true_detached
-
-        # Residual: difference between state-based and physics-based derivatives
-        # R = dS/dt_state - dS/dt_physics
-        # We want this to be close to zero
-        residual = dS_dt_from_state_pred - dS_dt_from_physics
-    else:
-        # First timestep or no previous state: fall back to steady-state assumption
-        # Minimize dS/dt_physics directly (assume dS/dt ≈ 0)
-        residual = dS_dt_tot_pred
+    # Minimize dS/dt_physics directly
+    residual = dS_dt_tot_pred
 
     # Compute physics error metrics (include edge_index for antisymmetry calculation)
-    # Pass temporal derivatives if available (non-first timesteps)
     physics_errors = _compute_physics_error_metrics(
         J_ax_true,
         J_ax_pred,
@@ -1285,28 +1080,8 @@ def physics_residual(
         dS_dt_tot_true,
         dS_dt_tot_pred,
         edge_index=edge_index,
-        C_ST_true=C_ST_true,
-        C_ST_pred=C_ST_pred,
-        batch_vec=batch_vec,
-        dS_dt_from_state_true=dS_dt_from_state_true,
-        dS_dt_from_state_pred=dS_dt_from_state_pred
+        batch_vec=batch_vec
     )
-
-    # After computing temporal metrics, optionally dump temporal tensors for debugging
-    if _ENABLE_PHYSICS_LOGGING:
-        # Prepare temporal tensors (may be None)
-        pred_tensors = {
-            'dS_dt_from_state': dS_dt_from_state_pred,
-            'dS_dt_from_physics': locals().get('dS_dt_from_physics', None) if 'dS_dt_from_physics' in locals() else dS_dt_tot_pred
-        }
-        true_tensors = {
-            'dS_dt_from_state': dS_dt_from_state_true,
-            'dS_dt_from_physics': dS_dt_tot_true
-        }
-
-        with open(_PHYSICS_LOG_PATH, "a") as f:
-            msg = _log_comparison_metrics(physics_errors, temporal_tensors={'pred': pred_tensors, 'true': true_tensors})
-            f.write(msg)
 
     # Add penalty for negative concentrations (after denormalization)
     # This encourages the model to respect the physical constraint C_ST >= 0
@@ -1329,15 +1104,6 @@ def physics_residual(
     # Combine physics residual with non-negativity penalty
     # Weight the penalty strongly to enforce physical constraint
     loss = physics_loss + PENALTY_WEIGHT * negative_concentration_penalty
-
-    # Log penalty monitoring information
-    # if _ENABLE_PHYSICS_LOGGING:
-    #     with open(_PHYSICS_LOG_PATH, "a") as f:
-    #         msg = _log_penalty_monitoring(
-    #             physics_loss, negative_concentration_penalty,
-    #             PENALTY_WEIGHT, loss, "NNConv"
-    #         )
-    #         f.write(msg)
 
     # Prepare detailed physics components for logging (use predicted values)
     if batch_vec is not None:
@@ -1378,10 +1144,6 @@ def physics_residual(
 def physics_residual_operator(
     model_output: dict,
     data: Data,
-    prev_sucrose: torch.Tensor = None,
-    is_first_timestep: bool = False,
-    prev_time: float = None,
-    prev_y_true: torch.Tensor = None,
     phase: str = None
 ) -> tuple[torch.Tensor, dict]:
     """Compute physics residual for operator-based GNN using LEARNED operator.
@@ -1390,11 +1152,8 @@ def physics_residual_operator(
     operator model in the physics loss. The learned operator is supervised by
     the physics residual.
 
-    The conservation law is:
-        dS/dt = div(J) + F_in - F_out ≈ 0
-
-    For time-series mode, dS/dt is computed from the discrete change in sucrose content:
-        dS/dt ≈ (S(t) - S(t-1)) / Δt
+    The conservation law (steady-state assumption):
+        div(J) + F_in - F_out ≈ 0
 
     Args:
         model_output: Dict containing:
@@ -1402,10 +1161,7 @@ def physics_residual_operator(
             - 'edge_fluxes': [E] predicted edge fluxes (USED in loss)
             - 'divergences': [N] divergence values (USED in loss)
         data: Graph data containing features and parameters
-        prev_sucrose: Previous timestep sucrose content [N, 1] (standardized). None for first timestep.
-        is_first_timestep: Whether this is the first timestep (skip dS/dt residual if True)
-        prev_time: Time at previous timestep (hours). If None and prev_sucrose provided, will try to extract from data.
-        prev_y_true: Previous timestep ground truth sucrose content [N, 1] (standardized). None for first timestep.
+        phase: Training phase ('train', 'val', 'test') for logging
 
     Returns:
         tuple: (residual_loss, physics_components_dict, physics_error_metrics)
@@ -1468,6 +1224,18 @@ def physics_residual_operator(
     # Use TRUE values of F_in and F_out (detached)
     dS_dt_tot_pred = divergence_pred + F_in_true_detached - F_out_true_detached
 
+    # Compute error metrics
+    physics_errors = _compute_physics_error_metrics(
+        J_ax_true,
+        edge_fluxes_pred,
+        dS_dt_from_flux_true,
+        divergence_pred,
+        dS_dt_tot_true,
+        dS_dt_tot_pred,
+        edge_index=edge_index,
+        batch_vec=batch_vec
+    )
+
     if _ENABLE_PHYSICS_LOGGING:
         with open(_PHYSICS_LOG_PATH, "a") as f:
             msg = _log_header("DEBUG OUTPUT - OPERATOR MODEL PHYSICS RESIDUAL (LEARNED)", batch_vec, data=data, phase=phase)
@@ -1477,66 +1245,17 @@ def physics_residual_operator(
             msg += _log_divergence(dS_dt_from_flux_true, divergence_pred)
             msg += _log_source_sink_terms(F_in_true, F_in_pred, F_out_true, F_out_pred)
             msg += _log_total_residual(dS_dt_tot_true, dS_dt_tot_pred)
+            msg += _log_comparison_metrics(physics_errors)
+            msg += f"{'='*60}\n"
             f.write(msg)
 
     # ============================
-    # Compute physics residual: enforce dS/dt = divJ + F_in - F_out
+    # Compute physics residual
     # ============================
-    # Initialize temporal derivatives (will be set if not first timestep)
-    dS_dt_from_state_pred = None
-    dS_dt_from_state_true = None
-
-    # For time-series mode, compute discrete time derivative dS/dt from state change
-    if not is_first_timestep and prev_sucrose is not None:
-        # Denormalize current and previous sucrose content
-        S_ST_curr = data.target_scaler.inv_transform(y_pred).squeeze(-1)
-        S_ST_prev = data.target_scaler.inv_transform(prev_sucrose).squeeze(-1)
-
-        # Get current time
-        if hasattr(data, 'time'):
-            curr_time = data.time.item() if isinstance(data.time, torch.Tensor) else data.time
-        else:
-            # Fallback: extract from node features (column 7 is time)
-            curr_time = node_feat_original[0, 7].item()
-
-        # Compute delta_t from actual time difference
-        if prev_time is not None:
-            delta_t = curr_time - prev_time
-        else:
-            # Fallback: try to extract from node features if available
-            # This assumes node features have time information and prev_sucrose was provided
-            # but prev_time was not explicitly passed
-            # Use a typical value as last resort
-            delta_t = 1.0  # hours (default fallback)
-            if _ENABLE_PHYSICS_LOGGING:
-                with open(_PHYSICS_LOG_PATH, "a") as f:
-                    f.write(f"WARNING: prev_time not provided, using default delta_t = {delta_t} hours\n")
-
-        if delta_t <= 0:
-            raise ValueError(f"Invalid delta_t: {delta_t}. Current time: {curr_time}, Previous time: {prev_time}")
-
-        # Discrete time derivative from predictions: (S(t) - S(t-1)) / Δt  [mmol/h]
-        dS_dt_from_state_pred = (S_ST_curr - S_ST_prev) / delta_t
-
-        # Also compute temporal derivative from ground truth for metrics
-        S_ST_true_curr = data.target_scaler.inv_transform(y_true).squeeze(-1)
-        # Compute ground truth temporal derivative if previous ground truth is available
-        if prev_y_true is not None:
-            S_ST_true_prev = data.target_scaler.inv_transform(prev_y_true).squeeze(-1)
-            dS_dt_from_state_true = (S_ST_true_curr - S_ST_true_prev) / delta_t
-
-        # Physics-based derivative from fluxes and sources/sinks
-        # Using LEARNED divergence from operator model
-        dS_dt_from_physics = divergence_pred + F_in_true_detached - F_out_true_detached
-
-        # Residual: difference between state-based and physics-based derivatives
-        residual = dS_dt_from_state_pred - dS_dt_from_physics
-    else:
-        # First timestep or no previous state: fall back to steady-state assumption
-        residual = dS_dt_tot_pred
+    # Minimize dS/dt_physics directly
+    residual = dS_dt_tot_pred
 
     # Compute physics error metrics (include edge_index for antisymmetry calculation)
-    # Pass temporal derivatives if available (non-first timesteps)
     # Use LEARNED fluxes/divergences for error metrics
     physics_errors = _compute_physics_error_metrics(
         J_ax_true,
@@ -1546,25 +1265,8 @@ def physics_residual_operator(
         dS_dt_tot_true,
         dS_dt_tot_pred,
         edge_index=edge_index,
-        C_ST_true=C_ST_true,
-        C_ST_pred=C_ST_pred,
-        batch_vec=batch_vec,
-        dS_dt_from_state_true=dS_dt_from_state_true,
-        dS_dt_from_state_pred=dS_dt_from_state_pred
+        batch_vec=batch_vec
     )
-
-    if _ENABLE_PHYSICS_LOGGING:
-        with open(_PHYSICS_LOG_PATH, "a") as f:
-            pred_tensors = {
-                'dS_dt_from_state': dS_dt_from_state_pred,
-                'dS_dt_from_physics': locals().get('dS_dt_from_physics', None) if 'dS_dt_from_physics' in locals() else dS_dt_tot_pred
-            }
-            true_tensors = {
-                'dS_dt_from_state': dS_dt_from_state_true,
-                'dS_dt_from_physics': dS_dt_tot_true
-            }
-            msg = _log_comparison_metrics(physics_errors, temporal_tensors={'pred': pred_tensors, 'true': true_tensors})
-            f.write(msg)
 
     # Add penalty for negative concentrations (after denormalization)
     # This encourages the model to respect the physical constraint C_ST >= 0
@@ -1586,15 +1288,6 @@ def physics_residual_operator(
     # Combine physics residual with non-negativity penalty
     # Weight the penalty strongly to enforce physical constraint
     loss = physics_loss + PENALTY_WEIGHT * negative_concentration_penalty
-
-    # Log penalty monitoring information
-    # if _ENABLE_PHYSICS_LOGGING:
-    #     with open(_PHYSICS_LOG_PATH, "a") as f:
-    #         msg = _log_penalty_monitoring(
-    #             physics_loss, negative_concentration_penalty,
-    #             PENALTY_WEIGHT, loss, "Operator"
-    #         )
-    #         f.write(msg)
 
     # Prepare loss dict for logging (use LEARNED fluxes/divergences)
     if batch_vec is not None:
@@ -1633,10 +1326,6 @@ def physics_residual_operator(
 def physics_residual_operator_analytical(
     model_output: dict,
     data: Data,
-    prev_sucrose: torch.Tensor = None,
-    is_first_timestep: bool = False,
-    prev_time: float = None,
-    prev_y_true: torch.Tensor = None,
     phase: str = None
 ) -> tuple[torch.Tensor, dict]:
     """Compute physics residual for operator-based GNN using ANALYTICAL calculations.
@@ -1649,11 +1338,8 @@ def physics_residual_operator_analytical(
     This allows fair comparison between NNConv and Operator architectures with
     identical physics supervision.
 
-    The conservation law is:
-        dS/dt = div(J) + F_in - F_out ≈ 0
-
-    For time-series mode, dS/dt is computed from the discrete change in sucrose content:
-        dS/dt ≈ (S(t) - S(t-1)) / Δt
+    The conservation law (steady-state assumption):
+        div(J) + F_in - F_out ≈ 0
 
     Args:
         model_output: Dict containing:
@@ -1661,10 +1347,6 @@ def physics_residual_operator_analytical(
             - 'edge_fluxes': [E] predicted edge fluxes (logged but NOT used)
             - 'divergences': [N] divergence values (logged but NOT used)
         data: Graph data containing features and parameters
-        prev_sucrose: Previous timestep sucrose content [N, 1] (standardized). None for first timestep.
-        is_first_timestep: Whether this is the first timestep (skip dS/dt residual if True)
-        prev_time: Time at previous timestep (hours). If None and prev_sucrose provided, will try to extract from data.
-        prev_y_true: Previous timestep ground truth sucrose content [N, 1] (standardized). None for first timestep.
         phase: Training phase ('train', 'val', 'test') for logging
 
     Returns:
@@ -1738,6 +1420,18 @@ def physics_residual_operator_analytical(
     # Use TRUE values of F_in and F_out (detached)
     dS_dt_tot_pred = dS_dt_from_flux_pred + F_in_true_detached - F_out_true_detached
 
+    # Compute error metrics
+    physics_errors = _compute_physics_error_metrics(
+        J_ax_true,
+        J_ax_pred,
+        dS_dt_from_flux_true,
+        dS_dt_from_flux_pred,
+        dS_dt_tot_true,
+        dS_dt_tot_pred,
+        edge_index=edge_index,
+        batch_vec=batch_vec
+    )
+
     # ============================
     # LOGGING
     # ============================
@@ -1750,90 +1444,15 @@ def physics_residual_operator_analytical(
             msg += _log_divergence(dS_dt_from_flux_true, dS_dt_from_flux_pred)
             msg += _log_source_sink_terms(F_in_true, F_in_pred, F_out_true, F_out_pred)
             msg += _log_total_residual(dS_dt_tot_true, dS_dt_tot_pred)
-
-            # Log comparison between learned and analytical operator outputs
-            if edge_fluxes_learned is not None and divergence_learned is not None:
-                msg += "\n" + "="*80 + "\n"
-                msg += "LEARNED OPERATOR COMPARISON (not used in loss)\n"
-                msg += "="*80 + "\n"
-                msg += f"Edge Fluxes (Learned):\n"
-                msg += f"  Mean: {edge_fluxes_learned.mean().item():.6e}\n"
-                msg += f"  Std:  {edge_fluxes_learned.std().item():.6e}\n"
-                msg += f"  Range: [{edge_fluxes_learned.min().item():.6e}, {edge_fluxes_learned.max().item():.6e}]\n"
-                msg += f"  First 10: {edge_fluxes_learned[:10].detach().cpu().numpy()}\n"
-                msg += f"\nEdge Fluxes (Analytical - USED):\n"
-                msg += f"  Mean: {J_ax_pred.mean().item():.6e}\n"
-                msg += f"  Std:  {J_ax_pred.std().item():.6e}\n"
-                msg += f"  Range: [{J_ax_pred.min().item():.6e}, {J_ax_pred.max().item():.6e}]\n"
-                msg += f"  First 10: {J_ax_pred[:10].detach().cpu().numpy()}\n"
-
-                msg += f"\nDivergence (Learned):\n"
-                msg += f"  Mean: {divergence_learned.mean().item():.6e}\n"
-                msg += f"  Std:  {divergence_learned.std().item():.6e}\n"
-                msg += f"  Range: [{divergence_learned.min().item():.6e}, {divergence_learned.max().item():.6e}]\n"
-                msg += f"  First 10: {divergence_learned[:10].detach().cpu().numpy()}\n"
-                msg += f"\nDivergence (Analytical - USED):\n"
-                msg += f"  Mean: {dS_dt_from_flux_pred.mean().item():.6e}\n"
-                msg += f"  Std:  {dS_dt_from_flux_pred.std().item():.6e}\n"
-                msg += f"  Range: [{dS_dt_from_flux_pred.min().item():.6e}, {dS_dt_from_flux_pred.max().item():.6e}]\n"
-                msg += f"  First 10: {dS_dt_from_flux_pred[:10].detach().cpu().numpy()}\n"
-
-                # Compute difference metrics
-                flux_diff = (edge_fluxes_learned - J_ax_pred).abs()
-                div_diff = (divergence_learned - dS_dt_from_flux_pred).abs()
-                msg += f"\nDifference (Learned - Analytical):\n"
-                msg += f"  Flux MAE: {flux_diff.mean().item():.6e}\n"
-                msg += f"  Divergence MAE: {div_diff.mean().item():.6e}\n"
-
+            msg += _log_comparison_metrics(physics_errors)
+            msg += f"{'='*60}\n"
             f.write(msg)
 
     # ============================
-    # Compute physics residual: enforce dS/dt = divJ + F_in - F_out
+    # Compute physics residual
     # ============================
-    dS_dt_from_state_pred = None
-    dS_dt_from_state_true = None
-
-    # For time-series mode, compute discrete time derivative dS/dt from state change
-    if not is_first_timestep and prev_sucrose is not None:
-        # Denormalize current and previous sucrose content
-        S_ST_curr = data.target_scaler.inv_transform(y_pred).squeeze(-1)
-        S_ST_prev = data.target_scaler.inv_transform(prev_sucrose).squeeze(-1)
-
-        # Get current and previous time
-        if hasattr(data, 'time'):
-            curr_time = data.time.item() if isinstance(data.time, torch.Tensor) else data.time
-        else:
-            curr_time = node_feat_original[0, 7].item()
-
-        if prev_time is not None:
-            delta_t = curr_time - prev_time
-        else:
-            delta_t = 1.0  # hours (default fallback)
-            if _ENABLE_PHYSICS_LOGGING:
-                with open(_PHYSICS_LOG_PATH, "a") as f:
-                    f.write(f"WARNING: prev_time not provided, using default delta_t = {delta_t} hours\n")
-
-        if delta_t <= 0:
-            raise ValueError(f"Invalid delta_t: {delta_t}. Current time: {curr_time}, Previous time: {prev_time}")
-
-        # Discrete time derivative from predictions
-        dS_dt_from_state_pred = (S_ST_curr - S_ST_prev) / delta_t
-
-        # Also compute temporal derivative from ground truth for metrics
-        S_ST_true_curr = data.target_scaler.inv_transform(y_true).squeeze(-1)
-        # Compute ground truth temporal derivative if previous ground truth is available
-        if prev_y_true is not None:
-            S_ST_true_prev = data.target_scaler.inv_transform(prev_y_true).squeeze(-1)
-            dS_dt_from_state_true = (S_ST_true_curr - S_ST_true_prev) / delta_t
-
-        # Physics-based derivative from analytical fluxes
-        dS_dt_from_physics = dS_dt_from_flux_pred + F_in_true_detached - F_out_true_detached
-
-        # Residual: difference between state-based and physics-based derivatives
-        residual = dS_dt_from_state_pred - dS_dt_from_physics
-    else:
-        # First timestep or no previous state: steady-state assumption
-        residual = dS_dt_tot_pred
+    # Minimize dS/dt_physics directly
+    residual = dS_dt_tot_pred
 
     # Compute physics error metrics
     physics_errors = _compute_physics_error_metrics(
@@ -1844,27 +1463,8 @@ def physics_residual_operator_analytical(
         dS_dt_tot_true,
         dS_dt_tot_pred,
         edge_index=edge_index,
-        C_ST_true=C_ST_true,
-        C_ST_pred=C_ST_pred,
-        batch_vec=batch_vec,
-        dS_dt_from_state_true=dS_dt_from_state_true,
-        dS_dt_from_state_pred=dS_dt_from_state_pred
+        batch_vec=batch_vec
     )
-
-    # Temporal tensor logging
-    if _ENABLE_PHYSICS_LOGGING:
-        pred_tensors = {
-            'dS_dt_from_state': dS_dt_from_state_pred,
-            'dS_dt_from_physics': locals().get('dS_dt_from_physics', None) if 'dS_dt_from_physics' in locals() else dS_dt_tot_pred
-        }
-        true_tensors = {
-            'dS_dt_from_state': dS_dt_from_state_true,
-            'dS_dt_from_physics': dS_dt_tot_true
-        }
-
-        with open(_PHYSICS_LOG_PATH, "a") as f:
-            msg = _log_comparison_metrics(physics_errors, temporal_tensors={'pred': pred_tensors, 'true': true_tensors})
-            f.write(msg)
 
     # Add penalty for negative concentrations
     negative_concentration_penalty = torch.relu(-C_ST_pred).pow(2).mean()
@@ -1882,15 +1482,6 @@ def physics_residual_operator_analytical(
 
     # Combine physics residual with non-negativity penalty
     loss = physics_loss + PENALTY_WEIGHT * negative_concentration_penalty
-
-    # Log penalty monitoring information
-    # if _ENABLE_PHYSICS_LOGGING:
-    #     with open(_PHYSICS_LOG_PATH, "a") as f:
-    #         msg = _log_penalty_monitoring(
-    #             physics_loss, negative_concentration_penalty,
-    #             PENALTY_WEIGHT, loss, "Operator-Analytical"
-    #         )
-    #         f.write(msg)
 
     # Prepare loss dict for logging (use ANALYTICAL values)
     if batch_vec is not None:

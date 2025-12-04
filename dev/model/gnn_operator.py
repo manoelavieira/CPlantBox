@@ -316,9 +316,9 @@ class PhloemOperatorGNN(nn.Module):
 
         # Node input for time-series mode: [psi, vol, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp, time, S(t-1)]
         # Always includes previous sucrose content for temporal modeling
-        in_node_dim = cfg.node_feat_dim + 1 + 1  # base features + time + prev_sucrose
+        in_node_dim = cfg.node_feat_dim + 1  # base features + time
 
-        # Project physical features + prev_sucrose to latent space
+        # Project physical features to latent space
         self.input_proj = nn.Linear(in_node_dim, cfg.hidden_size)
 
         conv_layers = []
@@ -423,14 +423,11 @@ class PhloemOperatorGNN(nn.Module):
         self._validated_input = True
         print("Input validation successful (PhloemOperatorGNN)")
 
-    def forward(self, data: Data, prev_sucrose: torch.Tensor) -> dict:
+    def forward(self, data: Data) -> dict:
         """Forward pass returning predictions, edge fluxes, and divergences.
 
         Args:
             data: Graph data object
-            prev_sucrose: Previous timestep sucrose content [N, 1] (standardized).
-                         Required for time-series learning. For first timestep or new nodes,
-                         should be initialized with appropriate values (e.g., ground truth).
 
         Returns:
             dict with keys:
@@ -451,16 +448,11 @@ class PhloemOperatorGNN(nn.Module):
         if time_per_node.dim() != 2 or time_per_node.size(1) != 1:
             raise RuntimeError(f"time_per_node must be [N,1]; got {tuple(time_per_node.shape)}")
 
-        # Prepare prev_sucrose
-        prev_sucrose_tensor = prev_sucrose.to(device=device, dtype=dtype)
-        if prev_sucrose_tensor.dim() == 1:
-            prev_sucrose_tensor = prev_sucrose_tensor.unsqueeze(-1)
-
-        # Physical features for flux computation (no prev_sucrose): [psi, vol, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp, time]
+        # Physical features for flux computation: [psi, vol, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp, time]
         node_feat_phys_for_flux = torch.cat([data.node_feat.to(device, dtype), time_per_node], dim=1)  # [N, 8]
 
-        # Full node features for message passing (includes prev_sucrose): [psi, vol, ..., Temp, time, S(t-1)]
-        node_feat_with_history = torch.cat([node_feat_phys_for_flux, prev_sucrose_tensor], dim=1)  # [N, 9]
+        # Node features for message passing (same as flux features)
+        node_feat_with_history = node_feat_phys_for_flux  # [N, 8]
 
         # Initialize latent state from physical features + temporal context
         h = self.input_proj(node_feat_with_history)  # [N, hidden_size]

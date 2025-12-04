@@ -221,7 +221,6 @@ def log_physics_error_metrics(
     # Log flux direction consistency metrics
     writer.add_scalar(f'{prefix}/J_ax_sign_accuracy', physics_errors.J_ax_sign_accuracy, epoch)
     writer.add_scalar(f'{prefix}/J_ax_reversal_rate', physics_errors.J_ax_reversal_rate, epoch)
-    writer.add_scalar(f'{prefix}/delta_C_sign_accuracy', physics_errors.delta_C_sign_accuracy, epoch)
 
     # Log physics score metrics (dimensionless residual-based consistency)
     writer.add_scalar(f'{prefix}/physics_rel_error', physics_errors.physics_rel_error, epoch)

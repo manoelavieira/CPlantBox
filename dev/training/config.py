@@ -157,29 +157,18 @@ class PhysicsErrorMetrics:
     # Flux direction consistency metrics (physical credibility)
     J_ax_sign_accuracy: float = 0.0      # Fraction of edges with correct flux direction
     J_ax_reversal_rate: float = 0.0      # Fraction of edges with wrong direction (1 - sign_accuracy)
-    delta_C_sign_accuracy: float = 0.0   # Fraction of edges with correct ΔC sign (osmotic effects)
 
     # Physics score metrics (dimensionless residual-based consistency)
     physics_rel_error: float = 0.0          # Normalized residual: E[|r|] / (E[|F_in|] + E[|F_out|] + eps)
     physics_satisfaction_rate: float = 0.0  # Fraction of nodes satisfying conservation within tolerance
-
-    # Temporal consistency metrics (time-series mode)
-    temporal_rel_error_pred: float = 0.0    # Normalized temporal residual for predictions
-    temporal_consistency_pred: float = 0.0  # Fraction of predicted nodes satisfying temporal tolerance
-    temporal_rel_error_true: float = 0.0    # Normalized temporal residual for ground truth
-    temporal_consistency_true: float = 0.0  # Fraction of ground-truth nodes satisfying temporal tolerance
 
     def __str__(self) -> str:
         base = (f"J_ax: MSE={self.J_ax_mse:.3e} RMSE={self.J_ax_rmse:.3e} RelErr={self.J_ax_rel_error:.3e} SignAcc={self.J_ax_sign_accuracy:.3f} | "
                 f"divJ: MSE={self.divJ_mse:.3e} RMSE={self.divJ_rmse:.3e} RelErr={self.divJ_rel_error:.3e} | "
                 f"dS_dt_tot: MSE={self.dS_dt_tot_mse:.3e} RMSE={self.dS_dt_tot_rmse:.3e} RelErr={self.dS_dt_tot_rel_error:.3e}")
         # Always include antisymmetry error and direction metrics
-        base += f" | J_ax_antisym={self.J_ax_antisym_error:.3e}"
-        if self.J_ax_reversal_rate > 0 or self.delta_C_sign_accuracy > 0:
-            base += f" | RevRate={self.J_ax_reversal_rate:.3f} deltaC_SignAcc={self.delta_C_sign_accuracy:.3f}"
-        # Add physics score metrics
-        if self.physics_rel_error > 0 or self.physics_satisfaction_rate > 0:
-            base += f" | PhysRelErr={self.physics_rel_error:.4f} PhysSatisf={self.physics_satisfaction_rate:.3f}"
+        base += f" | J_ax_antisym={self.J_ax_antisym_error:.3e} RevRate={self.J_ax_reversal_rate:.3f} "
+        base += f"PhysRelErr={self.physics_rel_error:.4f} PhysSatisf={self.physics_satisfaction_rate:.3f}"
         return base
 
 

@@ -281,9 +281,14 @@ class PhysicalFluxModule(nn.Module):
         edge_fluxes = J_water * C_src  # [E] (mol/s)
 
         # Compute divergence per node
+        # This follows the C++ PiafMunch convention (Delta2 matrix):
+        # For edge src → dst with flux edge_fluxes:
+        #   - src node (upstream) gets: -edge_fluxes (flux leaving)
+        #   - dst node (downstream) gets: +edge_fluxes (flux arriving)
+        # This matches: Delta2[src, edge] = -1, Delta2[dst, edge] = +1
         divergence = torch.zeros(N, device=device, dtype=dtype)
-        divergence.scatter_add_(0, src, edge_fluxes)   # +J at source (outflow)
-        divergence.scatter_add_(0, dst, -edge_fluxes)  # -J at destination (inflow)
+        divergence.scatter_add_(0, src, -edge_fluxes)  # -J at source (flux leaving)
+        divergence.scatter_add_(0, dst, +edge_fluxes)  # +J at destination (flux arriving)
 
         return edge_fluxes, divergence
 

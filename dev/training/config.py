@@ -145,17 +145,6 @@ class PhysicsErrorMetrics:
     divJ_mse: float = 0.0
     divJ_rmse: float = 0.0
     divJ_rel_error: float = 0.0
-    divJ_correlation: float = 0.0  # Pearson correlation between predicted and true divergence
-
-    # F_in errors
-    F_in_mse: float = 0.0
-    F_in_rmse: float = 0.0
-    F_in_rel_error: float = 0.0
-
-    # F_out errors
-    F_out_mse: float = 0.0
-    F_out_rmse: float = 0.0
-    F_out_rel_error: float = 0.0
 
     # dS_dt_tot (total residual) errors
     dS_dt_tot_mse: float = 0.0
@@ -171,7 +160,7 @@ class PhysicsErrorMetrics:
     delta_C_sign_accuracy: float = 0.0   # Fraction of edges with correct ΔC sign (osmotic effects)
 
     # Physics score metrics (dimensionless residual-based consistency)
-    physics_rel_error: float = 0.0       # Normalized residual: E[|r|] / (E[|F_in|] + E[|F_out|] + eps)
+    physics_rel_error: float = 0.0          # Normalized residual: E[|r|] / (E[|F_in|] + E[|F_out|] + eps)
     physics_satisfaction_rate: float = 0.0  # Fraction of nodes satisfying conservation within tolerance
 
     # Temporal consistency metrics (time-series mode)
@@ -182,9 +171,7 @@ class PhysicsErrorMetrics:
 
     def __str__(self) -> str:
         base = (f"J_ax: MSE={self.J_ax_mse:.3e} RMSE={self.J_ax_rmse:.3e} RelErr={self.J_ax_rel_error:.3e} SignAcc={self.J_ax_sign_accuracy:.3f} | "
-                f"divJ: MSE={self.divJ_mse:.3e} RMSE={self.divJ_rmse:.3e} RelErr={self.divJ_rel_error:.3e} Corr={self.divJ_correlation:.4f} | "
-                f"F_in: MSE={self.F_in_mse:.3e} RMSE={self.F_in_rmse:.3e} RelErr={self.F_in_rel_error:.3e} | "
-                f"F_out: MSE={self.F_out_mse:.3e} RMSE={self.F_out_rmse:.3e} RelErr={self.F_out_rel_error:.3e} | "
+                f"divJ: MSE={self.divJ_mse:.3e} RMSE={self.divJ_rmse:.3e} RelErr={self.divJ_rel_error:.3e} | "
                 f"dS_dt_tot: MSE={self.dS_dt_tot_mse:.3e} RMSE={self.dS_dt_tot_rmse:.3e} RelErr={self.dS_dt_tot_rel_error:.3e}")
         # Always include antisymmetry error and direction metrics
         base += f" | J_ax_antisym={self.J_ax_antisym_error:.3e}"

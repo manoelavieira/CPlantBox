@@ -209,17 +209,6 @@ def log_physics_error_metrics(
     writer.add_scalar(f'{prefix}/divJ_mse', physics_errors.divJ_mse, epoch)
     writer.add_scalar(f'{prefix}/divJ_rmse', physics_errors.divJ_rmse, epoch)
     writer.add_scalar(f'{prefix}/divJ_rel_error', physics_errors.divJ_rel_error, epoch)
-    writer.add_scalar(f'{prefix}/divJ_correlation', physics_errors.divJ_correlation, epoch)
-
-    # Log F_in errors
-    writer.add_scalar(f'{prefix}/F_in_mse', physics_errors.F_in_mse, epoch)
-    writer.add_scalar(f'{prefix}/F_in_rmse', physics_errors.F_in_rmse, epoch)
-    writer.add_scalar(f'{prefix}/F_in_rel_error', physics_errors.F_in_rel_error, epoch)
-
-    # Log F_out errors
-    writer.add_scalar(f'{prefix}/F_out_mse', physics_errors.F_out_mse, epoch)
-    writer.add_scalar(f'{prefix}/F_out_rmse', physics_errors.F_out_rmse, epoch)
-    writer.add_scalar(f'{prefix}/F_out_rel_error', physics_errors.F_out_rel_error, epoch)
 
     # Log dS_dt_tot (total residual) errors
     writer.add_scalar(f'{prefix}/dS_dt_tot_mse', physics_errors.dS_dt_tot_mse, epoch)
@@ -242,24 +231,18 @@ def log_physics_error_metrics(
     writer.add_scalars(f'{prefix}_mse_all', {
         'J_ax': physics_errors.J_ax_mse,
         'divJ': physics_errors.divJ_mse,
-        'F_in': physics_errors.F_in_mse,
-        'F_out': physics_errors.F_out_mse,
         'dS_dt_tot': physics_errors.dS_dt_tot_mse
     }, epoch)
 
     writer.add_scalars(f'{prefix}_rmse_all', {
         'J_ax': physics_errors.J_ax_rmse,
         'divJ': physics_errors.divJ_rmse,
-        'F_in': physics_errors.F_in_rmse,
-        'F_out': physics_errors.F_out_rmse,
         'dS_dt_tot': physics_errors.dS_dt_tot_rmse
     }, epoch)
 
     writer.add_scalars(f'{prefix}_rel_error_all', {
         'J_ax': physics_errors.J_ax_rel_error,
         'divJ': physics_errors.divJ_rel_error,
-        'F_in': physics_errors.F_in_rel_error,
-        'F_out': physics_errors.F_out_rel_error,
         'dS_dt_tot': physics_errors.dS_dt_tot_rel_error
     }, epoch)
 

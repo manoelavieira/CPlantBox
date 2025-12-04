@@ -31,10 +31,11 @@ def initialize_prev_state(max_nodes: int, device: torch.device, dtype: torch.dty
         dtype: Data type for tensors
 
     Returns:
-        Dictionary with 'sucrose' [max_nodes, 1], 'seen' [max_nodes] boolean mask, and 'time' scalar
+        Dictionary with 'sucrose' [max_nodes, 1], 'y_true' [max_nodes, 1], 'seen' [max_nodes] boolean mask, and 'time' scalar
     """
     return {
         'sucrose': torch.zeros(max_nodes, 1, device=device, dtype=dtype),
+        'y_true': torch.zeros(max_nodes, 1, device=device, dtype=dtype),  # Track ground truth separately
         'seen': torch.zeros(max_nodes, dtype=torch.bool, device=device),
         'time': None  # Will be set to the time of the previous graph
     }
@@ -45,7 +46,7 @@ def get_prev_sucrose_for_batch(
     prev_state: dict,
     loss_type: LossType,
     is_first_timestep: bool = False
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Get previous sucrose content for current batch, handling teacher forcing.
 
     For time-series training, we use values from the PREVIOUS timestep stored in prev_state:
@@ -65,7 +66,9 @@ def get_prev_sucrose_for_batch(
         is_first_timestep: Whether this is the very first timestep (t=min_time)
 
     Returns:
-        prev_sucrose: [N, 1] tensor with previous sucrose content (standardized)
+        Tuple of (prev_sucrose, prev_y_true):
+            - prev_sucrose: [N, 1] tensor with previous sucrose content (standardized, with teacher forcing applied)
+            - prev_y_true: [N, 1] tensor with previous ground truth sucrose content (standardized)
     """
     device = data.y.device
     dtype = data.y.dtype
@@ -73,11 +76,13 @@ def get_prev_sucrose_for_batch(
 
     # Initialize with zeros
     prev_sucrose = torch.zeros(N, 1, device=device, dtype=dtype)
+    prev_y_true = torch.zeros(N, 1, device=device, dtype=dtype)
 
     # For the very first timestep, use ground truth as initial state
     if is_first_timestep:
         prev_sucrose = data.y.clone()
-        return prev_sucrose
+        prev_y_true = data.y.clone()
+        return prev_sucrose, prev_y_true
 
     # Determine node indices (handle both single graph and batched cases)
     if hasattr(data, 'batch') and data.batch is not None:
@@ -136,7 +141,10 @@ def get_prev_sucrose_for_batch(
             # Use predictions from prev_state
             prev_sucrose[has_prev_state] = prev_state['sucrose'][node_ids[has_prev_state]]
 
-    return prev_sucrose
+        # Always retrieve ground truth from prev_state for physics metrics
+        prev_y_true[has_prev_state] = prev_state['y_true'][node_ids[has_prev_state]]
+
+    return prev_sucrose, prev_y_true
 
 
 def update_prev_state(
@@ -185,6 +193,9 @@ def update_prev_state(
     else:  # DATA_ONLY mode
         # Store predictions for all nodes
         prev_state['sucrose'][node_ids] = predictions.detach()
+
+    # Always store ground truth separately for physics metrics calculation
+    prev_state['y_true'][node_ids] = data.y.detach()
 
     # Mark nodes as seen
     prev_state['seen'][node_ids] = True
@@ -338,6 +349,7 @@ def compute_physics_residual_step(
     is_first_timestep: bool = False,
     loss_type: LossType = LossType.COMBINED,
     prev_time: float = None,
+    prev_y_true: torch.Tensor = None,
     phase: str = None,
 ) -> Tuple[torch.Tensor, Optional[PhysicsMetrics], Optional[PhysicsErrorMetrics]]:
     """
@@ -360,6 +372,8 @@ def compute_physics_residual_step(
         is_first_timestep: Whether this is the first timestep (skip dS/dt residual if True)
         loss_type: Type of loss being used (determines source/sink term substitution strategy)
         prev_time: Time at previous timestep (hours). Used to compute delta_t for discrete derivative.
+        prev_y_true: Previous timestep ground truth sucrose content [N, 1] (standardized). For physics metrics.
+        phase: Training phase ('train', 'val', 'test') for logging
 
     Returns:
         Tuple of (phys_res_scalar, PhysicsMetrics|None, PhysicsErrorMetrics|None)
@@ -373,13 +387,16 @@ def compute_physics_residual_step(
 
     # Compute physics residual using appropriate function
     if is_operator_model:
-        phys_res, phys_res_dict, phys_errors = physics_residual_operator_analytical(
-            model_output, data, prev_sucrose, is_first_timestep, prev_time, phase=phase
+        phys_res, phys_res_dict, phys_errors = physics_residual_operator(
+            model_output, data, prev_sucrose, is_first_timestep, prev_time, prev_y_true, phase=phase
         )
+        # phys_res, phys_res_dict, phys_errors = physics_residual_operator_analytical(
+        #     model_output, data, prev_sucrose, is_first_timestep, prev_time, prev_y_true, phase=phase
+        # )
     else:
         # NNConv model: model_output is a tensor
         phys_res, phys_res_dict, phys_errors = physics_residual(
-            model_output, data, prev_sucrose, is_first_timestep, prev_time, phase=phase
+            model_output, data, prev_sucrose, is_first_timestep, prev_time, prev_y_true, phase=phase
         )
 
     # Reduce to scalar if needed
@@ -888,7 +905,7 @@ def train_epoch(
             is_first_timestep = (torch.abs(data.time - data.min_time) < tolerance).any().item()
 
         # Get previous sucrose content for time-series learning
-        prev_sucrose = get_prev_sucrose_for_batch(
+        prev_sucrose, prev_y_true = get_prev_sucrose_for_batch(
             data,
             prev_state,
             loss_config.loss_type,
@@ -928,6 +945,7 @@ def train_epoch(
                 is_first_timestep=is_first_timestep,
                 loss_type=loss_config.loss_type,
                 prev_time=prev_state.get('time', None) if prev_state is not None else None,
+                prev_y_true=prev_y_true if not is_first_timestep else None,
                 phase='train'
             )
 
@@ -1340,7 +1358,7 @@ def eval_model(
                 is_first_timestep = (torch.abs(data.time - data.min_time) < tolerance).any().item()
 
             # Get previous sucrose content for time-series learning
-            prev_sucrose = get_prev_sucrose_for_batch(
+            prev_sucrose, prev_y_true = get_prev_sucrose_for_batch(
                 data,
                 prev_state,
                 loss_config.loss_type,
@@ -1367,6 +1385,7 @@ def eval_model(
                     is_first_timestep=is_first_timestep,
                     loss_type=loss_config.loss_type,
                     prev_time=prev_state.get('time', None) if prev_state is not None else None,
+                    prev_y_true=prev_y_true if not is_first_timestep else None,
                     phase=phase
                 )
 

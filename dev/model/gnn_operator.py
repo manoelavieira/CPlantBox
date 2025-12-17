@@ -5,25 +5,25 @@ Implements PhloemOperatorGNN where:
 1. Message passing layers update node embeddings
 2. Prediction head outputs sucrose content S_ST
 3. Physical flux module computes fluxes from predicted concentrations
-   using: J_ax,ij = J^W_ij(Δψ, ΔT, r_ij) · C_upstream
+   using an MLP that takes physically meaningful inputs
 
-The water flux J^W_ij is antisymmetric by construction (J^W_ji = -J^W_ij)
-through parametrization in terms of differences:
-- Δψ = ψ_src - ψ_dst (pressure gradient)
-- ΔT = T_src - T_dst (temperature gradient)
+The flux prediction uses inputs consistent with mechanistic models:
+- Concentrations: C_src, C_dst (affects osmotic pressure and upstream selection)
+- Hydraulic potentials: psi_src, psi_dst (driving force)
+- Temperature: Temp (from source node, affects RT term in pressure)
+- Edge features: r_ST resistance, organ type, etc.
 
-This properly implements the physical transport operator where fluxes
-depend on both the concentration at the upstream node and the pressure-driven
-water flux.
+This allows the network to learn an approximation of:
+  J_ax = (ΔP/r_ST) * C_upstream where ΔP = (C_ST * RT + ψ)_src - (C_ST * RT + ψ)_dst
 
 Expected `Data` fields per graph (per timestep)
 ----------------------------------------------
 - data.edge_index: LongTensor  [2, E]
-- data.edge_feat:  FloatTensor [E, edge_feat_dim]  # edge features (e.g., r_st resistance)
+- data.edge_feat:  FloatTensor [E, edge_feat_dim]   # edge features (r_st resistance, etc.)
 - data.edge_org:   LongTensor  [E]                  # organ type per edge
-- data.node_feat:  FloatTensor [N, node_feat_dim]  # [psi, vol_st, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp]
-- data.time_per_node: FloatTensor [N, 1]           # time in days (per node)
-- data.y:          FloatTensor [N, 1]              # target sucrose content at t
+- data.node_feat:  FloatTensor [N, node_feat_dim]   # [psi, vol_st, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp]
+- data.time_per_node: FloatTensor [N, 1]            # time in days (per node)
+- data.y:          FloatTensor [N, 1]               # target sucrose content at t
 - data.norm_stats: dict                             # normalization statistics (optional)
 - Optional: data.batch for mini-batching multiple graphs
 """
@@ -149,16 +149,16 @@ class MessagePassingLayer(nn.Module):
 class PhysicalFluxModule(nn.Module):
     """Computes physical fluxes based on predicted concentrations and physical features.
 
-    Implements: J_ax,ij = J^W_ij(Δψ, ΔT, r_ij) · C_upstream
-    where:
-    - J^W_ij is the water flux (antisymmetric: J^W_ji = -J^W_ij)
-    - C_upstream is the concentration at the source node
+    Implements flux prediction using physically meaningful inputs:
+    - Concentrations: C_src, C_dst (affects osmotic pressure and upstream selection)
+    - Hydraulic potentials: psi_src, psi_dst (driving force)
+    - Temperature: Temp (from source node, affects RT term)
+    - Edge resistance and other features (r_ST already in edge_features)
 
-    The water flux is parametrized using pressure and temperature differences:
-    - Δψ = ψ_src - ψ_dst (driving force)
-    - ΔT = T_src - T_dst (affects viscosity)
-
-    This ensures physical consistency: J_ji = -J_ij by construction.
+    The MLP learns to predict flux from these physical inputs, allowing it to
+    approximate the mechanistic relationship: J_ax = (ΔP/r_ST) * C_upstream
+    where ΔP depends on both concentration gradient and hydraulic potential,
+    while maintaining flexibility to learn from data.
     """
 
     def __init__(
@@ -181,15 +181,18 @@ class PhysicalFluxModule(nn.Module):
         # Edge input = continuous features + one-hot organ type
         edge_input_dim = edge_feat_dim + num_org_types
 
-        # MLP to compute signed water flux from physical features
-        # Input: [Δpsi, ΔT, |Δpsi|, edge_features]
-        # Output: signed flux (positive = src→dst flow)
-        # Antisymmetry: flux_ji = MLP(-Δpsi_ij, -ΔT_ij, |Δpsi|_ij, ...) ≈ -flux_ij
-        water_flux_input_dim = 3 + edge_input_dim  # Δpsi, ΔT, |Δpsi|, edge_features
+        # MLP to predict flux from physical features
+        # Input: [C_src, C_dst, psi_src, psi_dst, Temp, edge_features]
+        # This provides the network with all information needed to approximate:
+        # - Water flux from pressure gradient (depends on psi, concentrations, temperature)
+        # - Upstream concentration selection (from C_src, C_dst and flow direction)
+        # - Sugar flux = water_flux * C_upstream
+        # Note: r_ST is already included in edge_features
+        flux_input_dim = 5 + edge_input_dim  # C_src, C_dst, psi_src, psi_dst, Temp, edge_features
 
-        # Simple MLP architecture - proven to work
-        self.water_flux_mlp = nn.Sequential(
-            nn.Linear(water_flux_input_dim, hidden_size),
+        # MLP architecture
+        self.flux_mlp = nn.Sequential(
+            nn.Linear(flux_input_dim, hidden_size),
             nn.ReLU(),
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
@@ -199,7 +202,7 @@ class PhysicalFluxModule(nn.Module):
         )
 
         # Initialize with small weights to prevent extreme initial predictions
-        for layer in self.water_flux_mlp:
+        for layer in self.flux_mlp:
             if isinstance(layer, nn.Linear):
                 nn.init.xavier_normal_(layer.weight, gain=0.1)
                 if layer.bias is not None:
@@ -224,7 +227,7 @@ class PhysicalFluxModule(nn.Module):
 
         Returns:
             tuple: (edge_fluxes [E], divergences [N])
-                edge_fluxes: J_ax,ij = J^W_ij * C_upstream (mol/s)
+                edge_fluxes: Predicted axial sugar flux (mol/s)
                 divergences: per-node flux divergence (mol/s)
         """
         N = C_ST.size(0)
@@ -244,41 +247,37 @@ class PhysicalFluxModule(nn.Module):
         # Combine all edge features
         edge_inputs = torch.cat([edge_feat_cont, edge_one_hot], dim=-1)
 
-        # Extract physical features for water flux: psi (index 0) and Temp (index 6)
+        # Extract physical features consistent with ground truth implementation
         # node_feat_phys = [psi, vol, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp, time]
-        psi = node_feat_phys[:, 0:1]  # [N, 1]
-        Temp = node_feat_phys[:, 6:7]  # [N, 1]
+        psi = node_feat_phys[:, 0:1]  # [N, 1] - hydraulic potential
+        Temp = node_feat_phys[:, 6:7]  # [N, 1] - temperature (°C)
 
+        # Get node features at edge endpoints
         psi_src = psi[src]  # [E, 1]
         psi_dst = psi[dst]  # [E, 1]
-        Temp_src = Temp[src]  # [E, 1]
-        Temp_dst = Temp[dst]  # [E, 1]
+        Temp_edge = Temp[src]  # [E, 1] - use source node temperature
+        C_src = C_ST[src]  # [E, 1]
+        C_dst = C_ST[dst]  # [E, 1]
 
-        # Compute differences (antisymmetric features)
-        # Δpsi = psi_src - psi_dst (positive if flow is src→dst)
-        # ΔT = Temp_src - Temp_dst
-        delta_psi = psi_src - psi_dst  # [E, 1]
-        delta_T = Temp_src - Temp_dst  # [E, 1]
+        # Prepare MLP inputs: [C_src, C_dst, psi_src, psi_dst, Temp, edge_features]
+        # These are the physically meaningful quantities that determine flux:
+        # - psi_src, psi_dst: hydraulic potentials (driving force when combined with osmotic pressure)
+        # - C_src, C_dst: concentrations (affect osmotic pressure and upstream selection)
+        # - Temp: temperature (affects RT term in pressure)
+        # - edge_features: includes r_ST resistance, organ type, geometry, etc.
+        flux_input = torch.cat([
+            C_src,          # [E, 1] - source concentration
+            C_dst,          # [E, 1] - destination concentration
+            psi_src,        # [E, 1] - source hydraulic potential
+            psi_dst,        # [E, 1] - destination hydraulic potential
+            Temp_edge,      # [E, 1] - edge temperature (from source node)
+            edge_inputs     # [E, edge_input_dim] - includes r_ST, organ type, other features
+        ], dim=-1)
 
-        # NEW APPROACH: Directly predict signed flux from Δpsi, ΔT
-        # This is more flexible and allows the network to learn the relationship
-        # Antisymmetry is still enforced because:
-        # - flux_ji = MLP(Δpsi_ji, ΔT_ji, edge_features)
-        #           = MLP(-Δpsi_ij, -ΔT_ij, edge_features)
-        # - If MLP is odd in (Δpsi, ΔT), then flux_ji = -flux_ij
-        # We encourage this by using the signed differences directly
-
-        # Add magnitude of pressure gradient as additional feature to help with scaling
-        delta_psi_magnitude = torch.abs(delta_psi)  # [E, 1]
-
-        water_flux_input = torch.cat([delta_psi, delta_T, delta_psi_magnitude, edge_inputs], dim=-1)
-        J_water = self.water_flux_mlp(water_flux_input).squeeze(-1)  # [E], can be positive or negative
-
-        # Get concentration at source (upstream) node
-        C_src = C_ST[src].squeeze(-1)  # [E]
-
-        # Compute sugar flux: J_ax,ij = J^W_ij * C_upstream
-        edge_fluxes = J_water * C_src  # [E] (mol/s)
+        # Predict flux using MLP
+        # The network learns to approximate: J_ax = (ΔP/r_ST) * C_upstream
+        # where ΔP includes both osmotic (C*RT) and hydraulic (ψ) components
+        edge_fluxes = self.flux_mlp(flux_input).squeeze(-1)  # [E] (mol/s)
 
         # Compute divergence per node
         # This follows the C++ PiafMunch convention (Delta2 matrix):

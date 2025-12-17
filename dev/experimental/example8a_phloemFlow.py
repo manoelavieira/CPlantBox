@@ -1,21 +1,21 @@
 import os
 import sys
-sys.path.append("../../../")
-sys.path.append("../../../src/")
-sys.path.append("../../../modelparameter/functional")
+sys.path.append("../../")
+sys.path.append("../../src/")
+sys.path.append("../../modelparameter/")
 
 # # Coupled carbon and water flow in CPlantBox (with a static soil)
-# 
-# # Simulation of water and carbon movement 
-# 
-# In the following we will show how to compute the coupled water and carbon flow in the plant. 
-# 
-# We consider a dynamic plant and a static soil. 
+#
+# # Simulation of water and carbon movement
+#
+# In the following we will show how to compute the coupled water and carbon flow in the plant.
+#
+# We consider a dynamic plant and a static soil.
 # To compute the carbon flux, we use the code developped by Lacointe et al. (2019).
-# 
+#
 # **Reference**
 # A Lacointe and P. Minchin. A mechanistic model to predict distribution of carbon among multiple sinks. *Methods in molecular biology* (Clifton, N.J.) vol. 2014, 2019.
-# 	
+#
 # The sucrose flow depends on several plant, soil and atmospheric variables. For clarity, the basic functions defining those variables were moved to the file "parametersSucroseFlow".
 
 import plantbox as pb
@@ -26,7 +26,7 @@ import time
 import pandas as pd
 
 from functional.xylem_flux import XylemFluxPython  # Python hybrid solver
-from functional.phloem_flux import PhloemFluxPython  
+from functional.phloem_flux import PhloemFluxPython
 from modelparameter.functional.plant_photosynthesis.wheat_FcVB_Giraud2023adapted import *
 from modelparameter.functional.plant_hydraulics.wheat_Giraud2023adapted import *
 from modelparameter.functional.plant_sucrose.wheat_phloem_Giraud2023adapted import *
@@ -39,7 +39,7 @@ from modelparameter.functional.climate import dummyWeather
 RUN_SIM_FLAG = True
 
 # Visualization configuration
-save_image = False # set to True to save image to file
+save_image = True # set to True to save image to file
 show_image = False # set to True to open the image after saving
 image_dir = "images/vtk" # folder where images will be saved
 phloem_dir = "phloem"
@@ -72,24 +72,24 @@ if len(sys.argv) == 4:
 # --------------------------------
 # We start with a small plant to have a lower computation time
 simInit = 3 # [day] init simtime
-simMax = 4
+simMax = 6
 weatherDuration = 0
-dt = 2/24
+dt = 1/24
 depth = 60
 
 # Load separate weather configs
-config_phase1 = dummyWeather.load_weather_config(config_phase1_file)
-config_phase2 = dummyWeather.load_weather_config(config_phase2_file) if config_phase2_file else None
-weatherInit = dummyWeather.weather_custom(simInit, config_phase1)
+# config_phase1 = dummyWeather.load_weather_config(config_phase1_file)
+# config_phase2 = dummyWeather.load_weather_config(config_phase2_file) if config_phase2_file else None
+# weatherInit = dummyWeather.weather_custom(simInit, config_phase1)
 
 # config = dummyWeather.load_weather_config("config/normal_weather.json")
 # weatherInit = dummyWeather.weather_custom(simInit, config)
-# weatherInit = dummyWeather.weather(simInit)
+weatherInit = dummyWeather.weather(simInit)
 simDuration = simInit
 
-# Plant system 
+# Plant system
 pl = pb.MappedPlant(seednum = 2) # seednum: gives the option of setting a random seed to make the simulations replicable
-path = "../../../modelparameter/structural/plant/"
+path = "../../modelparameter/structural/plant/"
 name = "Triticum_aestivum_adapted_2023"
 pl.readParameters(path + name + ".xml")
 
@@ -103,7 +103,7 @@ pl.simulate(simInit, verbose)
 # For post-processing
 Q_out = 0 # sucrose lost by the plant
 AnSum = 0 # assimilation
-# phloem_filename = "phloemoutputs.txt" 
+# phloem_filename = "phloemoutputs.txt"
 
 Q_Rmbu = np.array([0.])
 Q_Grbu = np.array([0.])
@@ -134,7 +134,7 @@ p_bot = p_mean + depth/2
 p_top = p_mean - depth/2
 sx = np.linspace(p_top, p_bot, depth) # soil water potential per voxel
 
-picker = lambda x,y,z : max(int(np.floor(-z)),-1) 
+picker = lambda x,y,z : max(int(np.floor(-z)),-1)
 pl.setSoilGrid(picker)  # maps segment
 
 
@@ -155,7 +155,7 @@ r = PhloemFluxPython(pl, psiXylInit=min(sx), ciInit=weatherInit["cs"]*0.5)
 r = setPhotosynthesisParameters(r, weatherInit)
 
 r = setKrKx_phloem(r) # conductivity of the sieve tube
-r.setKrm2([[2e-5]]) # effect of the sucrose content on maintenance respiration 
+r.setKrm2([[2e-5]]) # effect of the sucrose content on maintenance respiration
 r.setKrm1([[10e-2]]) # effect of structural sucrose content on maintenance respiration
 r.setRhoSucrose([[0.51],[0.65],[0.56]]) # sucrose density per organ type (mmol/cm3)
 r.setRmax_st([[14.4,9.0,6.0,14.4],[5.,5.],[15.]]) # maximum growth rate when water and carbon limitation is activated
@@ -200,9 +200,9 @@ while (simDuration <= simMax) and RUN_SIM_FLAG:
         filename = f"{image_dir}/plant_{i:02d}.png"
     else:
         filename = None
-    
+
     vp.plot_plant(pl, "subType", render=True, interactiveImage=False, filename=filename, show=show_image)
-    
+
     Nt = len(r.plant.nodes)
     print(f"simDuration: {simDuration}")
     print(f"number of plant nodes: {Nt}\n")
@@ -221,7 +221,7 @@ while (simDuration <= simMax) and RUN_SIM_FLAG:
 
     print(f"weatherX: 'p_mean': {weatherX.get("p_mean")}\n")
     # weatherX = dummyWeather.weather(simDuration) # update weather variables
-    
+
     r.Qlight = weatherX["Qlight"]
     r = setKrKx_xylem(weatherX["TairC"], weatherX["RH"], r) # update xylem conductivity data
 
@@ -234,11 +234,11 @@ while (simDuration <= simMax) and RUN_SIM_FLAG:
     AnSum += np.sum(r.Ag4Phloem)*dt # total cumulative carbon assimilaiton
     errLeuning = sum(r.outputFlux) # should be 0 : no storage of water in the plant
     fluxes = np.array(r.outputFlux)
-    
+
     # returns a map: soil cell → total water flux into that cell
     # hash map with cell indices as keys and fluxes as values [cm3/day]
     fluxesSoil = r.soilFluxes(simDuration, r.psiXyl, sx, approx=False) # root water flux per soil voxel
-        
+
     # Simulation of phloem flow
     startphloem = simDuration
     endphloem = startphloem + dt
@@ -247,8 +247,8 @@ while (simDuration <= simMax) and RUN_SIM_FLAG:
     os.makedirs(phloem_dir, exist_ok=True)
     phloem_filename = f"{phloem_dir}/phloemoutputs_{i:02d}.txt"
     r.startPM(startphloem, endphloem, stepphloem, (weatherX["TairC"] + 273.15), True, phloem_filename)
-        
-    # Get ouput of sucrose flow computation    
+
+    # Get ouput of sucrose flow computation
     Q_ST = np.array(r.Q_out[0:Nt]) # sieve tube sucrose content
     Q_meso = np.array(r.Q_out[Nt:(Nt*2)]) # mesophyll sucrose content
     Q_Rm = np.array(r.Q_out[(Nt*2):(Nt*3)]) # sucrose used for maintenance respiration
@@ -257,12 +257,12 @@ while (simDuration <= simMax) and RUN_SIM_FLAG:
 
     C_ST = np.array(r.C_ST) # sieve tube sucrose concentraiton
     volST = np.array(r.vol_ST) # sieve tube volume
-    volMeso = np.array(r.vol_Meso) # mesophyll volume     
+    volMeso = np.array(r.vol_Meso) # mesophyll volume
     C_meso = Q_meso / volMeso # sucrose concentration in mesophyll
     Q_out = Q_Rm + Q_Exud + Q_Gr # total sucrose lost/used by the plant
     error = sum(Q_ST + Q_meso + Q_out ) - AnSum # balance residual (error)
 
-    lengthTot = sum(r.plant.segLength()) # total plant length 
+    lengthTot = sum(r.plant.segLength()) # total plant length
 
     # Variation of sucrose content at the last time step (mmol)
     Q_ST_i = Q_ST - Q_STbu # in the sieve tubes
@@ -276,14 +276,14 @@ while (simDuration <= simMax) and RUN_SIM_FLAG:
     print("Error in sucrose balance:\n\tabs (mmol) {:5.2e}\trel (-) {:5.2e}".format(error, dummyWeather.div0f(error, AnSum, 1.)))
     print("Error in water balance:\n\tabs (cm3/day) {:5.2e}".format(errLeuning))
     print("Water fluxes (cm3/day):\n\ttranspiration {:5.2e}".format(sum(fluxesSoil.values())))
-    print("Assimilated sucrose (cm):\n\tAn {:5.2e}".format(AnSum)) 
-    print("Sucrose concentration in sieve tube (mmol ml-1):\n\tmean {:.2e}\tmin  {:5.2e} at {:d} segs \tmax  {:5.2e}".format(np.mean(C_ST), min(C_ST), len(np.where(C_ST == min(C_ST) )[0]), max(C_ST)))        
+    print("Assimilated sucrose (cm):\n\tAn {:5.2e}".format(AnSum))
+    print("Sucrose concentration in sieve tube (mmol ml-1):\n\tmean {:.2e}\tmin  {:5.2e} at {:d} segs \tmax  {:5.2e}".format(np.mean(C_ST), min(C_ST), len(np.where(C_ST == min(C_ST) )[0]), max(C_ST)))
     print('Acumulated\n\tRm   {:.2e}\tGr   {:.2e}\tExud {:5.2e}'.format(sum(Q_Rm), sum(Q_Gr), sum(Q_Exud)))
-    print("Aggregated sink repartition at last time step (%):\n\tRm   {:5.1f}\tGr   {:5.1f}\tExud {:5.1f}".format(sum(Q_Rm_i)/sum(Q_out_i)*100, 
+    print("Aggregated sink repartition at last time step (%):\n\tRm   {:5.1f}\tGr   {:5.1f}\tExud {:5.1f}".format(sum(Q_Rm_i)/sum(Q_out_i)*100,
         sum(Q_Gr_i)/sum(Q_out_i)*100,sum(Q_Exud_i)/sum(Q_out_i)*100))
-    print("Total aggregated sink repartition (%):\n\tRm   {:5.1f}\tGr   {:5.1f}\tExud {:5.1f}".format(sum(Q_Rm)/sum(Q_out)*100, 
+    print("Total aggregated sink repartition (%):\n\tRm   {:5.1f}\tGr   {:5.1f}\tExud {:5.1f}".format(sum(Q_Rm)/sum(Q_out)*100,
         sum(Q_Gr)/sum(Q_out)*100,sum(Q_Exud)/sum(Q_out)*100))
-    print("Growth rate (cm/day):\n\ttotal {:5.2e}\tlast time step {:5.2e}".format(lengthTot - lengthTotInit, lengthTot - lengthTotBU)) 
+    print("Growth rate (cm/day):\n\ttotal {:5.2e}\tlast time step {:5.2e}".format(lengthTot - lengthTotInit, lengthTot - lengthTotBU))
 
 
     print("\nDatasetLogger")
@@ -363,7 +363,7 @@ while (simDuration <= simMax) and RUN_SIM_FLAG:
     #     ax.set_zlabel("Z")
 
     # plt.tight_layout()
-    # plt.savefig(f"images/nodes/plant_{i:02d}.png") 
+    # plt.savefig(f"images/nodes/plant_{i:02d}.png")
 
 
     # Plant growth based on Gr * Gr_Y
@@ -376,8 +376,8 @@ while (simDuration <= simMax) and RUN_SIM_FLAG:
     lengthTotBU = lengthTot
     Q_STbu = np.concatenate((Q_ST, np.full(Nt - Ntbu, 0.)))
     Q_Rmbu = np.concatenate((Q_Rm, np.full(Nt - Ntbu, 0.)))
-    Q_Grbu = np.concatenate((Q_Gr, np.full(Nt - Ntbu, 0.))) 
-    Q_Exudbu = np.concatenate((Q_Exud, np.full(Nt - Ntbu, 0.))) 
+    Q_Grbu = np.concatenate((Q_Gr, np.full(Nt - Ntbu, 0.)))
+    Q_Exudbu = np.concatenate((Q_Exud, np.full(Nt - Ntbu, 0.)))
 
     Q_Rmall = np.append(Q_Rmall, sum(Q_Rm_i))
     Q_Grall = np.append(Q_Grall, sum(Q_Gr_i))
@@ -394,7 +394,7 @@ while (simDuration <= simMax) and RUN_SIM_FLAG:
 simulation_end = time.time()
 total_duration = simulation_end - sim_start
 print(f"\n====== Simulation ended at: {time.strftime('%H:%M:%S')} ======")
-print(f"====== Total simulation duration: {total_duration:.2f} seconds ({total_duration/60:.2f} minutes) ======") 
+print(f"====== Total simulation duration: {total_duration:.2f} seconds ({total_duration/60:.2f} minutes) ======")
 
 
 # --------------------------------

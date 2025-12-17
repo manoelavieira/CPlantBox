@@ -185,12 +185,12 @@ def compute_physics_residual_step(
 
     # Compute physics residual using appropriate function
     if is_operator_model:
-        # phys_res, phys_res_dict, phys_errors = physics_residual_operator(
-        #     model_output, data, phase=phase
-        # )
-        phys_res, phys_res_dict, phys_errors = physics_residual_operator_analytical(
+        phys_res, phys_res_dict, phys_errors = physics_residual_operator(
             model_output, data, phase=phase
         )
+        # phys_res, phys_res_dict, phys_errors = physics_residual_operator_analytical(
+        #     model_output, data, phase=phase
+        # )
     else:
         # NNConv model: model_output is a tensor
         phys_res, phys_res_dict, phys_errors = physics_residual(

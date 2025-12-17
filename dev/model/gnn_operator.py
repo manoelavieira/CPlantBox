@@ -22,7 +22,6 @@ Expected `Data` fields per graph (per timestep)
 - data.edge_feat:  FloatTensor [E, edge_feat_dim]   # edge features (r_st resistance, etc.)
 - data.edge_org:   LongTensor  [E]                  # organ type per edge
 - data.node_feat:  FloatTensor [N, node_feat_dim]   # [psi, vol_st, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp]
-- data.time_per_node: FloatTensor [N, 1]            # time in days (per node)
 - data.y:          FloatTensor [N, 1]               # target sucrose content at t
 - data.norm_stats: dict                             # normalization statistics (optional)
 - Optional: data.batch for mini-batching multiple graphs
@@ -221,7 +220,7 @@ class PhysicalFluxModule(nn.Module):
 
         Args:
             C_ST: Predicted concentrations [N, 1] (mol/m³)
-            node_feat_phys: Physical node features [N, 8] (psi, vol, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp, time)
+            node_feat_phys: Physical node features [N, 7] (psi, vol_st, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp)
             edge_index: Edge connectivity [2, E]
             edge_features: Edge features [E, D+1] (continuous + categorical)
 
@@ -248,7 +247,7 @@ class PhysicalFluxModule(nn.Module):
         edge_inputs = torch.cat([edge_feat_cont, edge_one_hot], dim=-1)
 
         # Extract physical features consistent with ground truth implementation
-        # node_feat_phys = [psi, vol, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp, time]
+        # node_feat_phys = [psi, vol_st, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp]
         psi = node_feat_phys[:, 0:1]  # [N, 1] - hydraulic potential
         Temp = node_feat_phys[:, 6:7]  # [N, 1] - temperature (°C)
 
@@ -313,9 +312,8 @@ class PhloemOperatorGNN(nn.Module):
         self.cfg = cfg
         self._validated_input = False
 
-        # Node input for time-series mode: [psi, vol, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp, time, S(t-1)]
-        # Always includes previous sucrose content for temporal modeling
-        in_node_dim = cfg.node_feat_dim + 1  # base features + time
+        # Node input dimension
+        in_node_dim = cfg.node_feat_dim
 
         # Project physical features to latent space
         self.input_proj = nn.Linear(in_node_dim, cfg.hidden_size)
@@ -414,10 +412,6 @@ class PhloemOperatorGNN(nn.Module):
             raise ValueError(f"Expected node_feat dim {self.cfg.node_feat_dim}, got {data.node_feat.size(1)}")
         if data.edge_feat.size(1) != self.cfg.edge_feat_dim:
             raise ValueError(f"Expected edge_feat dim {self.cfg.edge_feat_dim}, got {data.edge_feat.size(1)}")
-        if data.time_per_node is None:
-            raise ValueError("time_per_node is required")
-        if data.time_per_node.ndim != 2 or data.time_per_node.size(1) != 1:
-            raise ValueError(f"time_per_node must be [N,1], got {tuple(data.time_per_node.shape)}")
 
         self._validated_input = True
         print("Input validation successful (PhloemOperatorGNN)")
@@ -442,18 +436,14 @@ class PhloemOperatorGNN(nn.Module):
         edge_index = data.edge_index.to(device)
         edge_feat = data.edge_feat.to(device=device, dtype=dtype)
         edge_org = data.edge_org.to(device)
-        time_per_node = data.time_per_node.to(device=device, dtype=dtype)
 
-        if time_per_node.dim() != 2 or time_per_node.size(1) != 1:
-            raise RuntimeError(f"time_per_node must be [N,1]; got {tuple(time_per_node.shape)}")
-
-        # Physical features for flux computation: [psi, vol, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp, time]
-        node_feat_phys_for_flux = torch.cat([data.node_feat.to(device, dtype), time_per_node], dim=1)  # [N, 8]
+        # Physical features for flux computation: [psi, vol_st, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp]
+        node_feat_phys_for_flux = data.node_feat.to(device=device, dtype=dtype)  # [N, 7]
 
         # Node features for message passing (same as flux features)
-        node_feat_with_history = node_feat_phys_for_flux  # [N, 8]
+        node_feat_with_history = node_feat_phys_for_flux  # [N, 7]
 
-        # Initialize latent state from physical features + temporal context
+        # Initialize latent state from physical features
         h = self.input_proj(node_feat_with_history)  # [N, hidden_size]
 
         # Prepare edge features (continuous + categorical)

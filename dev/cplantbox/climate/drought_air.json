@@ -1,14 +1,12 @@
 {
     "vgSoil": [0.059, 0.45, 0.00644, 1.503, 1],
-    "nightPart": 0.3,
     "Qnight": 0,
-    "Qday": 3.33,
+    "Qday": 0.00096,
     "Tnight": 15.8,
     "Tday": 22,
     "RHnight": 0.4,
     "RHday": 0.2,
     "Pair": 1010.0,
     "thetaInit": 0.3,
-    "cs": 0.00085
+    "co2": 0.00085
 }
-  

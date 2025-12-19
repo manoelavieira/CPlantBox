@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import visualisation.vtk_plot as vp
 import matplotlib.pyplot as plt
+import argparse
 
 from functional.xylem_flux import XylemFluxPython
 from functional.phloem_flux import PhloemFluxPython
@@ -19,16 +20,34 @@ from modelparameter.functional.plant_hydraulics.wheat_Giraud2023adapted import *
 from modelparameter.functional.plant_sucrose.wheat_phloem_Giraud2023adapted import *
 from datetime import datetime
 from matplotlib.dates import DateFormatter, HourLocator
+from modelparameter.functional.climate import dummyWeather
 
 def getWeatherData(sim_time):
     diffDt = abs(pd.to_timedelta(weatherData['time']) - pd.to_timedelta(sim_time%1, unit='d'))
     line_data = np.where(diffDt == min(diffDt))[0][0]
     return weatherData.iloc[line_data]  # get the weather data for the current time step
 
+# Command-line arguments (defaults preserve previous behavior)
+parser = argparse.ArgumentParser(description="Simulate phloem flow")
+parser.add_argument('--save-image', action='store_true', dest='save_image',
+                    help='Save plant images each step (default: False)')
+parser.add_argument('--image-dir', type=str, default='images', dest='image_dir',
+                    help='Directory to save images (default: images)')
+parser.add_argument('--phloem-dir', type=str, default='data/sim', dest='phloem_dir',
+                    help='Directory to save phloem output (default: data/tmp)')
+parser.add_argument('--weather-file', type=str, default='climate/baseline.json', dest='weather_file',
+                    help='Weather configuration file (default: climate/baseline.json)')
+args = parser.parse_args()
+
+save_image = args.save_image
+image_dir = args.image_dir
+phloem_dir = args.phloem_dir
+weather_config = args.weather_file
+
 """ Parameters and variables """
 plant_age = 7.3 # [day] init simtime
 sim_time = 0.5 # [day]
-dt = 1./24.
+dt = 4./24.
 N = int(sim_time/dt)
 depth = 60
 p_mean = -600 # mean soil water potential [cm]
@@ -36,6 +55,8 @@ p_mean = -600 # mean soil water potential [cm]
 """ Weather data """
 path = "../../modelparameter/functional/climate/"
 weatherData = pd.read_csv(path + 'Selhausen_weather_data.txt', delimiter="\t")
+config = dummyWeather.load_weather_config(weather_config)
+weatherInit = dummyWeather.weather_custom(plant_age, config)
 
 """ Plant """
 plant = pb.MappedPlant(seednum=2)
@@ -62,7 +83,7 @@ plant.setSoilGrid(picker)
 params = PlantHydraulicParameters()
 params.read_parameters("../../modelparameter/functional/plant_hydraulics/wheat_Giraud2023adapted")
 
-hm = PhloemFluxPython(plant, params, psiXylInit=min(sx), ciInit=weatherData['co2'][0]*0.5)
+hm = PhloemFluxPython(plant, params, psiXylInit=min(sx), ciInit=weatherInit['co2']*0.5)
 hm.wilting_point = -10000
 
 path = '../../modelparameter/functional/'
@@ -76,10 +97,22 @@ cumulAssimilation = 0.
 cumulTranspiration = 0.
 Q_Rm_is, Q_Gr_is, Q_Exud_is, Q_Water_is = [], [], [], []
 
+print("Entering simulation loop...")
 """ Simulation loop """
 for i in range(N):
+    # Create output directory if saving is enabled
+    if save_image:
+        os.makedirs(image_dir, exist_ok=True)
+        filename = f"{image_dir}/plant_{i:02d}.png"
+    else:
+        filename = None
+
+    vp.plot_plant(plant, "organType", render=save_image,
+                  interactiveImage=False, save_path=filename)
+
     """ Weather variables """
-    weatherData_i = getWeatherData(plant_age)
+    weatherData_i = dummyWeather.weather_custom(plant_age, config)
+    weatherData_i['PAR'] = weatherData_i['Qlight'] * (24*3600) / 1e4
 
     """ Plant growth """
     plant_age += dt
@@ -90,16 +123,33 @@ for i in range(N):
     es = hm.get_es(weatherData_i['Tair'])
     ea = es * weatherData_i['RH']
 
+    print("Solve: Plant transpiration and photosynthesis...")
     hm.solve(sim_time=plant_age, rsx=sx, cells=True,
-             ea=ea, es=es,
-             PAR=weatherData_i['PAR']*(24*3600)/1e4,
-             TairC=weatherData_i['Tair'],
-             verbose=0)
+            ea=ea, es=es,
+            PAR=weatherData_i['PAR'],
+            TairC=weatherData_i['Tair'],
+            verbose=0)
 
     """ Plant inner carbon balance """
-    hm.solve_phloem_flow(plant_age, dt,  weatherData_i['Tair'])
+    print("Solve: Phloem flow...")
+    os.makedirs(phloem_dir, exist_ok=True)
+    phloem_file = f"{phloem_dir}/phloem_{i:02d}.txt"
+
+    hm.solve_phloem_flow(plant_age, dt, weatherData_i['Tair'], unit=1, outputfile=phloem_file)
+
+    # Save all simulation data in HDF5 format
+    hm.save_simulation_data(
+        step=i,
+        sim_time=sim_time,
+        plant_age=plant_age,
+        dt=dt,
+        weather_data=weatherData_i,
+        outdir=phloem_dir,
+        save_params=(i==0)  # Only save parameters on first step
+    )
 
     """ Post processing """
+    print("Post processing...")
     cumulAssimilation  += np.sum(hm.get_net_assimilation())  * dt
     cumulTranspiration += np.sum(hm.get_transpiration()) * dt
 
@@ -125,29 +175,33 @@ for i in range(N):
     print("aggregated sink repartition at last time step (%) :\n\tRm   {:5.1f}\tGr   {:5.1f}\tExud {:5.1f}".format(Q_Rm_i/Q_out_i*100,  Q_Gr_i/Q_out_i*100,Q_Exud_i/Q_out_i*100))
     print("total aggregated sink repartition (%) :\n\tRm   {:5.1f}\tGr   {:5.1f}\tExud {:5.1f}".format(Q_Rm/Q_out*100, Q_Gr/Q_out*100, Q_Exud/Q_out*100))
 
-    time.append(datetime.strptime(weatherData_i['time'], '%H:%M:%S'))
+    # Convert plant_age (in days) to time of day for plotting
+    time_of_day = plant_age % 1  # Get fractional part (time of day)
+    hours = int(time_of_day * 24)
+    minutes = int((time_of_day * 24 - hours) * 60)
+    seconds = int(((time_of_day * 24 - hours) * 60 - minutes) * 60)
+    time.append(datetime.strptime(f'{hours:02d}:{minutes:02d}:{seconds:02d}', '%H:%M:%S'))
     Q_Rm_is.append(Q_Rm_i/dt)
     Q_Exud_is.append(Q_Exud_i/dt)
     Q_Gr_is.append(Q_Gr_i/dt)
     Q_Water_is.append(np.sum(hm.get_transpiration()))
 
+# """ Plot results """
+# fig, axs = plt.subplots(2,2)
+# axs[0,0].plot(time, Q_Rm_is)
+# axs[0,0].set(xlabel="Time [hh:mm]", ylabel='Total respiration rate (mol/day)')
+# axs[1,0].plot(time, Q_Gr_is, 'tab:red')
+# axs[1,0].set(xlabel="Time [hh:mm]", ylabel='Total growth rate (mol/day)')
+# axs[0,1].plot(time, Q_Exud_is , 'tab:brown')
+# axs[0,1].set(xlabel="Time [hh:mm]", ylabel='Total exudation\nrate (mol/day)')
+# axs[1,1].plot(time, Q_Water_is , 'tab:brown')
+# axs[1,1].set(xlabel="Time [hh:mm]", ylabel='Total transpiration\nrate (cm3/day)')
 
-""" Plot results """
-fig, axs = plt.subplots(2,2)
-axs[0,0].plot(time, Q_Rm_is)
-axs[0,0].set(xlabel="Time [hh:mm]", ylabel='Total respiration rate (mol/day)')
-axs[1,0].plot(time, Q_Gr_is, 'tab:red')
-axs[1,0].set(xlabel="Time [hh:mm]", ylabel='Total growth rate (mol/day)')
-axs[0,1].plot(time, Q_Exud_is , 'tab:brown')
-axs[0,1].set(xlabel="Time [hh:mm]", ylabel='Total exudation\nrate (mol/day)')
-axs[1,1].plot(time, Q_Water_is , 'tab:brown')
-axs[1,1].set(xlabel="Time [hh:mm]", ylabel='Total transpiration\nrate (cm3/day)')
+# for ax in axs.flatten():
+#     ax.xaxis.set_major_locator(HourLocator(range(0, 25, 1)))
+#     ax.xaxis.set_major_formatter(DateFormatter('%H:%M'))
+#     ax.fmt_xdata = DateFormatter('%H:%M')
+#     fig.autofmt_xdate()
 
-for ax in axs.flatten():
-    ax.xaxis.set_major_locator(HourLocator(range(0, 25, 1)))
-    ax.xaxis.set_major_formatter(DateFormatter('%H:%M'))
-    ax.fmt_xdata = DateFormatter('%H:%M')
-    fig.autofmt_xdate()
-
-fig.tight_layout()
-plt.show()
+# fig.tight_layout()
+# plt.show()

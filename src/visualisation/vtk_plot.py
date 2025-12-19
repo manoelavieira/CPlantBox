@@ -5,7 +5,10 @@ import time
 import numpy as np
 import vtk
 from mpi4py import MPI; comm = MPI.COMM_WORLD; rank = comm.Get_rank(); max_rank = comm.Get_size()
-# from IPython.display import Image, display
+from PIL import Image as PILImage
+
+import os
+os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
 
 """
 VTK Plot, by Daniel Leitner (refurbished 06/2020)
@@ -119,13 +122,13 @@ def plot_plant(plant, p_name, render=True, interactiveImage=True, save_path=None
 
     mapper = vtk.vtkPolyDataMapper()
     mapper.SetInputData(polyData)
-    mapper.ScalarVisibilityOn();
+    mapper.ScalarVisibilityOn()
     mapper.SetScalarModeToUseCellFieldData()  # maybe because radius is active scalar in point data?
     # mapper.SelectColorArray(p_name)
     mapper.UseLookupTableScalarRangeOn()
 
     actor = vtk.vtkActor()
-    actor.SetMapper(mapper);
+    actor.SetMapper(mapper)
 
     # lut = create_lookup_table()  # 24
     mapper.SetLookupTable(lut)
@@ -779,21 +782,21 @@ def plot_roots_and_soil(rs, pname:str, rp, s, periodic:bool, min_b, max_b, cell_
 def plot_roots_and_mesh(rs, pname_root, mesh, pname_mesh, periodic:bool, xx = 1, yy = 1, filename:str = "", interactiveImage = True):
     """ Plots soil slices and roots, additionally saves both grids as files
     @param rs            some Organism (e.g. RootSystem, MappedRootSystem, ...) or MappedSegments
-    @param pname_root    root parameter that will be visualized 
+    @param pname_root    root parameter that will be visualized
     @param mesh          vtk grid
-    @param pname_mesh    name of grid cell data array that will be visualized 
+    @param pname_mesh    name of grid cell data array that will be visualized
     @param periodic      if yes the root system will be mapped into the domain
-    @param xx, yy        witdh and height of periodic domain    
+    @param xx, yy        witdh and height of periodic domain
     @param filename      file name (without extension)
-    
-    How to add data to a vtk grid: 
-    
+
+    How to add data to a vtk grid:
+
     celldata = vtk.vtkDoubleArray()
     celldata.SetName("data")
     celldata.SetNumberOfValues(n)
     for j in range(0, n):
         celldata.SetValue(j, data[j])
-    grid.GetCellData().AddArray(celldata)    
+    grid.GetCellData().AddArray(celldata)
     """
     ana = pb.SegmentAnalyser(rs)
     if periodic:
@@ -813,7 +816,7 @@ def plot_roots_and_mesh(rs, pname_root, mesh, pname_mesh, periodic:bool, xx = 1,
 
 def plot_soil(s, pname_mesh, min_b, max_b, cell_number, solutes = [], filename:str = "", interactiveImage = True):
     """ Writes results of a macroscopic soil model (e.g. Richards, RichardsNC) as vtu file
-        @param filename      filename without extension 
+        @param filename      filename without extension
         @parma s             soil model (e.g. Richards, RichardsNC)
         @parma min_b         minimum of bounding box
         @parma max_b         maximum of bounding box
@@ -844,7 +847,7 @@ def plot_soil(s, pname_mesh, min_b, max_b, cell_number, solutes = [], filename:s
 
 def write_soil(filename, s, min_b, max_b, cell_number, solutes = []):
     """ Writes results of a macroscopic soil model (e.g. Richards, RichardsNC) as vtu file
-        @param filename      filename without extension 
+        @param filename      filename without extension
         @parma s             soil model (e.g. Richards, RichardsNC)
         @parma min_b         minimum of bounding box
         @parma max_b         maximum of bounding box

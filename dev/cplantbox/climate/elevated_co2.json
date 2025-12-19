@@ -1,0 +1,14 @@
+{
+    "description": "Elevated CO2 scenario - future climate prediction with CO2 fertilization",
+    "vgSoil": [0.059, 0.45, 0.00644, 1.503, 1],
+    "Qnight": 0,
+    "Qday": 0.00096,
+    "Tnight": 17,
+    "Tday": 24,
+    "RHnight": 0.75,
+    "RHday": 0.5,
+    "Pair": 1010.0,
+    "thetaInit": 0.28,
+    "co2": 0.00120,
+    "notes": "Elevated CO2 (~550 ppm vs 400 ppm baseline), tests photosynthetic enhancement and WUE"
+}

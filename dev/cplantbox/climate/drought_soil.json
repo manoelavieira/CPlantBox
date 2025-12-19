@@ -1,0 +1,14 @@
+{
+    "description": "Soil drought stress - severe water limitation from dry soil",
+    "vgSoil": [0.059, 0.45, 0.00644, 1.503, 1],
+    "Qnight": 0,
+    "Qday": 0.00096,
+    "Tnight": 16,
+    "Tday": 23,
+    "RHnight": 0.7,
+    "RHday": 0.5,
+    "Pair": 1010.0,
+    "thetaInit": 0.15,
+    "co2": 0.00085,
+    "notes": "Low soil water (15% theta, approaching wilting point), tests root water uptake limits"
+}

@@ -1,0 +1,14 @@
+{
+    "description": "Combined drought and heat stress - realistic extreme stress scenario",
+    "vgSoil": [0.059, 0.45, 0.00644, 1.503, 1],
+    "Qnight": 0,
+    "Qday": 0.00096,
+    "Tnight": 35,
+    "Tday": 40,
+    "RHnight": 0.5,
+    "RHday": 0.25,
+    "Pair": 1070.0,
+    "thetaInit": 0.18,
+    "co2": 0.00085,
+    "notes": "Multiple stressors: high temp, low RH, dry soil - tests plant survival limits"
+}

@@ -1,12 +1,14 @@
 {
+    "description": "Low light and cold conditions - reduced photosynthesis scenario",
     "vgSoil": [0.059, 0.45, 0.00644, 1.503, 1],
     "Qnight": 0,
     "Qday": 0.0005,
-    "Tnight": 15.8,
-    "Tday": 22,
-    "RHnight": 0.8,
-    "RHday": 0.5,
+    "Tnight": 8,
+    "Tday": 12,
+    "RHnight": 0.9,
+    "RHday": 0.7,
     "Pair": 1010.0,
-    "thetaInit": 0.3,
-    "co2": 0.00085
+    "thetaInit": 0.35,
+    "co2": 0.00085,
+    "notes": "Severely reduced light (~50%), cold temps limit photosynthesis and growth"
 }

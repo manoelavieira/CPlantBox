@@ -1,0 +1,14 @@
+{
+    "description": "Waterlogged soil - tests hypoxia and root function under saturated conditions",
+    "vgSoil": [0.059, 0.45, 0.00644, 1.503, 1],
+    "Qnight": 0,
+    "Qday": 0.00096,
+    "Tnight": 15,
+    "Tday": 20,
+    "RHnight": 0.95,
+    "RHday": 0.8,
+    "Pair": 1010.0,
+    "thetaInit": 0.43,
+    "co2": 0.00085,
+    "notes": "Near-saturated soil (43% theta, close to porosity 45%), tests oxygen limitation"
+}

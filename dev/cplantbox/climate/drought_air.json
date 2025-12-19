@@ -1,12 +1,14 @@
 {
+    "description": "Atmospheric drought - low humidity stress without soil drought",
     "vgSoil": [0.059, 0.45, 0.00644, 1.503, 1],
     "Qnight": 0,
     "Qday": 0.00096,
-    "Tnight": 15.8,
-    "Tday": 22,
+    "Tnight": 18,
+    "Tday": 25,
     "RHnight": 0.4,
     "RHday": 0.2,
     "Pair": 1010.0,
     "thetaInit": 0.3,
-    "co2": 0.00085
+    "co2": 0.00085,
+    "notes": "High VPD conditions - tests stomatal closure and transpiration stress"
 }

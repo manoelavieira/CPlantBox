@@ -1,4 +1,5 @@
 {
+    "description": "Baseline climate - optimal growing conditions similar to uqr7to14wet.py",
     "vgSoil": [0.059, 0.45, 0.00644, 1.503, 1],
     "Qnight": 0,
     "Qday": 0.00096,
@@ -8,5 +9,6 @@
     "RHday": 0.5,
     "Pair": 1010.0,
     "thetaInit": 0.3,
-    "co2": 0.00085
+    "co2": 0.00085,
+    "notes": "Q=960e-6 mol/m2/s, T range optimal for wheat, well-watered soil (30% theta)"
 }

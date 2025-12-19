@@ -45,9 +45,9 @@ phloem_dir = args.phloem_dir
 weather_config = args.weather_file
 
 """ Parameters and variables """
-plant_age = 7.3 # [day] init simtime
-sim_time = 0.5 # [day]
-dt = 4./24.
+plant_age = 5 # [day] init simtime
+sim_time = 5 # [day]
+dt = 1./24.
 N = int(sim_time/dt)
 depth = 60
 p_mean = -600 # mean soil water potential [cm]

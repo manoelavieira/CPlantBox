@@ -1,12 +1,14 @@
 {
+    "description": "Extreme heat wave - similar to uqr21to28dry.py hot conditions",
     "vgSoil": [0.059, 0.45, 0.00644, 1.503, 1],
     "Qnight": 0,
     "Qday": 0.00096,
     "Tnight": 35,
-    "Tday": 45,
-    "RHnight": 0.8,
-    "RHday": 0.5,
-    "Pair": 1010.0,
-    "thetaInit": 0.3,
-    "co2": 0.00085
+    "Tday": 40,
+    "RHnight": 0.6,
+    "RHday": 0.35,
+    "Pair": 1070.0,
+    "thetaInit": 0.2,
+    "co2": 0.00085,
+    "notes": "High temperature stress, moderate drought, tests heat tolerance and enzyme kinetics"
 }

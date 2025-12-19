@@ -23,6 +23,7 @@ class TrainingConfig:
     batch_size: int = 2
     train_ratio: float = 0.8
     val_ratio: float = 0.1
+    split_method: str = "random"  # 'random' or 'time'
 
     # Model architecture
     model_type: str = "nnconv"  # 'nnconv' or 'operator'
@@ -86,6 +87,8 @@ class TrainingConfig:
         """Validate configuration parameters."""
         if self.model_type not in ["nnconv", "operator"]:
             raise ValueError(f"model_type must be 'nnconv' or 'operator', got {self.model_type}")
+        if self.split_method not in ["random", "time"]:
+            raise ValueError(f"split_method must be 'random' or 'time', got {self.split_method}")
         if not (0 < self.train_ratio < 1):
             raise ValueError(f"train_ratio must be between 0 and 1, got {self.train_ratio}")
         if not (0 < self.val_ratio < 1):

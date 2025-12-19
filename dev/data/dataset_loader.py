@@ -475,18 +475,20 @@ def train_test_split(
         train_ratio: float,
         val_ratio: float,
         batch_size: int = 8,
-        random_seed: int = 42
+        random_seed: int = 42,
+        split_method: str = "random"
     ) -> Tuple[List[Data], List[Data], List[Data]]:
-    """Split graphs into train/val/test sets using random shuffling.
-
-    Graphs are randomly shuffled and then split into train/val/test sets.
+    """Split graphs into train/val/test sets using random shuffling or time-based ordering.
 
     Args:
         graphs: List of PyG Data objects
         train_ratio: Proportion of data to use for training
         val_ratio: Proportion of data to use for validation
         batch_size: Batch size for DataLoaders
-        random_seed: Random seed for reproducibility
+        random_seed: Random seed for reproducibility (only used for random split)
+        split_method: Method for splitting - 'random' or 'time'
+                     'random': Randomly shuffle graphs before splitting
+                     'time': Split chronologically by timestamp (earliest -> train, middle -> val, latest -> test)
 
     Returns:
         train_loader, val_loader, test_loader: DataLoaders for each split
@@ -497,25 +499,53 @@ def train_test_split(
     n_val = int(val_ratio * n_samples)
     n_test = n_samples - n_train - n_val
 
-    # Shuffle with fixed seed
-    generator = torch.Generator().manual_seed(random_seed)
-    indices = torch.randperm(n_samples, generator=generator)
+    if split_method == "random":
+        # Shuffle with fixed seed
+        generator = torch.Generator().manual_seed(random_seed)
+        indices = torch.randperm(n_samples, generator=generator)
 
-    # Split shuffled indices
-    train_idx = indices[:n_train]
-    val_idx = indices[n_train:n_train + n_val]
-    test_idx = indices[n_train + n_val:]
+        # Split shuffled indices
+        train_idx = indices[:n_train]
+        val_idx = indices[n_train:n_train + n_val]
+        test_idx = indices[n_train + n_val:]
 
-    print(f"\nRandom split:")
-    print(f"  Train: {len(train_idx)} graphs")
-    print(f"  Val:   {len(val_idx)} graphs")
-    print(f"  Test:  {len(test_idx)} graphs")
+        print(f"\nRandom split:")
+        print(f"  Train: {len(train_idx)} graphs")
+        print(f"  Val:   {len(val_idx)} graphs")
+        print(f"  Test:  {len(test_idx)} graphs")
+
+    elif split_method == "time":
+        # Sort graphs by timestamp (chronological order)
+        # Each graph should have a 'time' attribute
+        graphs_with_indices = [(i, graph.time.item()) for i, graph in enumerate(graphs)]
+        graphs_with_indices.sort(key=lambda x: x[1])  # Sort by time
+
+        sorted_indices = [idx for idx, _ in graphs_with_indices]
+
+        # Split chronologically: earliest -> train, middle -> val, latest -> test
+        train_idx = torch.tensor(sorted_indices[:n_train], dtype=torch.long)
+        val_idx = torch.tensor(sorted_indices[n_train:n_train + n_val], dtype=torch.long)
+        test_idx = torch.tensor(sorted_indices[n_train + n_val:], dtype=torch.long)
+
+        # Get time ranges for each split
+        train_times = [graphs[i].time.item() for i in train_idx]
+        val_times = [graphs[i].time.item() for i in val_idx]
+        test_times = [graphs[i].time.item() for i in test_idx]
+
+        print(f"\nTime-based split:")
+        print(f"  Train: {len(train_idx)} graphs (time range: {min(train_times):.2f} - {max(train_times):.2f})")
+        print(f"  Val:   {len(val_idx)} graphs (time range: {min(val_times):.2f} - {max(val_times):.2f})")
+        print(f"  Test:  {len(test_idx)} graphs (time range: {min(test_times):.2f} - {max(test_times):.2f})")
+
+    else:
+        raise ValueError(f"Invalid split_method: {split_method}. Must be 'random' or 'time'")
 
     train_graphs = [graphs[i] for i in train_idx]
     val_graphs = [graphs[i] for i in val_idx]
     test_graphs = [graphs[i] for i in test_idx]
 
-    # Shuffle training data during loading
+    # Shuffle training data during loading for better optimization
+    # (independent of split method: applies to batch order within each epoch)
     train_loader = DataLoader(train_graphs, batch_size=batch_size,
                               shuffle=True, collate_fn=collate_graphs)
     val_loader = DataLoader(val_graphs, batch_size=batch_size,
@@ -531,23 +561,24 @@ def load_phloem_data(
        batch_size: int = 8,
        train_ratio: float = 0.8,
        val_ratio: float = 0.1,
-       random_seed: int = 42
+       random_seed: int = 42,
+       split_method: str = "random"
    ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """Load phloem simulation data and create train/val/test DataLoaders.
-
-    Uses random shuffling to split graphs into train/val/test sets.
 
     Args:
         h5_path: Path to HDF5 file or directory containing HDF5 files with simulation data
         batch_size: Batch size for DataLoaders
         train_ratio: Proportion of data to use for training
         val_ratio: Proportion of data to use for validation
-        random_seed: Random seed for reproducibility
+        random_seed: Random seed for reproducibility (only used for random split)
+        split_method: Method for splitting - 'random' (shuffle) or 'time' (chronological)
 
     Returns:
         train_loader, val_loader, test_loader: DataLoaders for each split
     """
     print(f"train_ratio: {train_ratio}, val_ratio: {val_ratio}, test_ratio: {1 - train_ratio - val_ratio}")
+    print(f"split_method: {split_method}")
 
     graphs: List[Data] = []
     path = Path(h5_path)
@@ -567,7 +598,7 @@ def load_phloem_data(
     print(f"\nSuccessfully loaded {len(graphs)} total graphs")
 
     train_loader, val_loader, test_loader = train_test_split(
-        graphs, train_ratio, val_ratio, batch_size, random_seed
+        graphs, train_ratio, val_ratio, batch_size, random_seed, split_method
     )
 
     return train_loader, val_loader, test_loader

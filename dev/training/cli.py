@@ -24,6 +24,9 @@ def parse_arguments() -> TrainingConfig:
                        help='Ratio of data to use for training')
     parser.add_argument('--val-ratio', type=float, default=0.1,
                        help='Ratio of data to use for validation')
+    parser.add_argument('--split-method', type=str, default='random',
+                       choices=['random', 'time'],
+                       help='Method for splitting data: random (shuffle) or time (chronological)')
     parser.add_argument('--lr', type=float, default=3e-3,
                        help='Initial learning rate')
     parser.add_argument('--weight-decay', type=float, default=1e-5,
@@ -61,6 +64,7 @@ def parse_arguments() -> TrainingConfig:
         batch_size=args.batch_size,
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
+        split_method=args.split_method,
         lr=args.lr,
         weight_decay=args.weight_decay,
         patience=args.patience,

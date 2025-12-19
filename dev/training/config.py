@@ -59,10 +59,13 @@ class TrainingConfig:
     model_filename: str = "best_model.pt"
     physics_save_dir: str = "logs/physics"
     physics_save_filename: str = "debugs.txt"
+    metrics_save_dir: str = "logs/metrics"
+    metrics_save_filename: str = "metrics.csv"
     tensorboard_log_dir: str = "logs/tensorboard"
 
     # Physics logging
-    enable_physics_logging: bool = False
+    enable_physics_logging: bool = True
+    enable_metrics_logging: bool = True
 
     @property
     def model_save_path(self) -> str:
@@ -73,6 +76,11 @@ class TrainingConfig:
     def physics_save_path(self) -> str:
         """Get the full path for saving physics debug logs."""
         return str(Path(self.physics_save_dir) / self.physics_save_filename)
+
+    @property
+    def metrics_save_path(self) -> str:
+        """Get the full path for saving metrics logs."""
+        return str(Path(self.metrics_save_dir) / self.metrics_save_filename)
 
     def validate(self) -> None:
         """Validate configuration parameters."""
@@ -135,41 +143,95 @@ class PhysicsMetrics:
 
 @dataclass
 class PhysicsErrorMetrics:
-    """Container for physics error metrics (MSE, RMSE, Relative Error)."""
-    # J_ax errors
+    """Container for comprehensive physics error metrics."""
+
+    # ========== SUCROSE CONTENT (S_ST) METRICS ==========
+    S_ST_rmse: float = 0.0
+    S_ST_mae: float = 0.0
+    S_ST_nmae: float = 0.0          # Normalized MAE: MAE / mean(|true|)
+    S_ST_correlation: float = 0.0    # Pearson correlation coefficient
+
+    # ========== FLUX (J_ax) METRICS ==========
     J_ax_mse: float = 0.0
     J_ax_rmse: float = 0.0
-    J_ax_rel_error: float = 0.0
+    J_ax_mae: float = 0.0
+    J_ax_nmae: float = 0.0          # Normalized MAE
+    J_ax_sign_accuracy: float = 0.0      # Fraction of edges with correct flux direction
+    J_ax_reversal_rate: float = 0.0      # Fraction of edges with wrong direction
+    J_ax_antisym_error: float = 0.0      # Antisymmetry error (operator model)
+    J_ax_magnitude_ratio: float = 0.0    # mean(|pred|) / mean(|true|)
+    J_ax_correlation: float = 0.0        # Pearson correlation
 
-    # divJ (divergence) errors - for mass conservation evaluation
+    # ========== DIVERGENCE (divJ) METRICS ==========
     divJ_mse: float = 0.0
     divJ_rmse: float = 0.0
-    divJ_rel_error: float = 0.0
+    divJ_mae: float = 0.0
+    divJ_nmae: float = 0.0          # Normalized MAE
+    divJ_std_true: float = 0.0      # Standard deviation of true divergence
+    divJ_std_pred: float = 0.0      # Standard deviation of predicted divergence
+    divJ_std_ratio: float = 0.0     # std_pred / std_true
+    divJ_overlap: float = 0.0       # Distribution overlap metric (Bhattacharyya coefficient)
+    divJ_correlation: float = 0.0   # Pearson correlation
 
-    # dS_dt_tot (total residual) errors
+    # ========== TOTAL RESIDUAL (dS_dt_tot) METRICS ==========
     dS_dt_tot_mse: float = 0.0
     dS_dt_tot_rmse: float = 0.0
-    dS_dt_tot_rel_error: float = 0.0
-
-    # J_ax antisymmetry error (operator model only)
-    J_ax_antisym_error: float = 0.0
-
-    # Flux direction consistency metrics (physical credibility)
-    J_ax_sign_accuracy: float = 0.0      # Fraction of edges with correct flux direction
-    J_ax_reversal_rate: float = 0.0      # Fraction of edges with wrong direction (1 - sign_accuracy)
-
-    # Physics score metrics (dimensionless residual-based consistency)
-    physics_rel_error: float = 0.0          # Normalized residual: E[|r|] / (E[|F_in|] + E[|F_out|] + eps)
-    physics_satisfaction_rate: float = 0.0  # Fraction of nodes satisfying conservation within tolerance
+    dS_dt_tot_mae: float = 0.0
+    dS_dt_tot_nmae: float = 0.0     # Normalized MAE
+    dS_dt_tot_mean_true: float = 0.0  # Mean of true residual
+    dS_dt_tot_mean_pred: float = 0.0  # Mean of predicted residual
+    dS_dt_tot_std_true: float = 0.0   # Std of true residual
+    dS_dt_tot_std_pred: float = 0.0   # Std of predicted residual
+    dS_dt_tot_skew_true: float = 0.0  # Skewness of true residual
+    dS_dt_tot_skew_pred: float = 0.0  # Skewness of predicted residual
 
     def __str__(self) -> str:
-        base = (f"J_ax: MSE={self.J_ax_mse:.3e} RMSE={self.J_ax_rmse:.3e} RelErr={self.J_ax_rel_error:.3e} SignAcc={self.J_ax_sign_accuracy:.3f} | "
-                f"divJ: MSE={self.divJ_mse:.3e} RMSE={self.divJ_rmse:.3e} RelErr={self.divJ_rel_error:.3e} | "
-                f"dS_dt_tot: MSE={self.dS_dt_tot_mse:.3e} RMSE={self.dS_dt_tot_rmse:.3e} RelErr={self.dS_dt_tot_rel_error:.3e}")
-        # Always include antisymmetry error and direction metrics
-        base += f" | J_ax_antisym={self.J_ax_antisym_error:.3e} RevRate={self.J_ax_reversal_rate:.3f} "
-        base += f"PhysRelErr={self.physics_rel_error:.4f} PhysSatisf={self.physics_satisfaction_rate:.3f}"
+        base = (f"S_ST: RMSE={self.S_ST_rmse:.3e} MAE={self.S_ST_mae:.3e} NMAE={self.S_ST_nmae:.3e} Corr={self.S_ST_correlation:.3f} | "
+                f"J_ax: RMSE={self.J_ax_rmse:.3e} MAE={self.J_ax_mae:.3e} SignAcc={self.J_ax_sign_accuracy:.3f} Corr={self.J_ax_correlation:.3f} | "
+                f"divJ: RMSE={self.divJ_rmse:.3e} MAE={self.divJ_mae:.3e} Corr={self.divJ_correlation:.3f} | "
+                f"dS_dt_tot: RMSE={self.dS_dt_tot_rmse:.3e} MAE={self.dS_dt_tot_mae:.3e}")
         return base
+
+    def to_dict(self) -> dict:
+        """Convert metrics to dictionary for logging."""
+        return {
+            # Sucrose content
+            'S_ST_rmse': self.S_ST_rmse,
+            'S_ST_mae': self.S_ST_mae,
+            'S_ST_nmae': self.S_ST_nmae,
+            'S_ST_correlation': self.S_ST_correlation,
+            # Flux
+            'J_ax_mse': self.J_ax_mse,
+            'J_ax_rmse': self.J_ax_rmse,
+            'J_ax_mae': self.J_ax_mae,
+            'J_ax_nmae': self.J_ax_nmae,
+            'J_ax_sign_accuracy': self.J_ax_sign_accuracy,
+            'J_ax_reversal_rate': self.J_ax_reversal_rate,
+            'J_ax_antisym_error': self.J_ax_antisym_error,
+            'J_ax_magnitude_ratio': self.J_ax_magnitude_ratio,
+            'J_ax_correlation': self.J_ax_correlation,
+            # Divergence
+            'divJ_mse': self.divJ_mse,
+            'divJ_rmse': self.divJ_rmse,
+            'divJ_mae': self.divJ_mae,
+            'divJ_nmae': self.divJ_nmae,
+            'divJ_std_true': self.divJ_std_true,
+            'divJ_std_pred': self.divJ_std_pred,
+            'divJ_std_ratio': self.divJ_std_ratio,
+            'divJ_overlap': self.divJ_overlap,
+            'divJ_correlation': self.divJ_correlation,
+            # Total residual
+            'dS_dt_tot_mse': self.dS_dt_tot_mse,
+            'dS_dt_tot_rmse': self.dS_dt_tot_rmse,
+            'dS_dt_tot_mae': self.dS_dt_tot_mae,
+            'dS_dt_tot_nmae': self.dS_dt_tot_nmae,
+            'dS_dt_tot_mean_true': self.dS_dt_tot_mean_true,
+            'dS_dt_tot_mean_pred': self.dS_dt_tot_mean_pred,
+            'dS_dt_tot_std_true': self.dS_dt_tot_std_true,
+            'dS_dt_tot_std_pred': self.dS_dt_tot_std_pred,
+            'dS_dt_tot_skew_true': self.dS_dt_tot_skew_true,
+            'dS_dt_tot_skew_pred': self.dS_dt_tot_skew_pred,
+        }
 
 
 @dataclass

@@ -190,59 +190,102 @@ def log_physics_error_metrics(
     physics_errors: 'PhysicsErrorMetrics',
     phase: str = 'train'
 ) -> None:
-    """Log physics error metrics (MSE, RMSE, Relative Error) to TensorBoard.
+    """Log all physics error metrics to TensorBoard.
 
     Args:
         writer: TensorBoard writer
         epoch: Current epoch number
-        physics_errors: Physics error metrics
+        physics_errors: Physics error metrics (comprehensive)
         phase: Phase name ('train', 'val', 'test')
     """
     prefix = f'physics_errors_{phase}'
 
-    # Log J_ax errors
+    # ========== SUCROSE CONTENT (S_ST) METRICS ==========
+    writer.add_scalar(f'{prefix}/S_ST_rmse', physics_errors.S_ST_rmse, epoch)
+    writer.add_scalar(f'{prefix}/S_ST_mae', physics_errors.S_ST_mae, epoch)
+    writer.add_scalar(f'{prefix}/S_ST_nmae', physics_errors.S_ST_nmae, epoch)
+    writer.add_scalar(f'{prefix}/S_ST_correlation', physics_errors.S_ST_correlation, epoch)
+
+    # ========== FLUX (J_ax) METRICS ==========
     writer.add_scalar(f'{prefix}/J_ax_mse', physics_errors.J_ax_mse, epoch)
     writer.add_scalar(f'{prefix}/J_ax_rmse', physics_errors.J_ax_rmse, epoch)
-    writer.add_scalar(f'{prefix}/J_ax_rel_error', physics_errors.J_ax_rel_error, epoch)
-
-    # Log divJ (divergence) errors - mass conservation metrics
-    writer.add_scalar(f'{prefix}/divJ_mse', physics_errors.divJ_mse, epoch)
-    writer.add_scalar(f'{prefix}/divJ_rmse', physics_errors.divJ_rmse, epoch)
-    writer.add_scalar(f'{prefix}/divJ_rel_error', physics_errors.divJ_rel_error, epoch)
-
-    # Log dS_dt_tot (total residual) errors
-    writer.add_scalar(f'{prefix}/dS_dt_tot_mse', physics_errors.dS_dt_tot_mse, epoch)
-    writer.add_scalar(f'{prefix}/dS_dt_tot_rmse', physics_errors.dS_dt_tot_rmse, epoch)
-    writer.add_scalar(f'{prefix}/dS_dt_tot_rel_error', physics_errors.dS_dt_tot_rel_error, epoch)
-
-    # Log J_ax antisymmetry error (both nnconv and operator models)
-    writer.add_scalar(f'{prefix}/J_ax_antisym_error', physics_errors.J_ax_antisym_error, epoch)
-
-    # Log flux direction consistency metrics
+    writer.add_scalar(f'{prefix}/J_ax_mae', physics_errors.J_ax_mae, epoch)
+    writer.add_scalar(f'{prefix}/J_ax_nmae', physics_errors.J_ax_nmae, epoch)
     writer.add_scalar(f'{prefix}/J_ax_sign_accuracy', physics_errors.J_ax_sign_accuracy, epoch)
     writer.add_scalar(f'{prefix}/J_ax_reversal_rate', physics_errors.J_ax_reversal_rate, epoch)
+    writer.add_scalar(f'{prefix}/J_ax_antisym_error', physics_errors.J_ax_antisym_error, epoch)
+    writer.add_scalar(f'{prefix}/J_ax_magnitude_ratio', physics_errors.J_ax_magnitude_ratio, epoch)
+    writer.add_scalar(f'{prefix}/J_ax_correlation', physics_errors.J_ax_correlation, epoch)
 
-    # Log physics score metrics (dimensionless residual-based consistency)
-    writer.add_scalar(f'{prefix}/physics_rel_error', physics_errors.physics_rel_error, epoch)
-    writer.add_scalar(f'{prefix}/physics_satisfaction_rate', physics_errors.physics_satisfaction_rate, epoch)
+    # ========== DIVERGENCE (divJ) METRICS ==========
+    writer.add_scalar(f'{prefix}/divJ_mse', physics_errors.divJ_mse, epoch)
+    writer.add_scalar(f'{prefix}/divJ_rmse', physics_errors.divJ_rmse, epoch)
+    writer.add_scalar(f'{prefix}/divJ_mae', physics_errors.divJ_mae, epoch)
+    writer.add_scalar(f'{prefix}/divJ_nmae', physics_errors.divJ_nmae, epoch)
+    writer.add_scalar(f'{prefix}/divJ_std_true', physics_errors.divJ_std_true, epoch)
+    writer.add_scalar(f'{prefix}/divJ_std_pred', physics_errors.divJ_std_pred, epoch)
+    writer.add_scalar(f'{prefix}/divJ_std_ratio', physics_errors.divJ_std_ratio, epoch)
+    writer.add_scalar(f'{prefix}/divJ_overlap', physics_errors.divJ_overlap, epoch)
+    writer.add_scalar(f'{prefix}/divJ_correlation', physics_errors.divJ_correlation, epoch)
 
-    # Log grouped metrics for easier comparison
+    # ========== TOTAL RESIDUAL (dS_dt_tot) METRICS ==========
+    writer.add_scalar(f'{prefix}/dS_dt_tot_mse', physics_errors.dS_dt_tot_mse, epoch)
+    writer.add_scalar(f'{prefix}/dS_dt_tot_rmse', physics_errors.dS_dt_tot_rmse, epoch)
+    writer.add_scalar(f'{prefix}/dS_dt_tot_mae', physics_errors.dS_dt_tot_mae, epoch)
+    writer.add_scalar(f'{prefix}/dS_dt_tot_nmae', physics_errors.dS_dt_tot_nmae, epoch)
+    writer.add_scalar(f'{prefix}/dS_dt_tot_mean_true', physics_errors.dS_dt_tot_mean_true, epoch)
+    writer.add_scalar(f'{prefix}/dS_dt_tot_mean_pred', physics_errors.dS_dt_tot_mean_pred, epoch)
+    writer.add_scalar(f'{prefix}/dS_dt_tot_std_true', physics_errors.dS_dt_tot_std_true, epoch)
+    writer.add_scalar(f'{prefix}/dS_dt_tot_std_pred', physics_errors.dS_dt_tot_std_pred, epoch)
+    writer.add_scalar(f'{prefix}/dS_dt_tot_skew_true', physics_errors.dS_dt_tot_skew_true, epoch)
+    writer.add_scalar(f'{prefix}/dS_dt_tot_skew_pred', physics_errors.dS_dt_tot_skew_pred, epoch)
+
+    # ========== GROUPED METRICS FOR COMPARISON ==========
+    # MSE comparison
     writer.add_scalars(f'{prefix}_mse_all', {
+        'S_ST': physics_errors.S_ST_rmse ** 2,  # Approximate from RMSE
         'J_ax': physics_errors.J_ax_mse,
         'divJ': physics_errors.divJ_mse,
         'dS_dt_tot': physics_errors.dS_dt_tot_mse
     }, epoch)
 
+    # RMSE comparison
     writer.add_scalars(f'{prefix}_rmse_all', {
+        'S_ST': physics_errors.S_ST_rmse,
         'J_ax': physics_errors.J_ax_rmse,
         'divJ': physics_errors.divJ_rmse,
         'dS_dt_tot': physics_errors.dS_dt_tot_rmse
     }, epoch)
 
-    writer.add_scalars(f'{prefix}_rel_error_all', {
-        'J_ax': physics_errors.J_ax_rel_error,
-        'divJ': physics_errors.divJ_rel_error,
-        'dS_dt_tot': physics_errors.dS_dt_tot_rel_error
+    # MAE comparison
+    writer.add_scalars(f'{prefix}_mae_all', {
+        'S_ST': physics_errors.S_ST_mae,
+        'J_ax': physics_errors.J_ax_mae,
+        'divJ': physics_errors.divJ_mae,
+        'dS_dt_tot': physics_errors.dS_dt_tot_mae
+    }, epoch)
+
+    # NMAE comparison (normalized errors)
+    writer.add_scalars(f'{prefix}_nmae_all', {
+        'S_ST': physics_errors.S_ST_nmae,
+        'J_ax': physics_errors.J_ax_nmae,
+        'divJ': physics_errors.divJ_nmae,
+        'dS_dt_tot': physics_errors.dS_dt_tot_nmae
+    }, epoch)
+
+    # Correlation comparison
+    writer.add_scalars(f'{prefix}_correlation_all', {
+        'S_ST': physics_errors.S_ST_correlation,
+        'J_ax': physics_errors.J_ax_correlation,
+        'divJ': physics_errors.divJ_correlation,
+    }, epoch)
+
+    # Standard deviation comparison
+    writer.add_scalars(f'{prefix}_std_comparison', {
+        'divJ_true': physics_errors.divJ_std_true,
+        'divJ_pred': physics_errors.divJ_std_pred,
+        'dS_dt_tot_true': physics_errors.dS_dt_tot_std_true,
+        'dS_dt_tot_pred': physics_errors.dS_dt_tot_std_pred,
     }, epoch)
 
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 from pathlib import Path
+import csv
+from datetime import datetime
 
 from torch_scatter import scatter_mean
 from torch_geometric.data import Data
@@ -18,6 +20,10 @@ SMOOTH_WIDTH = 0.001        # Default smooth width for smooth ReLU approximation
 # Default values are imported from TrainingConfig to ensure consistency
 _ENABLE_PHYSICS_LOGGING = TrainingConfig.enable_physics_logging
 _PHYSICS_LOG_PATH = str(Path(TrainingConfig.physics_save_dir) / TrainingConfig.physics_save_filename)
+
+# Module-level metrics logging configuration
+_ENABLE_METRICS_LOGGING = TrainingConfig.enable_metrics_logging
+_METRICS_LOG_PATH = str(Path(TrainingConfig.metrics_save_dir) / TrainingConfig.metrics_save_filename)
 
 
 def smooth_relu(x: torch.Tensor, delta: float) -> torch.Tensor:
@@ -58,6 +64,131 @@ def set_physics_logging(enable: bool, log_path: str = None):
         print(f"  Log file initialized: {_PHYSICS_LOG_PATH}")
 
     print(f"{'='*60}\n")
+
+
+def set_metrics_logging(enable: bool, log_path: str = None):
+    """Configure metrics logging settings.
+
+    Args:
+        enable: Whether to enable metrics logging
+        log_path: Path to the metrics log file (optional, defaults to logs/metrics/metrics.csv)
+    """
+    global _ENABLE_METRICS_LOGGING, _METRICS_LOG_PATH
+
+    _ENABLE_METRICS_LOGGING = enable
+    if log_path is not None:
+        _METRICS_LOG_PATH = log_path
+
+    # Print configuration for debugging
+    print(f"\n{'='*60}")
+    print(f"Metrics Logging Configuration:")
+    print(f"  Enabled: {_ENABLE_METRICS_LOGGING}")
+    print(f"  Log Path: {_METRICS_LOG_PATH}")
+
+    # Create directory if logging is enabled
+    if _ENABLE_METRICS_LOGGING:
+        log_dir = Path(_METRICS_LOG_PATH).parent
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        # Initialize CSV file with headers if it doesn't exist
+        if not Path(_METRICS_LOG_PATH).exists():
+            _initialize_metrics_log()
+        print(f"  Log file ready: {_METRICS_LOG_PATH}")
+
+    print(f"{'='*60}\n")
+
+
+def _initialize_metrics_log():
+    """Initialize the metrics CSV log file with headers."""
+    headers = [
+        'timestamp', 'epoch', 'phase', 'batch_idx',
+        # Sucrose content
+        'S_ST_rmse', 'S_ST_mae', 'S_ST_nmae', 'S_ST_correlation',
+        # Flux
+        'J_ax_mse', 'J_ax_rmse', 'J_ax_mae', 'J_ax_nmae',
+        'J_ax_sign_accuracy', 'J_ax_reversal_rate', 'J_ax_antisym_error',
+        'J_ax_magnitude_ratio', 'J_ax_correlation',
+        # Divergence
+        'divJ_mse', 'divJ_rmse', 'divJ_mae', 'divJ_nmae',
+        'divJ_std_true', 'divJ_std_pred', 'divJ_std_ratio',
+        'divJ_overlap', 'divJ_correlation',
+        # Total residual
+        'dS_dt_tot_mse', 'dS_dt_tot_rmse', 'dS_dt_tot_mae', 'dS_dt_tot_nmae',
+        'dS_dt_tot_mean_true', 'dS_dt_tot_mean_pred',
+        'dS_dt_tot_std_true', 'dS_dt_tot_std_pred',
+        'dS_dt_tot_skew_true', 'dS_dt_tot_skew_pred',
+    ]
+
+    with open(_METRICS_LOG_PATH, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(headers)
+
+
+def log_metrics_to_file(
+    physics_errors: PhysicsErrorMetrics,
+    epoch: int = None,
+    phase: str = None,
+    batch_idx: int = None
+):
+    """Log physics error metrics to CSV file.
+
+    Args:
+        physics_errors: PhysicsErrorMetrics object to log
+        epoch: Current epoch number (optional)
+        phase: Training phase ('train', 'val', 'test') (optional)
+        batch_idx: Batch index (optional)
+    """
+    if not _ENABLE_METRICS_LOGGING:
+        return
+
+    # Ensure directory exists
+    log_dir = Path(_METRICS_LOG_PATH).parent
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    # Initialize file if it doesn't exist
+    if not Path(_METRICS_LOG_PATH).exists():
+        _initialize_metrics_log()
+
+    # Prepare row data
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    metrics_dict = physics_errors.to_dict()
+
+    row = [
+        timestamp,
+        epoch if epoch is not None else '',
+        phase if phase is not None else '',
+        batch_idx if batch_idx is not None else '',
+    ]
+
+    # Add all metric values in the same order as headers
+    row.extend([
+        # Sucrose content
+        metrics_dict['S_ST_rmse'], metrics_dict['S_ST_mae'],
+        metrics_dict['S_ST_nmae'], metrics_dict['S_ST_correlation'],
+        # Flux
+        metrics_dict['J_ax_mse'], metrics_dict['J_ax_rmse'],
+        metrics_dict['J_ax_mae'], metrics_dict['J_ax_nmae'],
+        metrics_dict['J_ax_sign_accuracy'], metrics_dict['J_ax_reversal_rate'],
+        metrics_dict['J_ax_antisym_error'], metrics_dict['J_ax_magnitude_ratio'],
+        metrics_dict['J_ax_correlation'],
+        # Divergence
+        metrics_dict['divJ_mse'], metrics_dict['divJ_rmse'],
+        metrics_dict['divJ_mae'], metrics_dict['divJ_nmae'],
+        metrics_dict['divJ_std_true'], metrics_dict['divJ_std_pred'],
+        metrics_dict['divJ_std_ratio'], metrics_dict['divJ_overlap'],
+        metrics_dict['divJ_correlation'],
+        # Total residual
+        metrics_dict['dS_dt_tot_mse'], metrics_dict['dS_dt_tot_rmse'],
+        metrics_dict['dS_dt_tot_mae'], metrics_dict['dS_dt_tot_nmae'],
+        metrics_dict['dS_dt_tot_mean_true'], metrics_dict['dS_dt_tot_mean_pred'],
+        metrics_dict['dS_dt_tot_std_true'], metrics_dict['dS_dt_tot_std_pred'],
+        metrics_dict['dS_dt_tot_skew_true'], metrics_dict['dS_dt_tot_skew_pred'],
+    ])
+
+    # Append to CSV file
+    with open(_METRICS_LOG_PATH, 'a', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(row)
 
 
 def _log_header(title: str, batch_vec: torch.Tensor = None, data: Data = None, phase: str = None):
@@ -253,36 +384,54 @@ def _log_comparison_metrics(physics_errors: PhysicsErrorMetrics):
     """Log comparison metrics from PhysicsErrorMetrics.
 
     Args:
-        physics_errors: PhysicsErrorMetrics object containing MSE, RMSE, and Relative Error
+        physics_errors: PhysicsErrorMetrics object containing comprehensive metrics
 
     Returns:
         str: Formatted comparison metrics log
     """
-    msg = f"\n--- PHYSICS ERROR METRICS ---\n"
+    msg = f"\n--- PHYSICS ERROR METRICS ---"
 
-    # J_ax errors
-    msg += f"J_ax      | MSE: {physics_errors.J_ax_mse:.6e}, RMSE: {physics_errors.J_ax_rmse:.6e}, RelErr: {physics_errors.J_ax_rel_error:.6e}\n"
+    # Sucrose content metrics
+    msg += f"\n=== SUCROSE CONTENT (S_ST) ===\n"
+    msg += f"RMSE: {physics_errors.S_ST_rmse:.6e}\n"
+    msg += f"MAE: {physics_errors.S_ST_mae:.6e}\n"
+    msg += f"NMAE: {physics_errors.S_ST_nmae:.6e}\n"
+    msg += f"Correlation: {physics_errors.S_ST_correlation:.6f}\n"
 
-    # Antisymmetry error (both nnconv and operator models)
+    # Flux metrics
+    msg += f"\n=== FLUX (J_ax) ===\n"
+    msg += f"RMSE: {physics_errors.J_ax_rmse:.6e}\n"
+    msg += f"MAE: {physics_errors.J_ax_mae:.6e}\n"
+    msg += f"NMAE: {physics_errors.J_ax_nmae:.6e}\n"
+    msg += f"Correlation: {physics_errors.J_ax_correlation:.6f}\n"
+    msg += f"Sign Accuracy: {physics_errors.J_ax_sign_accuracy:.4f} ({physics_errors.J_ax_sign_accuracy*100:.2f}%)\n"
+    msg += f"Reversal Rate: {physics_errors.J_ax_reversal_rate:.4f} ({physics_errors.J_ax_reversal_rate*100:.2f}%)\n"
+    msg += f"Magnitude Ratio (pred/true): {physics_errors.J_ax_magnitude_ratio:.6f}\n"
     if physics_errors.J_ax_antisym_error >= 0:
-        msg += f"J_ax      | Antisymmetry Error: {physics_errors.J_ax_antisym_error:.6e}\n"
-    # divJ (divergence) errors - mass conservation quality
-    msg += f"divJ      | MSE: {physics_errors.divJ_mse:.6e}, RMSE: {physics_errors.divJ_rmse:.6e}, RelErr: {physics_errors.divJ_rel_error:.6e}\n"
+        msg += f"Antisymmetry Error: {physics_errors.J_ax_antisym_error:.6e}\n"
 
-    # dS_dt_tot (total residual) errors
-    msg += f"dS_dt_tot | MSE: {physics_errors.dS_dt_tot_mse:.6e}, RMSE: {physics_errors.dS_dt_tot_rmse:.6e}, RelErr: {physics_errors.dS_dt_tot_rel_error:.6e}\n"
+    # Divergence metrics
+    msg += f"\n=== DIVERGENCE (divJ) ===\n"
+    msg += f"RMSE: {physics_errors.divJ_rmse:.6e}\n"
+    msg += f"MAE: {physics_errors.divJ_mae:.6e}\n"
+    msg += f"NMAE: {physics_errors.divJ_nmae:.6e}\n"
+    msg += f"Correlation: {physics_errors.divJ_correlation:.6f}\n"
+    msg += f"Std (true): {physics_errors.divJ_std_true:.6e}\n"
+    msg += f"Std (pred): {physics_errors.divJ_std_pred:.6e}\n"
+    msg += f"Std Ratio (pred/true): {physics_errors.divJ_std_ratio:.6f}\n"
+    msg += f"Distribution Overlap: {physics_errors.divJ_overlap:.6f}\n"
 
-    # Flux direction consistency (physical credibility)
-    msg += f"\n--- FLUX DIRECTION CONSISTENCY ---\n"
-    msg += f"J_ax Sign Accuracy: {physics_errors.J_ax_sign_accuracy:.4f} ({physics_errors.J_ax_sign_accuracy*100:.2f}%)\n"
-    msg += f"J_ax Reversal Rate: {physics_errors.J_ax_reversal_rate:.4f} ({physics_errors.J_ax_reversal_rate*100:.2f}%)\n"
-
-    # Physics score (dimensionless residual-based consistency)
-    msg += f"\n--- PHYSICS SCORE (CONSERVATION QUALITY) ---\n"
-    msg += f"Normalized Residual Error: {physics_errors.physics_rel_error:.6f}\n"
-    msg += f"  (Interpretation: < 0.05 tight, ~ 1 moderate violation, >> 1 poor conservation)\n"
-    msg += f"Physics Satisfaction Rate: {physics_errors.physics_satisfaction_rate:.4f} ({physics_errors.physics_satisfaction_rate*100:.2f}%)\n"
-    msg += f"  (Nodes within XX% tolerance of local source/sink scale)\n"
+    # Total residual metrics
+    msg += f"\n=== TOTAL RESIDUAL (dS_dt_tot) ===\n"
+    msg += f"RMSE: {physics_errors.dS_dt_tot_rmse:.6e}\n"
+    msg += f"MAE: {physics_errors.dS_dt_tot_mae:.6e}\n"
+    msg += f"NMAE: {physics_errors.dS_dt_tot_nmae:.6e}\n"
+    msg += f"Mean (true): {physics_errors.dS_dt_tot_mean_true:.6e}\n"
+    msg += f"Mean (pred): {physics_errors.dS_dt_tot_mean_pred:.6e}\n"
+    msg += f"Std (true): {physics_errors.dS_dt_tot_std_true:.6e}\n"
+    msg += f"Std (pred): {physics_errors.dS_dt_tot_std_pred:.6e}\n"
+    msg += f"Skewness (true): {physics_errors.dS_dt_tot_skew_true:.6f}\n"
+    msg += f"Skewness (pred): {physics_errors.dS_dt_tot_skew_pred:.6f}\n"
 
     return msg
 
@@ -290,7 +439,7 @@ def _log_comparison_metrics(physics_errors: PhysicsErrorMetrics):
 def compute_flux_direction_metrics(
     J_ax_true: torch.Tensor,
     J_ax_pred: torch.Tensor,
-) -> tuple[float, float, float]:
+) -> tuple[float, float]:
     """Compute flux direction consistency metrics.
 
     Evaluates whether the model predicts the correct physical direction of transport,
@@ -299,9 +448,6 @@ def compute_flux_direction_metrics(
     Args:
         J_ax_true: True axial fluxes [E]
         J_ax_pred: Predicted axial fluxes [E]
-        C_ST_true: True concentrations [N]
-        C_ST_pred: Predicted concentrations [N]
-        edge_index: Edge connectivity [2, E]
 
     Returns:
         tuple: (sign_accuracy, reversal_rate)
@@ -320,86 +466,110 @@ def compute_flux_direction_metrics(
     return sign_accuracy, reversal_rate
 
 
-def compute_physics_score(
-    residual: torch.Tensor,
-    dS_dt_from_physics: torch.Tensor,
-    batch_vec: torch.Tensor = None,
-    tolerance_factor: float = 0.01
-) -> tuple[float, float]:
-    """Compute dimensionless physics consistency score for time-series data.
-
-    Checks if state change matches expected physics-based rate of change.
-    Metrics based on residual vs physics-based derivative magnitude.
-
-    Two metrics are computed:
-    (1) Normalized Relative Error (PhysRelError):
-        E[|r|] / (E[|dS/dt_physics|] + eps)
-
-        Interpretation:
-        - PhysRelErr << 1 (e.g., 0.01-0.05): Physics is tight, good consistency
-        - PhysRelErr ~ 1: Physics moderately violated
-        - PhysRelErr >> 1: Physics badly violated
-
-    (2) Physics Satisfaction Rate:
-        Fraction satisfying |r_i| <= tolerance * |dS/dt_physics_i|
-
-        Interpretation:
-        - Rate > 0.95: Excellent physics satisfaction
-        - Rate 0.8-0.95: Good physics satisfaction
-        - Rate < 0.8: Poor physics satisfaction
+def compute_correlation(
+    true_vals: torch.Tensor,
+    pred_vals: torch.Tensor
+) -> float:
+    """Compute Pearson correlation coefficient.
 
     Args:
-        residual: Physics residual [N] (mmol/h)
-            Time-series: r = dS/dt_state - dS/dt_physics
-        dS_dt_from_physics: Physics-based derivative [N] (mmol/h)
-            Expected rate of change: divJ + F_in - F_out
-        batch_vec: Batch indices for multiple graphs [N] (optional)
-        tolerance_factor: Relative tolerance for satisfaction check (default: 0.01 = 1%)
+        true_vals: True values [N]
+        pred_vals: Predicted values [N]
 
     Returns:
-        tuple: (physics_rel_error, physics_satisfaction_rate)
-            - physics_rel_error: Normalized residual magnitude
-            - physics_satisfaction_rate: Fraction of nodes within tolerance
+        float: Pearson correlation coefficient [-1, 1]
     """
-    # Compute absolute values
-    abs_residual = residual.abs()
-    abs_dS_dt = dS_dt_from_physics.abs()
+    if true_vals.numel() == 0:
+        return 0.0
 
-    # Local scale for each node: expected physics-based rate of change
-    local_scale = abs_dS_dt
+    # Center the data
+    true_centered = true_vals - true_vals.mean()
+    pred_centered = pred_vals - pred_vals.mean()
 
-    if batch_vec is not None:
-        # (1) Normalized Relative Error per graph
-        mean_abs_residual_per_graph = scatter_mean(abs_residual, batch_vec, dim=0)
-        mean_abs_dS_dt_per_graph = scatter_mean(abs_dS_dt, batch_vec, dim=0)
+    # Compute correlation
+    numerator = (true_centered * pred_centered).sum()
+    denominator = torch.sqrt((true_centered ** 2).sum() * (pred_centered ** 2).sum())
 
-        scale_per_graph = mean_abs_dS_dt_per_graph
-        rel_error_per_graph = mean_abs_residual_per_graph / scale_per_graph
-        physics_rel_error = rel_error_per_graph.mean().detach().cpu().item()
+    if denominator < EPSILON:
+        return 0.0
 
-        # (2) Satisfaction rate: fraction of nodes within tolerance
-        tolerance = tolerance_factor * local_scale
-        is_satisfied = (abs_residual <= tolerance).float()
-        satisfaction_per_graph = scatter_mean(is_satisfied, batch_vec, dim=0)
-        physics_satisfaction_rate = satisfaction_per_graph.mean().detach().cpu().item()
-    else:
-        # Single graph case
-        # (1) Normalized Relative Error
-        mean_abs_residual = abs_residual.mean()
-        mean_abs_dS_dt = abs_dS_dt.mean()
+    correlation = (numerator / denominator).detach().cpu().item()
+    return correlation
 
-        scale = mean_abs_dS_dt
-        physics_rel_error = (mean_abs_residual / scale).detach().cpu().item()
 
-        # (2) Satisfaction rate
-        tolerance = tolerance_factor * local_scale
-        is_satisfied = (abs_residual <= tolerance).float()
-        physics_satisfaction_rate = is_satisfied.mean().detach().cpu().item()
+def compute_distribution_overlap(
+    true_vals: torch.Tensor,
+    pred_vals: torch.Tensor,
+    n_bins: int = 50
+) -> float:
+    """Compute distribution overlap using Bhattacharyya coefficient.
 
-    return physics_rel_error, physics_satisfaction_rate
+    The Bhattacharyya coefficient measures the similarity between two probability
+    distributions. A value of 1 indicates perfect overlap, 0 indicates no overlap.
+
+    Args:
+        true_vals: True values [N]
+        pred_vals: Predicted values [N]
+        n_bins: Number of bins for histogram
+
+    Returns:
+        float: Bhattacharyya coefficient [0, 1]
+    """
+    if true_vals.numel() == 0:
+        return 0.0
+
+    # Move to CPU for numpy operations
+    true_np = true_vals.detach().cpu().numpy()
+    pred_np = pred_vals.detach().cpu().numpy()
+
+    # Determine common range for histograms
+    min_val = min(true_np.min(), pred_np.min())
+    max_val = max(true_np.max(), pred_np.max())
+
+    # Add small margin to avoid edge effects
+    margin = (max_val - min_val) * 0.01
+    bins = torch.linspace(min_val - margin, max_val + margin, n_bins + 1)
+
+    # Compute normalized histograms
+    hist_true = torch.histc(true_vals, bins=n_bins, min=min_val - margin, max=max_val + margin)
+    hist_pred = torch.histc(pred_vals, bins=n_bins, min=min_val - margin, max=max_val + margin)
+
+    # Normalize to probability distributions
+    hist_true = hist_true / (hist_true.sum() + EPSILON)
+    hist_pred = hist_pred / (hist_pred.sum() + EPSILON)
+
+    # Bhattacharyya coefficient: sum of sqrt(p_i * q_i)
+    overlap = torch.sqrt(hist_true * hist_pred).sum().detach().cpu().item()
+
+    return overlap
+
+
+def compute_skewness(vals: torch.Tensor) -> float:
+    """Compute skewness of a distribution.
+
+    Args:
+        vals: Input values [N]
+
+    Returns:
+        float: Skewness (0 for symmetric distributions)
+    """
+    if vals.numel() == 0:
+        return 0.0
+
+    mean = vals.mean()
+    std = vals.std()
+
+    if std < EPSILON:
+        return 0.0
+
+    # Skewness: E[((X - mu) / sigma)^3]
+    skewness = (((vals - mean) / std) ** 3).mean().detach().cpu().item()
+    return skewness
 
 
 def _compute_physics_error_metrics(
+    S_ST_true: torch.Tensor,
+    S_ST_pred: torch.Tensor,
     J_ax_true: torch.Tensor,
     J_ax_pred: torch.Tensor,
     dS_dt_from_flux_true: torch.Tensor,
@@ -409,77 +579,124 @@ def _compute_physics_error_metrics(
     edge_index: torch.Tensor = None,
     batch_vec: torch.Tensor = None
 ) -> PhysicsErrorMetrics:
-    """Compute MSE, RMSE, Relative Error, direction consistency, and physics score.
+    """Compute comprehensive physics error metrics.
 
     Args:
-        J_ax_true: True axial fluxes
-        J_ax_pred: Predicted axial fluxes
-        dS_dt_from_flux_true: True flux divergence
-        dS_dt_from_flux_pred: Predicted flux divergence
-        F_in_true: True phloem loading
-        F_in_pred: Predicted phloem loading
-        F_out_true: True sucrose outflow
-        F_out_pred: Predicted sucrose outflow
-        dS_dt_tot_true: True total residual
-        dS_dt_tot_pred: Predicted total residual
-        J_ax_antisym_error: Antisymmetry error for operator model (optional)
-        edge_index: Edge connectivity for antisymmetry and direction calculations (optional)
-        batch_vec: Batch indices for multiple graphs (optional)
+        S_ST_true: True sucrose content [N]
+        S_ST_pred: Predicted sucrose content [N]
+        J_ax_true: True axial fluxes [E]
+        J_ax_pred: Predicted axial fluxes [E]
+        dS_dt_from_flux_true: True flux divergence [N]
+        dS_dt_from_flux_pred: Predicted flux divergence [N]
+        dS_dt_tot_true: True total residual [N]
+        dS_dt_tot_pred: Predicted total residual [N]
+        edge_index: Edge connectivity [2, E] (optional)
+        batch_vec: Batch indices [N] (optional)
 
     Returns:
-        PhysicsErrorMetrics containing MSE, RMSE, relative errors, direction metrics, and physics scores
+        PhysicsErrorMetrics containing comprehensive metrics
     """
-    # Helper function to compute metrics for a quantity
-    def compute_metrics(true_vals, pred_vals):
+    # Helper function to compute basic metrics for a quantity
+    def compute_basic_metrics(true_vals, pred_vals):
         mse = (true_vals - pred_vals).pow(2).mean().detach().cpu().item()
         rmse = torch.sqrt((true_vals - pred_vals).pow(2).mean()).detach().cpu().item()
-
-        # Relative error: mean absolute error / mean absolute true value
         mae = torch.abs(true_vals - pred_vals).mean().detach().cpu().item()
-        mean_true = torch.abs(true_vals).mean().detach().cpu().item()
-        rel_error = mae / mean_true
 
-        return mse, rmse, rel_error
+        # Normalized MAE: MAE / mean(|true|)
+        mean_true_abs = torch.abs(true_vals).mean().detach().cpu().item()
+        nmae = mae / (mean_true_abs + EPSILON)
 
-    # Compute J_ax and divergence metrics
-    J_ax_mse, J_ax_rmse, J_ax_rel = compute_metrics(J_ax_true, J_ax_pred)
-    divJ_mse, divJ_rmse, divJ_rel = compute_metrics(dS_dt_from_flux_true, dS_dt_from_flux_pred)
+        return mse, rmse, mae, nmae
 
-    # Compute dS_dt_tot metrics
-    dS_dt_tot_mse, dS_dt_tot_rmse, dS_dt_tot_rel = compute_metrics(dS_dt_tot_true, dS_dt_tot_pred)
+    # ========== SUCROSE CONTENT METRICS ==========
+    _, S_ST_rmse, S_ST_mae, S_ST_nmae = compute_basic_metrics(S_ST_true, S_ST_pred)
+    S_ST_corr = compute_correlation(S_ST_true, S_ST_pred)
 
-    # Compute antisymmetry error if edge_index is provided and we have predicted fluxes
+    # ========== FLUX METRICS ==========
+    J_ax_mse, J_ax_rmse, J_ax_mae, J_ax_nmae = compute_basic_metrics(J_ax_true, J_ax_pred)
+    J_ax_corr = compute_correlation(J_ax_true, J_ax_pred)
+
+    # Flux magnitude ratio: mean(|pred|) / mean(|true|)
+    mean_J_pred = torch.abs(J_ax_pred).mean().detach().cpu().item()
+    mean_J_true = torch.abs(J_ax_true).mean().detach().cpu().item()
+    J_ax_mag_ratio = mean_J_pred / (mean_J_true + EPSILON)
+
+    # Flux direction metrics
+    sign_acc, rev_rate = compute_flux_direction_metrics(J_ax_true, J_ax_pred)
+
+    # Antisymmetry error
     antisym_err = compute_flux_antisymmetry_error(J_ax_pred, edge_index)
 
-    # Compute flux direction consistency metrics if concentrations are provided
-    sign_acc, rev_rate = compute_flux_direction_metrics(
-        J_ax_true, J_ax_pred
+    # ========== DIVERGENCE METRICS ==========
+    divJ_mse, divJ_rmse, divJ_mae, divJ_nmae = compute_basic_metrics(
+        dS_dt_from_flux_true, dS_dt_from_flux_pred
     )
+    divJ_corr = compute_correlation(dS_dt_from_flux_true, dS_dt_from_flux_pred)
 
-    # Compute physics score from operator mismatch (pred vs true)
-    residual_tot = dS_dt_tot_pred - dS_dt_tot_true
-    phys_rel_err, phys_sat_rate = compute_physics_score(
-        residual_tot,       # residual: pred - true
-        dS_dt_tot_true,     # reference physics-based derivative (from simulator)
-        batch_vec,
-        tolerance_factor=0.1
-    )
+    # Standard deviation comparison
+    divJ_std_true = dS_dt_from_flux_true.std().detach().cpu().item()
+    divJ_std_pred = dS_dt_from_flux_pred.std().detach().cpu().item()
+    divJ_std_ratio = divJ_std_pred / (divJ_std_true + EPSILON)
+
+    # Distribution overlap
+    divJ_overlap = compute_distribution_overlap(dS_dt_from_flux_true, dS_dt_from_flux_pred)
+
+    # ========== TOTAL RESIDUAL METRICS ==========
+    # Basic metrics (MSE, RMSE, MAE)
+    residual_error = dS_dt_tot_pred - dS_dt_tot_true
+    dS_dt_tot_mse = residual_error.pow(2).mean().detach().cpu().item()
+    dS_dt_tot_rmse = torch.sqrt(residual_error.pow(2).mean()).detach().cpu().item()
+    dS_dt_tot_mae = residual_error.abs().mean().detach().cpu().item()
+
+    # NMAE: For steady-state, normalize by flux divergence magnitude (not by dS_dt_tot which ≈ 0)
+    # This makes NMAE meaningful and prevents division by near-zero
+    dS_dt_tot_nmae = dS_dt_tot_mae / (dS_dt_from_flux_true.abs().mean().detach().cpu().item() + EPSILON)
+
+    # Distribution statistics
+    dS_dt_tot_mean_true = dS_dt_tot_true.mean().detach().cpu().item()
+    dS_dt_tot_mean_pred = dS_dt_tot_pred.mean().detach().cpu().item()
+    dS_dt_tot_std_true = dS_dt_tot_true.std().detach().cpu().item()
+    dS_dt_tot_std_pred = dS_dt_tot_pred.std().detach().cpu().item()
+    dS_dt_tot_skew_true = compute_skewness(dS_dt_tot_true)
+    dS_dt_tot_skew_pred = compute_skewness(dS_dt_tot_pred)
 
     return PhysicsErrorMetrics(
+        # Sucrose content
+        S_ST_rmse=S_ST_rmse,
+        S_ST_mae=S_ST_mae,
+        S_ST_nmae=S_ST_nmae,
+        S_ST_correlation=S_ST_corr,
+        # Flux
         J_ax_mse=J_ax_mse,
         J_ax_rmse=J_ax_rmse,
-        J_ax_rel_error=J_ax_rel,
-        divJ_mse=divJ_mse,
-        divJ_rmse=divJ_rmse,
-        divJ_rel_error=divJ_rel,
-        dS_dt_tot_mse=dS_dt_tot_mse,
-        dS_dt_tot_rmse=dS_dt_tot_rmse,
-        dS_dt_tot_rel_error=dS_dt_tot_rel,
-        J_ax_antisym_error=antisym_err,
+        J_ax_mae=J_ax_mae,
+        J_ax_nmae=J_ax_nmae,
         J_ax_sign_accuracy=sign_acc,
         J_ax_reversal_rate=rev_rate,
-        physics_rel_error=phys_rel_err,
-        physics_satisfaction_rate=phys_sat_rate
+        J_ax_antisym_error=antisym_err,
+        J_ax_magnitude_ratio=J_ax_mag_ratio,
+        J_ax_correlation=J_ax_corr,
+        # Divergence
+        divJ_mse=divJ_mse,
+        divJ_rmse=divJ_rmse,
+        divJ_mae=divJ_mae,
+        divJ_nmae=divJ_nmae,
+        divJ_std_true=divJ_std_true,
+        divJ_std_pred=divJ_std_pred,
+        divJ_std_ratio=divJ_std_ratio,
+        divJ_overlap=divJ_overlap,
+        divJ_correlation=divJ_corr,
+        # Total residual
+        dS_dt_tot_mse=dS_dt_tot_mse,
+        dS_dt_tot_rmse=dS_dt_tot_rmse,
+        dS_dt_tot_mae=dS_dt_tot_mae,
+        dS_dt_tot_nmae=dS_dt_tot_nmae,
+        dS_dt_tot_mean_true=dS_dt_tot_mean_true,
+        dS_dt_tot_mean_pred=dS_dt_tot_mean_pred,
+        dS_dt_tot_std_true=dS_dt_tot_std_true,
+        dS_dt_tot_std_pred=dS_dt_tot_std_pred,
+        dS_dt_tot_skew_true=dS_dt_tot_skew_true,
+        dS_dt_tot_skew_pred=dS_dt_tot_skew_pred,
     )
 
 
@@ -567,6 +784,24 @@ def compute_axial_flux(
 def compute_flux_divergence(J_ax: torch.Tensor, edge_index: torch.Tensor, N: int, device: torch.device) -> torch.Tensor:
     """Compute divergence of flux to get net inflow per node.
 
+    This implements the standard divergence convention: div(J) = sum of (flux_in - flux_out)
+    for each node, which represents net mass gain (positive) or loss (negative).
+
+    **CPlantBox Sign Convention Note:**
+    CPlantBox's Delta_JS_ST uses the opposite sign (-div(J)):
+        Delta2[src, edge] = -1  →  source nodes accumulate -J
+        Delta2[dst, edge] = +1  →  destination nodes accumulate +J
+        Result: Delta_JS_ST = -div(J) in standard notation
+
+    However, CPlantBox's conservation equation negates it:
+        dS/dt = -Delta_JS_ST + F_in - F_out = +div(J) + F_in - F_out
+
+    Our implementation computes +div(J) directly (standard convention):
+        For edge src→dst with flux J: src gets -J (loss), dst gets +J (gain)
+        Conservation equation: dS/dt = div(J) + F_in - F_out
+
+    Both formulations are physically equivalent and yield the same results.
+
     Args:
         J_ax: Axial flux per edge [E]
         edge_index: Edge connectivity [2, E]
@@ -585,12 +820,17 @@ def compute_flux_divergence(J_ax: torch.Tensor, edge_index: torch.Tensor, N: int
 
     src, dst = edge_index[0], edge_index[1]
 
-    # Divergence of flux -> net inflow per node
-    # This computes the sum of incoming/outgoing fluxes for each node
-    # dst node accumulates -J_ax
-    # src node accumulates +J_ax
-    dS_dt_from_flux.scatter_add_(0, dst, -J_ax)
-    dS_dt_from_flux.scatter_add_(0, src, +J_ax)
+    # Standard divergence convention (physically intuitive):
+    # For edge src → dst with flux J_ax:
+    #   - src node (upstream) gets: -J_ax (flux leaving, mass lost → negative divergence)
+    #   - dst node (downstream) gets: +J_ax (flux arriving, mass gained → positive divergence)
+    # This computes: div(J) = sum of (flux_in - flux_out) for each node
+    #
+    # NOTE: CPlantBox uses opposite sign convention! Their Delta_JS_ST represents -div(J).
+    # When loading CPlantBox data, negate Delta_JS_ST to match this convention.
+    # Conservation equation: dS/dt = div(J) + F_in - F_out ≈ 0
+    dS_dt_from_flux.scatter_add_(0, src, -J_ax)  # Source loses flux (negative)
+    dS_dt_from_flux.scatter_add_(0, dst, +J_ax)  # Destination gains flux (positive)
 
     return dS_dt_from_flux
 
@@ -744,7 +984,7 @@ def compute_sucrose_outflow(
     return F_out_MM + Exud
 
 
-def log_physics_values(y_pred: torch.Tensor, data: Data, model_output=None, phase: str = None):
+def log_physics_values(y_pred: torch.Tensor, data: Data, model_output=None, phase: str = None, epoch: int = None, batch_idx: int = None):
     """Log true and predicted physics values for analysis (no loss computation).
 
     This function computes and logs all physics quantities (C_ST, J_ax, divergence,
@@ -755,6 +995,9 @@ def log_physics_values(y_pred: torch.Tensor, data: Data, model_output=None, phas
         y_pred: Predicted sucrose content [N, 1] or dict for operator model
         data: Graph data containing topology, features, and targets
         model_output: For operator models, dict containing edge_fluxes and divergences
+        phase: Training phase ('train', 'val', 'test')
+        epoch: Current epoch number (optional)
+        batch_idx: Batch index (optional)
 
     Returns:
         Tuple of (PhysicsMetrics, PhysicsErrorMetrics):
@@ -762,7 +1005,7 @@ def log_physics_values(y_pred: torch.Tensor, data: Data, model_output=None, phas
             - Physics error metrics (MSE, RMSE, Relative Error)
             Returns (None, None) if logging disabled
     """
-    if not _ENABLE_PHYSICS_LOGGING:
+    if not _ENABLE_PHYSICS_LOGGING and not _ENABLE_METRICS_LOGGING:
         return None, None
 
     # Handle operator model case
@@ -819,6 +1062,8 @@ def log_physics_values(y_pred: torch.Tensor, data: Data, model_output=None, phas
 
         # Compute error metrics
         physics_errors = _compute_physics_error_metrics(
+            S_ST_true,
+            S_ST_pred,
             J_ax_true,
             edge_fluxes_pred,
             dS_dt_from_flux_true,
@@ -829,17 +1074,21 @@ def log_physics_values(y_pred: torch.Tensor, data: Data, model_output=None, phas
             batch_vec=batch_vec
         )
 
-        with open(_PHYSICS_LOG_PATH, "a") as f:
-            msg = _log_header("DEBUG OUTPUT - OPERATOR MODEL (DATA-ONLY)", batch_vec, data=data, phase=phase)
-            msg += _log_concentrations(C_ST_true, C_ST_pred)
-            msg += _log_sucrose_contents(S_ST_true, S_ST_pred)
-            msg += _log_fluxes(J_ax_true, edge_fluxes_pred)
-            msg += _log_divergence(dS_dt_from_flux_true, divergence_pred)
-            msg += _log_source_sink_terms(F_in_true, F_in_pred, F_out_true, F_out_pred)
-            msg += _log_total_residual(dS_dt_tot_true, dS_dt_tot_pred)
-            msg += _log_comparison_metrics(physics_errors)
-            msg += f"{'='*60}\n"
-            f.write(msg)
+        # Log metrics to CSV file
+        log_metrics_to_file(physics_errors, epoch=epoch, phase=phase, batch_idx=batch_idx)
+
+        if _ENABLE_PHYSICS_LOGGING:
+            with open(_PHYSICS_LOG_PATH, "a") as f:
+                msg = _log_header("DEBUG OUTPUT - OPERATOR MODEL (DATA-ONLY)", batch_vec, data=data, phase=phase)
+                msg += _log_concentrations(C_ST_true, C_ST_pred)
+                msg += _log_sucrose_contents(S_ST_true, S_ST_pred)
+                msg += _log_fluxes(J_ax_true, edge_fluxes_pred)
+                msg += _log_divergence(dS_dt_from_flux_true, divergence_pred)
+                msg += _log_source_sink_terms(F_in_true, F_in_pred, F_out_true, F_out_pred)
+                msg += _log_total_residual(dS_dt_tot_true, dS_dt_tot_pred)
+                msg += _log_comparison_metrics(physics_errors)
+                msg += f"{'='*60}\n"
+                f.write(msg)
 
         # Compute averaged metrics for terminal display (operator model)
         if batch_vec is not None:
@@ -899,6 +1148,8 @@ def log_physics_values(y_pred: torch.Tensor, data: Data, model_output=None, phas
 
         # Compute error metrics
         physics_errors = _compute_physics_error_metrics(
+            S_ST_true,
+            S_ST_pred,
             J_ax_true,
             J_ax_pred,
             dS_dt_from_flux_true,
@@ -909,17 +1160,21 @@ def log_physics_values(y_pred: torch.Tensor, data: Data, model_output=None, phas
             batch_vec=batch_vec
         )
 
-        with open(_PHYSICS_LOG_PATH, "a") as f:
-            msg = _log_header("DEBUG OUTPUT - NNCONV MODEL (DATA-ONLY)", batch_vec, data=data, phase=phase)
-            msg += _log_concentrations(C_ST_true, C_ST_pred)
-            msg += _log_sucrose_contents(S_ST_true, S_ST_pred)
-            msg += _log_fluxes(J_ax_true, J_ax_pred)
-            msg += _log_source_sink_terms(F_in_true, F_in_pred, F_out_true, F_out_pred)
-            msg += _log_divergence(dS_dt_from_flux_true, dS_dt_from_flux_pred)
-            msg += _log_total_residual(dS_dt_tot_true, dS_dt_tot_pred)
-            msg += _log_comparison_metrics(physics_errors)
-            msg += f"{'='*60}\n"
-            f.write(msg)
+        # Log metrics to CSV file
+        log_metrics_to_file(physics_errors, epoch=epoch, phase=phase, batch_idx=batch_idx)
+
+        if _ENABLE_PHYSICS_LOGGING:
+            with open(_PHYSICS_LOG_PATH, "a") as f:
+                msg = _log_header("DEBUG OUTPUT - NNCONV MODEL (DATA-ONLY)", batch_vec, data=data, phase=phase)
+                msg += _log_concentrations(C_ST_true, C_ST_pred)
+                msg += _log_sucrose_contents(S_ST_true, S_ST_pred)
+                msg += _log_fluxes(J_ax_true, J_ax_pred)
+                msg += _log_source_sink_terms(F_in_true, F_in_pred, F_out_true, F_out_pred)
+                msg += _log_divergence(dS_dt_from_flux_true, dS_dt_from_flux_pred)
+                msg += _log_total_residual(dS_dt_tot_true, dS_dt_tot_pred)
+                msg += _log_comparison_metrics(physics_errors)
+                msg += f"{'='*60}\n"
+                f.write(msg)
 
         # Compute averaged metrics for terminal display (NNConv model)
         if batch_vec is not None:
@@ -963,7 +1218,9 @@ def log_physics_values(y_pred: torch.Tensor, data: Data, model_output=None, phas
 def physics_residual(
     y_pred: torch.Tensor,
     data: Data,
-    phase: str = None
+    phase: str = None,
+    epoch: int = None,
+    batch_idx: int = None
 ):
     """Compute physics-informed residual term based on sucrose transport equations.
 
@@ -977,6 +1234,8 @@ def physics_residual(
         y_pred: Predicted sucrose content [N, 1] (standardized)
         data: Graph data containing topology, features, simulation parameters, and node fields
         phase: Training phase ('train', 'val', 'test') for logging
+        epoch: Current epoch number (optional)
+        batch_idx: Batch index (optional)
 
     Returns:
         tuple: (residual_loss, physics_components_dict, physics_error_metrics) where:
@@ -1042,6 +1301,8 @@ def physics_residual(
 
     # Compute error metrics
     physics_errors = _compute_physics_error_metrics(
+        S_ST_true,
+        S_ST_pred,
         J_ax_true,
         J_ax_pred,
         dS_dt_from_flux_true,
@@ -1051,6 +1312,9 @@ def physics_residual(
         edge_index=edge_index,
         batch_vec=batch_vec
     )
+
+    # Log metrics to CSV file
+    log_metrics_to_file(physics_errors, epoch=epoch, phase=phase, batch_idx=batch_idx)
 
     if _ENABLE_PHYSICS_LOGGING:
         with open(_PHYSICS_LOG_PATH, "a") as f:
@@ -1070,18 +1334,6 @@ def physics_residual(
     # ============================
     # Minimize dS/dt_physics directly
     residual = dS_dt_tot_pred
-
-    # Compute physics error metrics (include edge_index for antisymmetry calculation)
-    physics_errors = _compute_physics_error_metrics(
-        J_ax_true,
-        J_ax_pred,
-        dS_dt_from_flux_true,
-        dS_dt_from_flux_pred,
-        dS_dt_tot_true,
-        dS_dt_tot_pred,
-        edge_index=edge_index,
-        batch_vec=batch_vec
-    )
 
     # Add penalty for negative concentrations (after denormalization)
     # This encourages the model to respect the physical constraint C_ST >= 0
@@ -1144,7 +1396,9 @@ def physics_residual(
 def physics_residual_operator(
     model_output: dict,
     data: Data,
-    phase: str = None
+    phase: str = None,
+    epoch: int = None,
+    batch_idx: int = None
 ) -> tuple[torch.Tensor, dict]:
     """Compute physics residual for operator-based GNN using LEARNED operator.
 
@@ -1226,6 +1480,8 @@ def physics_residual_operator(
 
     # Compute error metrics
     physics_errors = _compute_physics_error_metrics(
+        S_ST_true,
+        S_ST_pred,
         J_ax_true,
         edge_fluxes_pred,
         dS_dt_from_flux_true,
@@ -1235,6 +1491,9 @@ def physics_residual_operator(
         edge_index=edge_index,
         batch_vec=batch_vec
     )
+
+    # Log metrics to CSV file
+    log_metrics_to_file(physics_errors, epoch=epoch, phase=phase, batch_idx=batch_idx)
 
     if _ENABLE_PHYSICS_LOGGING:
         with open(_PHYSICS_LOG_PATH, "a") as f:
@@ -1254,19 +1513,6 @@ def physics_residual_operator(
     # ============================
     # Minimize dS/dt_physics directly
     residual = dS_dt_tot_pred
-
-    # Compute physics error metrics (include edge_index for antisymmetry calculation)
-    # Use LEARNED fluxes/divergences for error metrics
-    physics_errors = _compute_physics_error_metrics(
-        J_ax_true,
-        edge_fluxes_pred,
-        dS_dt_from_flux_true,
-        divergence_pred,
-        dS_dt_tot_true,
-        dS_dt_tot_pred,
-        edge_index=edge_index,
-        batch_vec=batch_vec
-    )
 
     # Add penalty for negative concentrations (after denormalization)
     # This encourages the model to respect the physical constraint C_ST >= 0
@@ -1326,7 +1572,9 @@ def physics_residual_operator(
 def physics_residual_operator_analytical(
     model_output: dict,
     data: Data,
-    phase: str = None
+    phase: str = None,
+    epoch: int = None,
+    batch_idx: int = None
 ) -> tuple[torch.Tensor, dict]:
     """Compute physics residual for operator-based GNN using ANALYTICAL calculations.
 
@@ -1422,6 +1670,8 @@ def physics_residual_operator_analytical(
 
     # Compute error metrics
     physics_errors = _compute_physics_error_metrics(
+        S_ST_true,
+        S_ST_pred,
         J_ax_true,
         J_ax_pred,
         dS_dt_from_flux_true,
@@ -1431,6 +1681,9 @@ def physics_residual_operator_analytical(
         edge_index=edge_index,
         batch_vec=batch_vec
     )
+
+    # Log metrics to CSV file
+    log_metrics_to_file(physics_errors, epoch=epoch, phase=phase, batch_idx=batch_idx)
 
     # ============================
     # LOGGING
@@ -1453,18 +1706,6 @@ def physics_residual_operator_analytical(
     # ============================
     # Minimize dS/dt_physics directly
     residual = dS_dt_tot_pred
-
-    # Compute physics error metrics
-    physics_errors = _compute_physics_error_metrics(
-        J_ax_true,
-        J_ax_pred,
-        dS_dt_from_flux_true,
-        dS_dt_from_flux_pred,
-        dS_dt_tot_true,
-        dS_dt_tot_pred,
-        edge_index=edge_index,
-        batch_vec=batch_vec
-    )
 
     # Add penalty for negative concentrations
     negative_concentration_penalty = torch.relu(-C_ST_pred).pow(2).mean()

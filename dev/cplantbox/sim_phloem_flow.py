@@ -31,18 +31,21 @@ def getWeatherData(sim_time):
 parser = argparse.ArgumentParser(description="Simulate phloem flow")
 parser.add_argument('--save-image', action='store_true', dest='save_image',
                     help='Save plant images each step (default: False)')
-parser.add_argument('--image-dir', type=str, default='images', dest='image_dir',
-                    help='Directory to save images (default: images)')
-parser.add_argument('--phloem-dir', type=str, default='data/sim', dest='phloem_dir',
+parser.add_argument('--image-dir', type=str, default='images/tmp', dest='image_dir',
+                    help='Directory to save images (default: images/tmp)')
+parser.add_argument('--phloem-dir', type=str, default='data/tmp', dest='phloem_dir',
                     help='Directory to save phloem output (default: data/tmp)')
 parser.add_argument('--weather-file', type=str, default='climate/baseline.json', dest='weather_file',
                     help='Weather configuration file (default: climate/baseline.json)')
+parser.add_argument('--seed', type=int, default=42, dest='seed',
+                    help='Random seed for simulation (default: 42)')
 args = parser.parse_args()
 
 save_image = args.save_image
 image_dir = args.image_dir
 phloem_dir = args.phloem_dir
 weather_config = args.weather_file
+seed = args.seed
 
 """ Parameters and variables """
 plant_age = 5 # [day] init simtime
@@ -59,10 +62,10 @@ config = dummyWeather.load_weather_config(weather_config)
 weatherInit = dummyWeather.weather_custom(plant_age, config)
 
 """ Plant """
-plant = pb.MappedPlant(seednum=2)
+plant = pb.MappedPlant(seednum=seed)
 # plant.disableExtraNode()
-path = "../../modelparameter/structural/plant/"
-name = "Triticum_aestivum_test_2021" # "Triticum_aestivum_adapted_2023"
+path = "structural/"
+name = "Triticum_aestivum_modified" # "Triticum_aestivum_adapted_2023"
 plant.readParameters(path + name + ".xml")
 
 sdf = pb.SDF_PlantBox(np.inf, np.inf, depth)

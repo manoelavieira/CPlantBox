@@ -9,13 +9,12 @@ cmH2O_to_hPa = 0.980638  # Conversion factor from cmH2O to hPa (from C++ runPM.c
 class ModelConfig:
     """Configuration for Phloem GNN models.
 
-    Supports three architectures:
+    Supports two architectures:
     - 'nnconv': PhloemNNConv (baseline) - predicts concentrations, fluxes reconstructed
     - 'operator': PhloemOperatorGNN - message passing as transport operator, predicts fluxes directly
-    - 'physics': PhloemPhysicsLayerGNN - physics-baked layers, each layer is a discrete operator
 
     Attributes:
-        model_type: Type of model architecture ('nnconv', 'operator', or 'physics')
+        model_type: Type of model architecture ('nnconv', 'operator')
         node_feat_dim: Dimension of continuous node features
         num_org_types: Number of organ types [ROOT, STEM, LEAF] (remapped from CPlantBox indices 2,3,4 to 0,1,2)
         hidden_size: Dimension of hidden layers in NNConv/MLPs
@@ -24,7 +23,7 @@ class ModelConfig:
         aggr: NNConv aggregator type ("add", "mean", or "max")
         dropout: Dropout probability
     """
-    model_type: str = "operator"  # 'nnconv', 'operator', or 'physics'
+    model_type: str = "operator"  # 'nnconv', 'operator'
     node_feat_dim: int = 7  # [psi, vol_st, len_leaf, Q_Rmmax, Q_Grmax, Q_Exudmax, Temp]
     edge_feat_dim: int = 1  # [r_st]
     num_org_types: int = 3  # ot_root=0, ot_stem=1, ot_leaf=2 (remapped from CPlantBox 2,3,4)
@@ -34,8 +33,8 @@ class ModelConfig:
     dropout: float = 0.1
 
     def __post_init__(self):
-        if self.model_type not in ["nnconv", "operator", "physics"]:
-            raise ValueError(f"model_type must be 'nnconv', 'operator', or 'physics', got {self.model_type}")
+        if self.model_type not in ["nnconv", "operator"]:
+            raise ValueError(f"model_type must be 'nnconv' or 'operator', got {self.model_type}")
         if not 0 <= self.dropout <= 1:
             raise ValueError(f"Dropout must be between 0 and 1, got {self.dropout}")
         if self.num_layers < 1:

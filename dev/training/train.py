@@ -148,11 +148,10 @@ def _to_physics_metrics(physics_res) -> Optional[PhysicsMetrics]:
 
 
 def compute_physics_residual_step(
-    model: nn.Module,
     data,
-    model_output = None,
-    loss_type: LossType = LossType.COMBINED,
+    model_output,
     phase: str = None,
+    use_analytical_residual: bool = False,
 ) -> Tuple[torch.Tensor, Optional[PhysicsMetrics], Optional[PhysicsErrorMetrics]]:
     """
     Unified physics residual computation for train/eval.
@@ -161,22 +160,16 @@ def compute_physics_residual_step(
     - NNConv: Reconstructs fluxes from predicted concentrations
     - Operator: Uses directly predicted edge fluxes and divergences
 
-    Source/sink term handling:
-    - COMBINED mode: Uses TRUE F_in/F_out for ALL nodes (isolates flux divergence quality)
-    - PHYSICS_WITH_IC_BC mode: Uses TRUE F_in/F_out only for IC/BC nodes
-    - DATA_ONLY mode: No physics residual (uses predicted F_in/F_out for logging only)
-
     Args:
-        model: The neural network model
         data: Graph data containing features and targets
-        model_output: Model output (tensor or dict). If None, will run forward pass.
-        loss_type: Type of loss being used (determines source/sink term substitution strategy)
+        model_output: Model output (tensor or dict) from forward pass
         phase: Training phase ('train', 'val', 'test') for logging
+        use_analytical_residual: If True, use analytical residual for operator model
 
     Returns:
         Tuple of (phys_res_scalar, PhysicsMetrics|None, PhysicsErrorMetrics|None)
     """
-    # If output not provided, run forward pass
+    # Validate that model_output is provided
     if model_output is None:
         raise ValueError("model_output must be provided (forward pass should be done before calling this function)")
 
@@ -185,12 +178,14 @@ def compute_physics_residual_step(
 
     # Compute physics residual using appropriate function
     if is_operator_model:
-        phys_res, phys_res_dict, phys_errors = physics_residual_operator(
-            model_output, data, phase=phase
-        )
-        # phys_res, phys_res_dict, phys_errors = physics_residual_operator_analytical(
-        #     model_output, data, phase=phase
-        # )
+        if use_analytical_residual:
+            phys_res, phys_res_dict, phys_errors = physics_residual_operator_analytical(
+                model_output, data, phase=phase
+            )
+        else:
+            phys_res, phys_res_dict, phys_errors = physics_residual_operator(
+                model_output, data, phase=phase
+            )
     else:
         # NNConv model: model_output is a tensor
         phys_res, phys_res_dict, phys_errors = physics_residual(
@@ -704,11 +699,10 @@ def train_epoch(
             phys_res_metrics, phys_res_errors = log_physics_values(model_output, data, phase='train')
         else:
             phys_res, phys_res_metrics, phys_res_errors = compute_physics_residual_step(
-                model=model,
                 data=data,
                 model_output=model_output,
-                loss_type=loss_config.loss_type,
-                phase='train'
+                phase='train',
+                use_analytical_residual=loss_config.use_analytical_residual
             )
 
         # Compute loss and metrics (no physics scaling needed)
@@ -1118,11 +1112,10 @@ def eval_model(
                 phys_res_metrics, phys_res_errors = log_physics_values(model_output, data, phase=phase)
             else:
                 phys_res, phys_res_metrics, phys_res_errors = compute_physics_residual_step(
-                    model=model,
                     data=data,
                     model_output=model_output,
-                    loss_type=loss_config.loss_type,
-                    phase=phase
+                    phase=phase,
+                    use_analytical_residual=loss_config.use_analytical_residual
                 )
 
             # Compute loss and metrics (no physics scaling needed)

@@ -26,7 +26,8 @@ class TrainingConfig:
     split_method: str = "random"  # 'random' or 'time'
 
     # Model architecture
-    model_type: str = "nnconv"  # 'nnconv' or 'operator'
+    model_type: str = "operator"  # 'nnconv' or 'operator'
+    use_analytical_residual: bool = False
 
     # Training parameters
     lr: float = 3e-3
@@ -276,6 +277,7 @@ class LossConfig:
     lambda_bc: float = 1.0
     use_adaptive_physics_weighting: bool = True
     target_physics_ratio: float = 1.0
+    use_analytical_residual: bool = False
 
     @classmethod
     def from_training_config(cls, config: 'TrainingConfig') -> 'LossConfig':
@@ -287,7 +289,8 @@ class LossConfig:
             lambda_ic=config.lambda_ic,
             lambda_bc=config.lambda_bc,
             use_adaptive_physics_weighting=config.use_adaptive_physics_weighting,
-            target_physics_ratio=config.target_physics_ratio
+            target_physics_ratio=config.target_physics_ratio,
+            use_analytical_residual=getattr(config, 'use_analytical_residual', False)
         )
 
 

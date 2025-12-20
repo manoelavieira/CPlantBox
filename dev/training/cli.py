@@ -15,9 +15,9 @@ def parse_arguments() -> TrainingConfig:
 
     parser.add_argument('--data-path', type=str,
                        help='Path to H5 file for simulated data')
-    parser.add_argument('--model-type', type=str, default='nnconv',
-                       choices=['nnconv', 'operator', 'physics'],
-                       help='Model architecture: nnconv (baseline), operator (flux-based), or physics (physics-baked layers)')
+    parser.add_argument('--model-type', type=str, default='operator',
+                       choices=['nnconv', 'operator'],
+                       help='Model architecture: nnconv (baseline), operator (flux-based)')
     parser.add_argument('--batch-size', type=int, default=8,
                        help='Batch size for training')
     parser.add_argument('--train-ratio', type=float, default=0.8,
@@ -48,12 +48,12 @@ def parse_arguments() -> TrainingConfig:
     parser.add_argument('--loss-type', type=str, default='physics',
                         choices=['data', 'physics', 'combined'],
                         help='Type of loss to use: data (MSE), physics, or combined (data + physics)')
-    parser.add_argument('--enable-physics-logging', action='store_true', default=True,
+    parser.add_argument('--enable-physics-logging', action='store_true',
                         help='Enable detailed physics debug logging to file')
-    parser.add_argument('--disable-physics-logging', dest='enable_physics_logging', action='store_false',
-                        help='Disable physics debug logging to file')
     parser.add_argument('--tensorboard-log-dir', type=str, default='results/tensorboard_logs',
                         help='Directory for TensorBoard logs')
+    parser.add_argument('--use-analytical-residual', action='store_true',
+                        help='Use physics_residual_operator_analytical instead of numerical operator residual')
 
     args = parser.parse_args()
 
@@ -76,6 +76,7 @@ def parse_arguments() -> TrainingConfig:
         lambda_bc=args.lambda_bc,
         loss_type=LossType(args.loss_type),
         enable_physics_logging=args.enable_physics_logging,
+        use_analytical_residual=args.use_analytical_residual,
     )
 
     # Validate configuration

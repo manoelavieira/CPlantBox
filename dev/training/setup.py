@@ -52,7 +52,7 @@ def setup_model_and_scalers(
     Args:
         train_loader: Training data loader for fitting scalers
         device: Device to place model and scalers on
-        model_type: Type of model ('nnconv', 'operator', or 'physics')
+        model_type: Type of model ('nnconv', 'operator')
 
     Returns:
         ModelSetup: Configured model with fitted scalers

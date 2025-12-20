@@ -6,6 +6,7 @@ from torch.utils.data import DataLoader
 from typing import Tuple
 
 from data.dataset_loader import load_phloem_data
+from data.dataset_loader import load_phloem_data_kfold
 from model.config import ModelConfig
 from .config import TrainingConfig, ModelSetup
 from model.utils import Standardizer
@@ -41,6 +42,11 @@ def validate_split_ratios(train_ratio: float, val_ratio: float) -> None:
 def get_dataloaders(config: TrainingConfig) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """Get train, validation, and test dataloaders.
 
+    Supports two modes:
+    1. K-fold cross-validation (default): Keeps all graphs from the same simulation
+       file together in the same split. No data leakage between splits.
+    2. Traditional split: Mixes graphs from all files and splits randomly or by time.
+
     Args:
         config: Training configuration containing dataset parameters
 
@@ -50,18 +56,62 @@ def get_dataloaders(config: TrainingConfig) -> Tuple[DataLoader, DataLoader, Dat
     Raises:
         ValueError: If dataset parameters are invalid
     """
-    # Validate split ratios
-    validate_split_ratios(config.train_ratio, config.val_ratio)
+    if config.use_kfold:
+        # K-fold cross-validation: keeps files separate
+        # Number of folds is determined automatically by number of files
 
-    # Load simulation data
-    train_loader, val_loader, test_loader = load_phloem_data(
-        h5_path=config.data_path,
-        batch_size=config.batch_size,
-        train_ratio=config.train_ratio,
-        val_ratio=config.val_ratio,
-        random_seed=config.seed,
-        split_method=config.split_method
-    )
+        # Load all folds
+        folds = load_phloem_data_kfold(
+            h5_dir=config.data_path,
+            batch_size=config.batch_size,
+            random_seed=config.seed
+        )
+
+        n_folds = len(folds)
+
+        print(f"\n{'='*70}")
+        print(f"Using K-fold cross-validation: {n_folds} folds (auto-determined from {n_folds} files)")
+        print(f"Currently training fold {config.current_fold + 1}/{n_folds}")
+        print(f"{'='*70}")
+
+        # Select the specified fold
+        if config.current_fold >= n_folds:
+            raise ValueError(
+                f"current_fold ({config.current_fold}) exceeds available folds ({n_folds})"
+            )
+
+        train_loader, val_loader, test_loader = folds[config.current_fold]
+
+        print(f"\nFold {config.current_fold} selected:")
+        print(f"  Train batches: {len(train_loader)}")
+        print(f"  Val batches:   {len(val_loader)}")
+        print(f"  Test batches:  {len(test_loader)}")
+        print(f"{'='*70}\n")
+
+    else:
+        # Traditional approach: mix graphs from all files
+        print(f"\n{'='*70}")
+        print(f"Using traditional split method: {config.split_method}")
+        print(f"{'='*70}")
+
+        # Validate split ratios
+        validate_split_ratios(config.train_ratio, config.val_ratio)
+
+        # Load simulation data
+        train_loader, val_loader, test_loader = load_phloem_data(
+            h5_path=config.data_path,
+            batch_size=config.batch_size,
+            train_ratio=config.train_ratio,
+            val_ratio=config.val_ratio,
+            random_seed=config.seed,
+            split_method=config.split_method
+        )
+
+        print(f"\nSplit ratios: train={config.train_ratio}, val={config.val_ratio}, test={1 - config.train_ratio - config.val_ratio:.2f}")
+        print(f"  Train batches: {len(train_loader)}")
+        print(f"  Val batches:   {len(val_loader)}")
+        print(f"  Test batches:  {len(test_loader)}")
+        print(f"{'='*70}\n")
 
     return train_loader, val_loader, test_loader
 

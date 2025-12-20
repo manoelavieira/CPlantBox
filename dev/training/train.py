@@ -812,7 +812,8 @@ def train_model(
     scheduler: torch.optim.lr_scheduler._LRScheduler,
     writer: SummaryWriter,
     config: TrainingConfig,
-    model_cfg: ModelConfig
+    model_cfg: ModelConfig,
+    fold_idx: Optional[int] = None
 ) -> TrainingState:
     """Run the main training loop with early stopping.
 
@@ -825,6 +826,7 @@ def train_model(
         writer: TensorBoard writer for logging
         config: Training configuration
         model_cfg: Model configuration for checkpointing
+        fold_idx: Current fold index (None for traditional mode)
 
     Returns:
         TrainingState: Final training state with best metrics
@@ -896,6 +898,9 @@ def train_model(
 
         # Log metrics to TensorBoard
         logging.log_epoch_metrics(writer, epoch, tr_metrics, val_metrics, current_lr)
+
+        # Log metrics to CSV
+        logging.save_metrics_to_csv(config, epoch, fold_idx, tr_metrics, val_metrics, current_lr)
 
         # Console logging
         # Only print BC nodes info on first epoch (since it remains constant)

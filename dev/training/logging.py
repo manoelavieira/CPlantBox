@@ -6,6 +6,7 @@ from torch.utils.tensorboard import SummaryWriter
 from typing import Optional
 from pathlib import Path
 from datetime import datetime
+import csv
 
 from model.config import ModelConfig
 from .config import TrainingConfig, TrainingMetrics, PhysicsMetrics, PhysicsErrorMetrics
@@ -385,3 +386,69 @@ def log_hyperparameters(writer: SummaryWriter, config: TrainingConfig, model_cfg
     metrics = {}
 
     writer.add_hparams(hparams, metrics)
+
+def save_metrics_to_csv(
+    config: TrainingConfig,
+    epoch: int,
+    fold_idx: Optional[int],
+    train_metrics: TrainingMetrics,
+    val_metrics: TrainingMetrics,
+    current_lr: float
+) -> None:
+    """Save epoch metrics to CSV file.
+
+    Args:
+        config: Training configuration
+        epoch: Current epoch number
+        fold_idx: Current fold index (None for traditional mode)
+        train_metrics: Training metrics for this epoch
+        val_metrics: Validation metrics for this epoch
+        current_lr: Current learning rate
+    """
+    if not config.enable_metrics_logging:
+        return
+
+    metrics_path = Path(config.metrics_save_path)
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Check if file exists to determine if we need to write headers
+    file_exists = metrics_path.exists()
+
+    # Open file in append mode
+    with open(metrics_path, 'a', newline='') as f:
+        fieldnames = [
+            'fold', 'epoch', 'learning_rate',
+            'train_loss', 'train_mse', 'train_mae', 'train_rmse', 'train_rel_error',
+            'train_phys', 'train_ic', 'train_bc',
+            'val_loss', 'val_mse', 'val_mae', 'val_rmse', 'val_rel_error',
+            'val_phys', 'val_ic', 'val_bc'
+        ]
+
+        csv_writer = csv.DictWriter(f, fieldnames=fieldnames)
+
+        # Write header if file is new
+        if not file_exists:
+            csv_writer.writeheader()
+
+        # Write metrics row
+        csv_writer.writerow({
+            'fold': fold_idx if fold_idx is not None else 'N/A',
+            'epoch': epoch,
+            'learning_rate': current_lr,
+            'train_loss': train_metrics.loss,
+            'train_mse': train_metrics.mse,
+            'train_mae': train_metrics.mae,
+            'train_rmse': train_metrics.rmse,
+            'train_rel_error': train_metrics.rel_error,
+            'train_phys': train_metrics.physics,
+            'train_ic': train_metrics.ic_loss,
+            'train_bc': train_metrics.bc_loss,
+            'val_loss': val_metrics.loss,
+            'val_mse': val_metrics.mse,
+            'val_mae': val_metrics.mae,
+            'val_rmse': val_metrics.rmse,
+            'val_rel_error': val_metrics.rel_error,
+            'val_phys': val_metrics.physics,
+            'val_ic': val_metrics.ic_loss,
+            'val_bc': val_metrics.bc_loss,
+        })

@@ -27,6 +27,13 @@ def parse_arguments() -> TrainingConfig:
     parser.add_argument('--split-method', type=str, default='random',
                        choices=['random', 'time'],
                        help='Method for splitting data: random (shuffle) or time (chronological)')
+
+    # K-fold cross-validation arguments
+    parser.add_argument('--use-kfold', action='store_true',
+                       help='Use k-fold cross-validation (keeps simulation files separate). '
+                            'Number of folds is automatically determined by the number of .h5 files. '
+                            'Trains all folds automatically.')
+
     parser.add_argument('--lr', type=float, default=3e-3,
                        help='Initial learning rate')
     parser.add_argument('--weight-decay', type=float, default=1e-5,
@@ -65,6 +72,8 @@ def parse_arguments() -> TrainingConfig:
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
         split_method=args.split_method,
+        use_kfold=args.use_kfold,
+        current_fold=0,  # Will be set appropriately in train_all_folds
         lr=args.lr,
         weight_decay=args.weight_decay,
         patience=args.patience,

@@ -6,6 +6,7 @@ from typing import Optional, List
 from pathlib import Path
 from enum import Enum
 import torch
+import os
 
 
 class LossType(Enum):
@@ -24,6 +25,10 @@ class TrainingConfig:
     train_ratio: float = 0.8
     val_ratio: float = 0.1
     split_method: str = "random"  # 'random' or 'time'
+
+    # K-fold cross-validation parameters
+    use_kfold: bool = True  # Use k-fold CV (keeps files separate) by default
+    current_fold: int = 0   # Internal: which fold is being trained (set by train_all_folds)
 
     # Model architecture
     model_type: str = "operator"  # 'nnconv' or 'operator'
@@ -69,6 +74,21 @@ class TrainingConfig:
     enable_physics_logging: bool = True
     enable_metrics_logging: bool = True
 
+    def get_data_prefix(self) -> str:
+        """Extract a prefix from the data path (directory name)."""
+        path = Path(self.data_path)
+        # If it's a file, get the parent directory name
+        if path.is_file():
+            return path.parent.name
+        # If it's a directory, get the directory name
+        elif path.is_dir():
+            return path.name
+        # Fallback: try to extract from string if path doesn't exist yet
+        else:
+            # Remove trailing slashes and get the last component
+            path_str = str(path).rstrip(os.sep)
+            return os.path.basename(path_str)
+
     @property
     def model_save_path(self) -> str:
         """Get the full path for saving the model."""
@@ -90,15 +110,24 @@ class TrainingConfig:
             raise ValueError(f"model_type must be 'nnconv' or 'operator', got {self.model_type}")
         if self.split_method not in ["random", "time"]:
             raise ValueError(f"split_method must be 'random' or 'time', got {self.split_method}")
-        if not (0 < self.train_ratio < 1):
-            raise ValueError(f"train_ratio must be between 0 and 1, got {self.train_ratio}")
-        if not (0 < self.val_ratio < 1):
-            raise ValueError(f"val_ratio must be between 0 and 1, got {self.val_ratio}")
-        if self.train_ratio + self.val_ratio >= 1:
-            raise ValueError(
-                f"Sum of train_ratio ({self.train_ratio}) and val_ratio ({self.val_ratio}) "
-                f"must be less than 1 to leave data for testing"
-            )
+
+        # Only validate split ratios if not using k-fold
+        if not self.use_kfold:
+            if not (0 < self.train_ratio < 1):
+                raise ValueError(f"train_ratio must be between 0 and 1, got {self.train_ratio}")
+            if not (0 < self.val_ratio < 1):
+                raise ValueError(f"val_ratio must be between 0 and 1, got {self.val_ratio}")
+            if self.train_ratio + self.val_ratio >= 1:
+                raise ValueError(
+                    f"Sum of train_ratio ({self.train_ratio}) and val_ratio ({self.val_ratio}) "
+                    f"must be less than 1 to leave data for testing"
+                )
+        else:
+            # Validate k-fold parameters
+            # current_fold validation will happen at runtime when we know n_folds
+            if self.current_fold < 0:
+                raise ValueError(f"current_fold must be >= 0, got {self.current_fold}")
+
         if self.data_path is None:
             raise ValueError("data_path is required")
 

@@ -470,6 +470,50 @@ def load_graphs_from_directory(h5_dir: str) -> List[Data]:
     return graphs
 
 
+def load_graphs_by_file(h5_dir: str) -> List[Tuple[str, List[Data]]]:
+    """Load graph data from all HDF5 files in a directory, keeping files separate.
+
+    This function is useful for k-fold cross-validation where you want to keep
+    all graphs from the same simulation run (same .h5 file) together in the same split.
+
+    Args:
+        h5_dir: Path to directory containing HDF5 files
+
+    Returns:
+        List of tuples (file_path, graphs) where graphs are all from the same file
+    """
+    # Find all .h5 files in the directory
+    h5_files = list(Path(h5_dir).rglob("*.h5"))
+    if not h5_files:
+        raise RuntimeError(f"No .h5 files found in directory {h5_dir}")
+
+    print(f"Found {len(h5_files)} .h5 files in directory")
+
+    # Find common initial node count across all files
+    common_initial_count = find_common_initial_node_count(h5_files)
+
+    # Load graphs from each file, keeping them separate
+    file_graph_pairs: List[Tuple[str, List[Data]]] = []
+
+    for h5_file in sorted(h5_files):  # Sort for consistent ordering
+        print(f"\nProcessing file: {h5_file}")
+        try:
+            file_graphs = load_graphs_from_file(str(h5_file), common_initial_count)
+            file_graph_pairs.append((str(h5_file), file_graphs))
+            print(f"Loaded {len(file_graphs)} graphs from {h5_file}")
+        except Exception as e:
+            warnings.warn(f"Failed to load file {h5_file}: {str(e)}")
+            continue
+
+    if not file_graph_pairs:
+        raise RuntimeError("No valid graphs loaded")
+
+    total_graphs = sum(len(graphs) for _, graphs in file_graph_pairs)
+    print(f"\nSuccessfully loaded {total_graphs} total graphs from {len(file_graph_pairs)} files")
+
+    return file_graph_pairs
+
+
 def train_test_split(
         graphs: List[Data],
         train_ratio: float,
@@ -556,6 +600,99 @@ def train_test_split(
     return train_loader, val_loader, test_loader
 
 
+def kfold_split_by_file(
+        file_graph_pairs: List[Tuple[str, List[Data]]],
+        batch_size: int = 8,
+        random_seed: int = 42
+    ) -> List[Tuple[DataLoader, DataLoader, DataLoader]]:
+    """Create k-fold cross-validation splits keeping all graphs from the same file together.
+
+    This function ensures that graphs from the same simulation run (same .h5 file)
+    are never split across train/val/test sets, which is important because they
+    are temporally correlated.
+
+    The number of folds is automatically set to the number of files, ensuring that
+    each file is used exactly once for validation and exactly once for testing.
+
+    Example with 5 files (automatically creates 5 folds):
+        Fold 0: train=[file0,file1,file2], val=[file3], test=[file4]
+        Fold 1: train=[file1,file2,file3], val=[file4], test=[file0]
+        Fold 2: train=[file2,file3,file4], val=[file0], test=[file1]
+        Fold 3: train=[file3,file4,file0], val=[file1], test=[file2]
+        Fold 4: train=[file4,file0,file1], val=[file2], test=[file3]
+
+    Args:
+        file_graph_pairs: List of (file_path, graphs) tuples from load_graphs_by_file()
+        batch_size: Batch size for DataLoaders
+        random_seed: Random seed for shuffling file order
+
+    Returns:
+        List of (train_loader, val_loader, test_loader) tuples, one per fold
+    """
+    n_files = len(file_graph_pairs)
+
+    if n_files < 3:
+        raise ValueError(f"Need at least 3 files for k-fold CV (got {n_files})")
+
+    # Set n_folds equal to number of files for exhaustive cross-validation
+    n_folds = n_files
+
+    # Shuffle file order with fixed seed for reproducibility
+    random.seed(random_seed)
+    shuffled_pairs = file_graph_pairs.copy()
+    random.shuffle(shuffled_pairs)
+
+    print(f"\nK-fold cross-validation: {n_folds} folds with {n_files} files")
+    print(f"Each file will be used exactly once for validation and once for testing.")
+    print(f"File order (after shuffling with seed={random_seed}):")
+    for i, (file_path, graphs) in enumerate(shuffled_pairs):
+        print(f"  [{i}] {Path(file_path).name}: {len(graphs)} graphs")
+
+    folds = []
+
+    for fold_idx in range(n_folds):
+        # Calculate how many files for test/val (distribute evenly)
+        # Each fold uses 1 file for test, 1 file for val, rest for train
+        test_file_idx = fold_idx % n_files
+        val_file_idx = (fold_idx + 1) % n_files
+
+        # Ensure test and val are different
+        if test_file_idx == val_file_idx and n_files > 1:
+            val_file_idx = (val_file_idx + 1) % n_files
+
+        # Remaining files go to training
+        train_file_indices = [i for i in range(n_files)
+                              if i != test_file_idx and i != val_file_idx]
+
+        # Collect graphs for each split
+        train_graphs = []
+        val_graphs = []
+        test_graphs = []
+
+        for i in train_file_indices:
+            train_graphs.extend(shuffled_pairs[i][1])
+
+        val_graphs.extend(shuffled_pairs[val_file_idx][1])
+        test_graphs.extend(shuffled_pairs[test_file_idx][1])
+
+        # Create DataLoaders
+        train_loader = DataLoader(train_graphs, batch_size=batch_size,
+                                  shuffle=True, collate_fn=collate_graphs)
+        val_loader = DataLoader(val_graphs, batch_size=batch_size,
+                                shuffle=False, collate_fn=collate_graphs)
+        test_loader = DataLoader(test_graphs, batch_size=batch_size,
+                                 shuffle=False, collate_fn=collate_graphs)
+
+        print(f"\nFold {fold_idx}:")
+        print(f"  Train: {len(train_file_indices)} files, {len(train_graphs)} graphs - files {train_file_indices}")
+        print(f"  Val:   1 file, {len(val_graphs)} graphs - file [{val_file_idx}]")
+        print(f"  Test:  1 file, {len(test_graphs)} graphs - file [{test_file_idx}]")
+
+        folds.append((train_loader, val_loader, test_loader))
+
+    return folds
+
+
 def load_phloem_data(
        h5_path: str,
        batch_size: int = 8,
@@ -604,6 +741,51 @@ def load_phloem_data(
     return train_loader, val_loader, test_loader
 
 
+def load_phloem_data_kfold(
+        h5_dir: str,
+        batch_size: int = 8,
+        random_seed: int = 42
+    ) -> List[Tuple[DataLoader, DataLoader, DataLoader]]:
+    """Load phloem simulation data and create k-fold cross-validation splits.
+
+    This function keeps all graphs from the same simulation run (same .h5 file)
+    together in the same split, which is important because they are temporally
+    correlated and should not be mixed across train/val/test sets.
+
+    The number of folds is automatically determined by the number of .h5 files
+    in the directory, ensuring each file is used exactly once for validation
+    and exactly once for testing.
+
+    Args:
+        h5_dir: Path to directory containing HDF5 files (one per simulation run)
+        batch_size: Batch size for DataLoaders
+        random_seed: Random seed for reproducibility
+
+    Returns:
+        List of (train_loader, val_loader, test_loader) tuples, one per fold.
+        Number of folds equals the number of .h5 files in the directory.
+
+    Example:
+        >>> # With 5 .h5 files, this creates 5 folds automatically
+        >>> folds = load_phloem_data_kfold('./data/', batch_size=8)
+        >>> print(f"Created {len(folds)} folds")  # Output: Created 5 folds
+        >>> for fold_idx, (train_loader, val_loader, test_loader) in enumerate(folds):
+        >>>     print(f"Training fold {fold_idx}...")
+        >>>     # Train your model here
+    """
+    path = Path(h5_dir)
+
+    if not path.is_dir():
+        raise RuntimeError(f"Path {h5_dir} is not a directory. K-fold requires a directory with multiple .h5 files.")
+
+    print(f"Loading data from directory for k-fold CV: {h5_dir}")
+    file_graph_pairs = load_graphs_by_file(h5_dir)
+
+    folds = kfold_split_by_file(file_graph_pairs, batch_size, random_seed)
+
+    return folds
+
+
 def main():
     # ==== Example 1: Load from single file (original behavior)
     h5_path = './cplantbox/data/sim_01/phloem_simulation.h5'
@@ -625,14 +807,35 @@ def main():
 
     # ==== Example 2: Load from directory (new batch loading functionality)
     h5_dir = './cplantbox/data/'  # directory containing multiple .h5 files
-    print("\n====== Loading from directory ======")
+    print("\n====== Loading from directory (mixed) ======")
     try:
         train_loader, val_loader, test_loader = load_phloem_data(h5_dir)
         print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}, Test batches: {len(test_loader)}")
     except Exception as e:
         print(f"Directory loading failed: {e}")
 
-    print("\nNote: Use either a single .h5 file path or a directory path containing .h5 files")
+    # ==== Example 3: K-fold cross-validation (keeping files separate)
+    print("\n====== K-fold cross-validation ======")
+    try:
+        folds = load_phloem_data_kfold(h5_dir, n_folds=5, batch_size=8)
+        print(f"\nCreated {len(folds)} folds")
+
+        # Example: just show statistics for each fold
+        for fold_idx, (train_loader, val_loader, test_loader) in enumerate(folds):
+            print(f"\nFold {fold_idx} loaders:")
+            print(f"  Train: {len(train_loader)} batches")
+            print(f"  Val:   {len(val_loader)} batches")
+            print(f"  Test:  {len(test_loader)} batches")
+
+    except Exception as e:
+        print(f"K-fold loading failed: {e}")
+
+    print("\n" + "="*70)
+    print("Usage notes:")
+    print("  - Single file: load_phloem_data('path/to/file.h5')")
+    print("  - Mixed files: load_phloem_data('path/to/directory/')")
+    print("  - K-fold CV:   load_phloem_data_kfold('path/to/directory/', n_folds=5)")
+    print("="*70)
 
 if __name__ == '__main__':
     main()

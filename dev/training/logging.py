@@ -420,8 +420,24 @@ def save_metrics_to_csv(
             'fold', 'epoch', 'learning_rate',
             'train_loss', 'train_mse', 'train_mae', 'train_rmse', 'train_rel_error',
             'train_phys', 'train_ic', 'train_bc',
+            # Detailed physics metrics for training
+            'train_S_ST_rmse', 'train_S_ST_mae', 'train_S_ST_nmae', 'train_S_ST_correlation',
+            'train_J_ax_mse', 'train_J_ax_rmse', 'train_J_ax_mae', 'train_J_ax_nmae',
+            'train_J_ax_sign_accuracy', 'train_J_ax_reversal_rate',
+            'train_J_ax_antisym_error', 'train_J_ax_magnitude_ratio', 'train_J_ax_correlation',
+            'train_divJ_mse', 'train_divJ_rmse', 'train_divJ_mae', 'train_divJ_nmae',
+            'train_divJ_correlation',
+            'train_dS_dt_tot_mse', 'train_dS_dt_tot_rmse', 'train_dS_dt_tot_mae', 'train_dS_dt_tot_nmae',
             'val_loss', 'val_mse', 'val_mae', 'val_rmse', 'val_rel_error',
-            'val_phys', 'val_ic', 'val_bc'
+            'val_phys', 'val_ic', 'val_bc',
+            # Detailed physics metrics for validation
+            'val_S_ST_rmse', 'val_S_ST_mae', 'val_S_ST_nmae', 'val_S_ST_correlation',
+            'val_J_ax_mse', 'val_J_ax_rmse', 'val_J_ax_mae', 'val_J_ax_nmae',
+            'val_J_ax_sign_accuracy', 'val_J_ax_reversal_rate',
+            'val_J_ax_antisym_error', 'val_J_ax_magnitude_ratio', 'val_J_ax_correlation',
+            'val_divJ_mse', 'val_divJ_rmse', 'val_divJ_mae', 'val_divJ_nmae',
+            'val_divJ_correlation',
+            'val_dS_dt_tot_mse', 'val_dS_dt_tot_rmse', 'val_dS_dt_tot_mae', 'val_dS_dt_tot_nmae',
         ]
 
         csv_writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -430,8 +446,46 @@ def save_metrics_to_csv(
         if not file_exists:
             csv_writer.writeheader()
 
-        # Write metrics row
-        csv_writer.writerow({
+        # Helper function to extract physics error metrics
+        def get_physics_metrics(metrics: TrainingMetrics, prefix: str) -> dict:
+            """Extract physics error metrics from TrainingMetrics with given prefix."""
+            result = {}
+            if metrics.physics_errors is not None:
+                pe = metrics.physics_errors.to_dict()
+                result[f'{prefix}_S_ST_rmse'] = pe['S_ST_rmse']
+                result[f'{prefix}_S_ST_mae'] = pe['S_ST_mae']
+                result[f'{prefix}_S_ST_nmae'] = pe['S_ST_nmae']
+                result[f'{prefix}_S_ST_correlation'] = pe['S_ST_correlation']
+                result[f'{prefix}_J_ax_mse'] = pe['J_ax_mse']
+                result[f'{prefix}_J_ax_rmse'] = pe['J_ax_rmse']
+                result[f'{prefix}_J_ax_mae'] = pe['J_ax_mae']
+                result[f'{prefix}_J_ax_nmae'] = pe['J_ax_nmae']
+                result[f'{prefix}_J_ax_sign_accuracy'] = pe['J_ax_sign_accuracy']
+                result[f'{prefix}_J_ax_reversal_rate'] = pe['J_ax_reversal_rate']
+                result[f'{prefix}_J_ax_antisym_error'] = pe['J_ax_antisym_error']
+                result[f'{prefix}_J_ax_magnitude_ratio'] = pe['J_ax_magnitude_ratio']
+                result[f'{prefix}_J_ax_correlation'] = pe['J_ax_correlation']
+                result[f'{prefix}_divJ_mse'] = pe['divJ_mse']
+                result[f'{prefix}_divJ_rmse'] = pe['divJ_rmse']
+                result[f'{prefix}_divJ_mae'] = pe['divJ_mae']
+                result[f'{prefix}_divJ_nmae'] = pe['divJ_nmae']
+                result[f'{prefix}_divJ_correlation'] = pe['divJ_correlation']
+                result[f'{prefix}_dS_dt_tot_mse'] = pe['dS_dt_tot_mse']
+                result[f'{prefix}_dS_dt_tot_rmse'] = pe['dS_dt_tot_rmse']
+                result[f'{prefix}_dS_dt_tot_mae'] = pe['dS_dt_tot_mae']
+                result[f'{prefix}_dS_dt_tot_nmae'] = pe['dS_dt_tot_nmae']
+            else:
+                # Fill with empty values if physics_errors not available
+                for key in fieldnames:
+                    if key.startswith(prefix + '_') and key not in [f'{prefix}_loss', f'{prefix}_mse',
+                                                                      f'{prefix}_mae', f'{prefix}_rmse',
+                                                                      f'{prefix}_rel_error', f'{prefix}_phys',
+                                                                      f'{prefix}_ic', f'{prefix}_bc']:
+                        result[key] = ''
+            return result
+
+        # Build the row with all metrics
+        row = {
             'fold': fold_idx if fold_idx is not None else 'N/A',
             'epoch': epoch,
             'learning_rate': current_lr,
@@ -451,4 +505,11 @@ def save_metrics_to_csv(
             'val_phys': val_metrics.physics,
             'val_ic': val_metrics.ic_loss,
             'val_bc': val_metrics.bc_loss,
-        })
+        }
+
+        # Add detailed physics metrics
+        row.update(get_physics_metrics(train_metrics, 'train'))
+        row.update(get_physics_metrics(val_metrics, 'val'))
+
+        # Write the row
+        csv_writer.writerow(row)

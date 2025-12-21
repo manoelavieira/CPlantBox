@@ -361,3 +361,362 @@ tensorboard --logdir=results/tensorboard_logs/sim_00_fold_0
 ---
 
 **For more details on the implementation, see the source code in `training/` and `data/` directories.**
+
+---
+
+## Performance Benchmarking
+
+### Overview
+
+The benchmarking suite measures inference time to compare CPlantBox phloem solver with the GNN model. All output files follow a consistent naming convention with data prefixes (e.g., `sim_08_*`) for easy organization across multiple simulations.
+
+### Quick Start Guide
+
+#### 1. Run CPlantBox Simulation (timing automatic)
+
+```bash
+cd dev/cplantbox
+python3 sim_phloem_flow.py --phloem-dir data/sim_08 --seed 42
+```
+
+**Output**:
+- `data/sim_08/phloem_simulation.h5` - Full simulation data
+- `data/sim_08/phloem_timing.csv` - Timing per step with graph size info
+
+#### 2. Benchmark GNN Model
+
+```bash
+cd dev
+python3 benchmark_gnn.py \
+    --model-path logs/model/sim_08_best_model.pt \
+    --data-path cplantbox/data/sim_08/phloem_simulation.h5 \
+    --output-dir benchmarks
+```
+
+**Output** (automatically prefixed with `sim_08`):
+- `benchmarks/sim_08_gnn_latency.csv` - Per-graph latency (batch_size=1)
+- `benchmarks/sim_08_gnn_throughput_bs4.csv` - Throughput at batch_size=4
+- `benchmarks/sim_08_benchmark_summary.csv` - Consolidated summary
+
+#### 3. Compare Performance
+
+```bash
+python3 compare_performance.py \
+    --cplantbox-timing cplantbox/data/sim_08/phloem_timing.csv \
+    --gnn-timing benchmarks/sim_08_gnn_latency.csv \
+    --output-dir comparison \
+    --plot
+```
+
+**Output** (auto-detects prefix from input paths):
+- `comparison/sim_08_summary.csv` - Performance summary
+- `comparison/sim_08_performance_comparison.png` - Visualization plots
+
+### File Naming Convention
+
+All output files use consistent data prefix naming for easy organization:
+
+**Training/Metrics:**
+```
+logs/
+├── model/sim_08_best_model.pt
+├── metrics/
+│   ├── sim_08_metrics.csv          # Epoch-level metrics
+│   └── sim_08_batch_metrics.csv    # Batch-level metrics
+└── tensorboard/sim_08/
+```
+
+**Benchmarks:**
+```
+benchmarks/
+├── sim_08_gnn_latency.csv          # Per-graph latency (bs=1)
+├── sim_08_gnn_throughput_bs4.csv   # Throughput at batch_size=4
+├── sim_08_gnn_throughput_bs8.csv   # Throughput at batch_size=8
+└── sim_08_benchmark_summary.csv    # Consolidated results
+```
+
+**Comparisons:**
+```
+comparison/
+├── sim_08_summary.csv              # Performance comparison table
+└── sim_08_performance_comparison.png  # Visualization plots
+```
+
+### Advanced Benchmarking
+
+#### Multi-Batch-Size Benchmarking
+
+Test both latency (batch_size=1) and throughput (larger batches):
+
+```bash
+python3 benchmark_gnn.py \
+    --model-path logs/model/sim_08_best_model.pt \
+    --data-path cplantbox/data/sim_08/phloem_simulation.h5 \
+    --batch-sizes 1 2 4 8 16 \
+    --output-dir benchmarks
+```
+
+**Output:**
+- Latency metrics for batch_size=1
+- Throughput metrics for batch_size=2, 4, 8, 16
+- Speedup analysis relative to batch_size=1
+
+#### Custom Data Prefix
+
+Override auto-detection of data prefix:
+
+```bash
+python3 compare_performance.py \
+    --cplantbox-timing cplantbox/data/sim_08/phloem_timing.csv \
+    --gnn-timing benchmarks/sim_08_gnn_latency.csv \
+    --data-prefix my_experiment \
+    --output-dir comparison
+```
+
+### Benchmark Options
+
+#### GNN Benchmark (`benchmark_gnn.py`)
+
+```bash
+python3 benchmark_gnn.py \
+    --model-path <path_to_model.pt> \
+    --data-path <path_to_h5_file_or_dir> \
+    --output-dir benchmarks \
+    --batch-sizes 1 4 8 16 \     # Multiple batch sizes for latency + throughput
+    --warmup 5 \                  # Warmup iterations (default: 5)
+    --cpu                         # Force CPU (for CPU vs GPU comparison)
+```
+
+**Key Features:**
+- **Latency measurement**: Uses batch_size=1 for per-graph timing
+- **Throughput measurement**: Uses larger batch sizes for batched processing efficiency
+- **GPU synchronization**: Automatic CUDA synchronization for accurate GPU timing
+- **Same code path**: Uses `benchmark_model_inference()` from `train.py` (same as evaluation)
+- **Auto-prefix**: Extracts data prefix from `--data-path` (e.g., `sim_08` from `data/sim_08/`)
+
+#### Performance Comparison (`compare_performance.py`)
+
+```bash
+python3 compare_performance.py \
+    --cplantbox-timing <path_to_csv> \
+    --gnn-timing <path_to_csv> \
+    --output-dir comparison \
+    --data-prefix <prefix> \      # Optional, auto-detects from paths
+    --plot                        # Generate visualization plots
+```
+
+**Key Features:**
+- **Graph size normalization**: Time per node/edge for fair comparison
+- **Auto-prefix detection**: Extracts prefix from parent directory name
+- **CSV-only workflow**: No HDF5 dependency (graph sizes in timing CSV)
+- **Speedup analysis**: Absolute and normalized speedup metrics
+
+### Output Files
+
+**CPlantBox Timing** (`phloem_timing.csv`):
+```csv
+step,time_s,nodes,edges
+0,0.156,245,312
+1,0.154,245,312
+...
+```
+
+**GNN Latency** (`sim_08_gnn_latency.csv`):
+```csv
+batch_idx,time_ms,nodes,edges
+0,5.123,245.3,312.7
+1,5.087,243.1,310.2
+...
+```
+
+**GNN Throughput** (`sim_08_gnn_throughput_bs4.csv`):
+```csv
+batch_idx,time_ms,batch_size,graphs_in_batch,nodes,edges
+0,18.234,4,4,245.3,312.7
+1,17.987,4,4,243.1,310.2
+...
+```
+
+**Benchmark Summary** (`sim_08_benchmark_summary.csv`):
+```csv
+batch_size,latency_mean_ms,latency_median_ms,throughput_graphs_per_sec,...
+1,5.12,5.08,195.3,...
+4,4.51,4.48,221.7,...
+8,4.23,4.21,237.1,...
+```
+
+**Comparison Summary** (`sim_08_summary.csv`):
+```csv
+Method,Mean_ms,Median_ms,Std_ms,Min_ms,Max_ms
+CPlantBox,156.23,154.87,3.21,152.45,162.11
+GNN,5.12,5.08,0.15,4.95,5.42
+```
+
+### Example Output
+
+```
+================================================================================
+PERFORMANCE COMPARISON: CPlantBox vs GNN
+================================================================================
+
+CPlantBox Phloem Solver:
+----------------------------------------
+  Total steps:              12
+  Mean time per step:       156.23 ms
+  Median time per step:     154.87 ms
+
+  Mean nodes:               245.3
+  Mean edges:               312.7
+  Time per node:            0.637 ms
+  Time per edge:            0.500 ms
+
+GNN Model:
+----------------------------------------
+  Total graphs:             12
+  Mean time per graph:      5.12 ms
+  Median time per graph:    5.08 ms
+
+  Mean nodes:               245.3
+  Mean edges:               312.7
+  Time per node:            0.021 ms
+  Time per edge:            0.016 ms
+
+Speedup Analysis:
+----------------------------------------
+  GNN is 30.5x faster (mean time)
+  GNN is 30.2x faster (median time)
+  GNN is 30.2x faster (per node)
+  GNN is 31.1x faster (per edge)
+
+================================================================================
+```
+
+### Multi-Batch-Size Benchmark Output
+
+```
+======================================================================
+Testing with batch_size = 1
+======================================================================
+Mode: LATENCY (per-graph timing)
+Benchmarking: 100%|████████████| 100/100 [00:30<00:00,  3.33it/s]
+
+Latency Results:
+  Mean:    5.123 ms
+  Median:  5.087 ms
+  Std:     0.152 ms
+
+======================================================================
+Testing with batch_size = 4
+======================================================================
+Mode: THROUGHPUT (batched processing)
+Benchmarking: 100%|████████████| 25/25 [00:10<00:00,  2.50it/s]
+
+Throughput Results:
+  Graphs/sec:        221.7
+  Time per graph:    4.51 ms (speedup: 1.14x vs BS=1)
+
+...
+
+BENCHMARK SUMMARY
+======================================================================
+
+Throughput (batched processing):
+  Batch Size   Graphs/sec      Time/graph (ms)    Speedup vs BS=1
+----------------------------------------------------------------------
+  1            195.30          5.123              1.00x
+  4            221.73          4.510              1.14x
+  8            237.12          4.217              1.21x
+  16           243.89          4.100              1.25x
+
+Output directory: benchmarks
+  - sim_08_gnn_latency.csv           (per-graph latency, batch_size=1)
+  - sim_08_gnn_throughput_bs*.csv    (throughput for each batch size)
+  - sim_08_benchmark_summary.csv     (consolidated results)
+======================================================================
+```
+
+### Why Timing in train.py?
+
+The GNN benchmark uses `benchmark_model_inference()` from `train.py`, which:
+
+1. **Measures the same code path** used during training/evaluation
+2. **Reuses existing infrastructure** (no code duplication)
+3. **Automatically stays in sync** with code changes
+4. **More accurate** - captures real-world performance including data loading
+
+This is superior to creating a separate benchmark script because any changes to the model automatically flow through to the benchmark.
+
+### Understanding Results
+
+**Key Metrics:**
+
+1. **Latency** (batch_size=1): Time to process a single graph
+   - Best for real-time/interactive applications
+   - Shows per-graph overhead
+
+2. **Throughput** (batch_size>1): Graphs processed per second
+   - Best for batch processing applications
+   - Shows efficiency gains from batching
+
+3. **Normalized metrics**: Time per node/edge
+   - Fair comparison regardless of graph size
+   - Accounts for structural complexity
+
+4. **Speedup factor**: CPlantBox_time / GNN_time
+   - Both absolute and normalized
+   - Quantifies performance improvement
+
+### Tips for Fair Comparison
+
+1. **Use same simulation data**: Run CPlantBox first, then benchmark GNN on saved HDF5
+2. **Consider graph size**: Always compare normalized metrics (per-node/per-edge)
+3. **Multiple runs**: Run benchmarks several times to account for variance
+4. **Warmup included**: Scripts include warmup iterations to avoid cold-start bias
+5. **Device matters**: Note whether GNN runs on CPU or GPU in comparisons
+6. **Batch size**: Use batch_size=1 for latency, larger for throughput comparisons
+7. **Data prefix**: Consistent naming makes organizing multi-simulation results easy
+
+### Metrics Logging
+
+Training and evaluation automatically log detailed metrics:
+
+**Epoch-Level Metrics** (`sim_08_metrics.csv`):
+- Loss components (MSE, physics residual, IC, BC)
+- Physics metrics (S_ST RMSE, J_ax MSE, divJ correlation, etc.)
+- Learning rate, epoch time
+
+**Batch-Level Metrics** (`sim_08_batch_metrics.csv`):
+- Per-batch physics residuals
+- Includes epoch and batch_idx for traceability
+
+Example epoch metrics:
+```csv
+epoch,learning_rate,train_loss,train_mse,train_S_ST_rmse,train_J_ax_mse,val_divJ_correlation,...
+1,0.003,0.042,0.0015,0.0123,0.0089,0.987,...
+2,0.003,0.038,0.0012,0.0098,0.0067,0.991,...
+```
+
+### Troubleshooting
+
+**Missing graph size data:**
+- `sim_phloem_flow.py` automatically saves nodes/edges in `phloem_timing.csv`
+- No need for separate HDF5 file in comparison
+
+**Out of memory (GPU):**
+- Use `--cpu` flag for GNN benchmark
+- Or reduce batch size with `--batch-sizes 1 2 4`
+
+**Model loading errors:**
+- Ensure model checkpoint matches the current `ModelConfig`
+- Check model was trained with compatible hyperparameters
+- Verify scaler objects are saved in checkpoint
+
+**Inconsistent file naming:**
+- All files should have data prefix (e.g., `sim_08_*`)
+- If missing, check `--data-path` argument format
+- Prefix extracted from parent directory name automatically
+
+**Batch throughput slower than expected:**
+- Check GPU utilization (`nvidia-smi`)
+- Try different batch sizes to find optimal
+- Ensure CUDA is available (`torch.cuda.is_available()`)

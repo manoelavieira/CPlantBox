@@ -1,23 +1,25 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import time
+
+import pandas as pd
 
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torch_scatter import scatter_mean
-
 from typing import Tuple, Optional
 
 from model.physics import log_physics_values
 from model.config import ModelConfig
 from model.physics import physics_residual, physics_residual_operator, physics_residual_operator_analytical
+import training.utils as utils
+import training.logging as logging
 from .config import (
     TrainingConfig, TrainingState, TrainingMetrics, ModelSetup,
     LossType, PhysicsMetrics, PhysicsErrorMetrics, LossConfig, LossResult, EpochResult
 )
 
-import training.utils as utils
-import training.logging as logging
 
 EPSILON = 1e-12
 
@@ -152,6 +154,8 @@ def compute_physics_residual_step(
     model_output,
     phase: str = None,
     use_analytical_residual: bool = False,
+    epoch: int = None,
+    batch_idx: int = None,
 ) -> Tuple[torch.Tensor, Optional[PhysicsMetrics], Optional[PhysicsErrorMetrics]]:
     """
     Unified physics residual computation for train/eval.
@@ -165,6 +169,8 @@ def compute_physics_residual_step(
         model_output: Model output (tensor or dict) from forward pass
         phase: Training phase ('train', 'val', 'test') for logging
         use_analytical_residual: If True, use analytical residual for operator model
+        epoch: Current epoch number (for metrics logging)
+        batch_idx: Current batch index (for metrics logging)
 
     Returns:
         Tuple of (phys_res_scalar, PhysicsMetrics|None, PhysicsErrorMetrics|None)
@@ -180,16 +186,16 @@ def compute_physics_residual_step(
     if is_operator_model:
         if use_analytical_residual:
             phys_res, phys_res_dict, phys_errors = physics_residual_operator_analytical(
-                model_output, data, phase=phase
+                model_output, data, phase=phase, epoch=epoch, batch_idx=batch_idx
             )
         else:
             phys_res, phys_res_dict, phys_errors = physics_residual_operator(
-                model_output, data, phase=phase
+                model_output, data, phase=phase, epoch=epoch, batch_idx=batch_idx
             )
     else:
         # NNConv model: model_output is a tensor
         phys_res, phys_res_dict, phys_errors = physics_residual(
-            model_output, data, phase=phase
+            model_output, data, phase=phase, epoch=epoch, batch_idx=batch_idx
         )
 
     # Reduce to scalar if needed
@@ -696,13 +702,17 @@ def train_epoch(
         if loss_config.loss_type == LossType.DATA_ONLY:
             phys_res = torch.tensor(0.0, device=pred.device)
             # Log physics values for analysis and get metrics for terminal display
-            phys_res_metrics, phys_res_errors = log_physics_values(model_output, data, phase='train')
+            phys_res_metrics, phys_res_errors = log_physics_values(
+                model_output, data, phase='train', epoch=epoch, batch_idx=batch_idx
+            )
         else:
             phys_res, phys_res_metrics, phys_res_errors = compute_physics_residual_step(
                 data=data,
                 model_output=model_output,
                 phase='train',
-                use_analytical_residual=loss_config.use_analytical_residual
+                use_analytical_residual=loss_config.use_analytical_residual,
+                epoch=epoch,
+                batch_idx=batch_idx
             )
 
         # Compute loss and metrics (no physics scaling needed)
@@ -1114,13 +1124,17 @@ def eval_model(
             if loss_config.loss_type == LossType.DATA_ONLY:
                 phys_res = torch.tensor(0.0, device=pred.device)
                 # Log physics values for analysis and get metrics for terminal display
-                phys_res_metrics, phys_res_errors = log_physics_values(model_output, data, phase=phase)
+                phys_res_metrics, phys_res_errors = log_physics_values(
+                    model_output, data, phase=phase, epoch=epoch, batch_idx=batch_idx
+                )
             else:
                 phys_res, phys_res_metrics, phys_res_errors = compute_physics_residual_step(
                     data=data,
                     model_output=model_output,
                     phase=phase,
-                    use_analytical_residual=loss_config.use_analytical_residual
+                    use_analytical_residual=loss_config.use_analytical_residual,
+                    epoch=epoch,
+                    batch_idx=batch_idx
                 )
 
             # Compute loss and metrics (no physics scaling needed)
@@ -1172,3 +1186,175 @@ def eval_model(
         torch.cuda.empty_cache()
 
     return EpochResult.from_totals(totals)
+
+
+def benchmark_model_inference(
+        model: nn.Module,
+        loader: DataLoader,
+        device: torch.device,
+        warmup: int = 5,
+        save_path: Optional[str] = None,
+    ) -> dict:
+    """Benchmark model inference performance.
+
+    Measures latency (time per graph) and throughput (graphs per second) for
+    model inference. This is the recommended way to measure GNN performance
+    as it uses the same code path as training/evaluation.
+
+    Args:
+        model: The neural network model to benchmark
+        loader: DataLoader containing test data
+        device: Device to run inference on
+        warmup: Number of warmup batches before measurement
+        save_path: Optional path to save detailed timing results (CSV)
+
+    Returns:
+        Dictionary with benchmark statistics:
+            - 'latency_mean_ms': Mean time per graph (ms)
+            - 'latency_median_ms': Median time per graph (ms)
+            - 'latency_std_ms': Standard deviation (ms)
+            - 'throughput_graphs_per_sec': Average graphs per second
+            - 'total_graphs': Total number of graphs processed
+            - 'mean_nodes_per_graph': Average number of nodes
+            - 'mean_edges_per_graph': Average number of edges
+            - 'time_per_node_ms': Mean time per node
+            - 'time_per_edge_ms': Mean time per edge
+    """
+    model.eval()
+    model.to(device)
+
+    print(f"\n{'='*70}")
+    print("GNN Model Inference Benchmark")
+    print(f"{'='*70}")
+    print(f"Device: {device}")
+    print(f"Warmup batches: {warmup}")
+
+    # Warmup phase
+    print("\nWarmup phase...")
+    with torch.no_grad():
+        for i, data in enumerate(loader):
+            if i >= warmup:
+                break
+            data = utils.prepare_model_inputs(data, model, is_training=False)
+            data = data.to(device)
+            _ = run_forward(model, data)
+
+    # Synchronize before starting measurement
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+    # Measurement phase
+    print("Measuring inference performance...")
+
+    graph_timings = []
+    total_nodes = 0
+    total_edges = 0
+    total_graphs = 0
+
+    with torch.no_grad():
+        for batch_idx, data in enumerate(loader):
+            data = utils.prepare_model_inputs(data, model, is_training=False)
+            data = data.to(device)
+
+            # Count graphs and sizes
+            if hasattr(data, 'batch'):
+                n_graphs = data.batch.max().item() + 1
+            else:
+                n_graphs = 1
+
+            num_nodes = data.node_feat.size(0)
+            num_edges = data.edge_index.size(1)
+
+            total_graphs += n_graphs
+            total_nodes += num_nodes
+            total_edges += num_edges
+
+            # Time the forward pass
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+
+            t0 = time.perf_counter()
+            _ = run_forward(model, data)
+
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+
+            t1 = time.perf_counter()
+
+            batch_time_ms = (t1 - t0) * 1000
+            time_per_graph_ms = batch_time_ms / n_graphs
+
+            # Record per-graph timing
+            for _ in range(n_graphs):
+                graph_timings.append({
+                    'batch_idx': batch_idx,
+                    'time_ms': time_per_graph_ms,
+                    'nodes': num_nodes / n_graphs,
+                    'edges': num_edges / n_graphs,
+                })
+
+            if (batch_idx + 1) % 10 == 0:
+                print(f"  Processed {batch_idx + 1} batches ({total_graphs} graphs)...")
+
+    # Compute statistics
+    df_timings = pd.DataFrame(graph_timings)
+
+    mean_time_ms = df_timings['time_ms'].mean()
+    median_time_ms = df_timings['time_ms'].median()
+    std_time_ms = df_timings['time_ms'].std()
+    min_time_ms = df_timings['time_ms'].min()
+    max_time_ms = df_timings['time_ms'].max()
+
+    total_time_s = df_timings['time_ms'].sum() / 1000
+    throughput = total_graphs / total_time_s if total_time_s > 0 else 0
+
+    mean_nodes = df_timings['nodes'].mean()
+    mean_edges = df_timings['edges'].mean()
+
+    time_per_node_ms = mean_time_ms / mean_nodes if mean_nodes > 0 else 0
+    time_per_edge_ms = mean_time_ms / mean_edges if mean_edges > 0 else 0
+
+    # Print summary
+    print("\n" + "="*70)
+    print("BENCHMARK RESULTS")
+    print("="*70)
+    print(f"Total graphs:              {total_graphs}")
+    print(f"Total time:                {total_time_s:.3f} s")
+    print(f"\nLatency (per graph):")
+    print(f"  Mean:                    {mean_time_ms:.3f} ms")
+    print(f"  Median:                  {median_time_ms:.3f} ms")
+    print(f"  Std dev:                 {std_time_ms:.3f} ms")
+    print(f"  Min:                     {min_time_ms:.3f} ms")
+    print(f"  Max:                     {max_time_ms:.3f} ms")
+    print(f"\nThroughput:                {throughput:.2f} graphs/sec")
+    print(f"\nGraph size:")
+    print(f"  Mean nodes:              {mean_nodes:.1f}")
+    print(f"  Mean edges:              {mean_edges:.1f}")
+    print(f"\nNormalized performance:")
+    print(f"  Time per node:           {time_per_node_ms:.4f} ms")
+    print(f"  Time per edge:           {time_per_edge_ms:.4f} ms")
+    print("="*70)
+
+    # Save detailed results if requested
+    if save_path:
+        from pathlib import Path
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        df_timings.to_csv(save_path, index=False)
+        print(f"\nDetailed timing results saved to: {save_path}")
+
+    return {
+        'latency_mean_ms': mean_time_ms,
+        'latency_median_ms': median_time_ms,
+        'latency_std_ms': std_time_ms,
+        'latency_min_ms': min_time_ms,
+        'latency_max_ms': max_time_ms,
+        'throughput_graphs_per_sec': throughput,
+        'total_graphs': total_graphs,
+        'total_time_s': total_time_s,
+        'mean_nodes_per_graph': mean_nodes,
+        'mean_edges_per_graph': mean_edges,
+        'time_per_node_ms': time_per_node_ms,
+        'time_per_edge_ms': time_per_edge_ms,
+    }
+

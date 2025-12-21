@@ -11,6 +11,7 @@ import pandas as pd
 import visualisation.vtk_plot as vp
 import matplotlib.pyplot as plt
 import argparse
+import time
 
 from functional.xylem_flux import XylemFluxPython
 from functional.phloem_flux import PhloemFluxPython
@@ -95,12 +96,12 @@ hm.read_phloem_parameters(filename=path+"plant_sucrose/phloem_parameters2025")
 # list_data = hm.get_phloem_data_list() # option of data that can be obtained from the phloem model
 # hm.write_phloem_parameters(filename='phloem_parameters')
 
-time = []
+time_list = []
 cumulAssimilation = 0.
 cumulTranspiration = 0.
 Q_Rm_is, Q_Gr_is, Q_Exud_is, Q_Water_is = [], [], [], []
 
-print("Entering simulation loop...")
+print("Entering simulation loop")
 """ Simulation loop """
 for i in range(N):
     # Create output directory if saving is enabled
@@ -126,7 +127,7 @@ for i in range(N):
     es = hm.get_es(weatherData_i['Tair'])
     ea = es * weatherData_i['RH']
 
-    print("Solve: Plant transpiration and photosynthesis...")
+    print("Solve: Plant transpiration and photosynthesis")
     hm.solve(sim_time=plant_age, rsx=sx, cells=True,
             ea=ea, es=es,
             PAR=weatherData_i['PAR'],
@@ -134,11 +135,27 @@ for i in range(N):
             verbose=0)
 
     """ Plant inner carbon balance """
-    print("Solve: Phloem flow...")
+    print("Solve: Phloem flow")
     os.makedirs(phloem_dir, exist_ok=True)
     phloem_file = f"{phloem_dir}/phloem_{i:02d}.txt"
 
+    t0 = time.perf_counter()
     hm.solve_phloem_flow(plant_age, dt, weatherData_i['Tair'], unit=1, outputfile=phloem_file)
+    t1 = time.perf_counter()
+    phloem_step_s = t1 - t0
+
+    # Get graph size information
+    nodes = hm.get_nodes()
+    num_nodes = len(nodes)
+    # Get number of segments (edges) from the plant
+    segments = plant.getSegments()
+    num_edges = len(segments)
+
+    # Save time taken for phloem step with graph size info
+    with open(f"{phloem_dir}/phloem_timing.csv", "a") as timing_file:
+        if i == 0:
+            timing_file.write("step,time_s,nodes,edges\n")
+        timing_file.write(f"{i},{phloem_step_s},{num_nodes},{num_edges}\n")
 
     # Save all simulation data in HDF5 format
     hm.save_simulation_data(
@@ -152,7 +169,6 @@ for i in range(N):
     )
 
     """ Post processing """
-    print("Post processing...")
     cumulAssimilation  += np.sum(hm.get_net_assimilation())  * dt
     cumulTranspiration += np.sum(hm.get_transpiration()) * dt
 
@@ -176,14 +192,15 @@ for i in range(N):
     print("cumulative: transpiration {:5.2e} [cm3]\tnet assimilation {:5.2e} [mol]".format(cumulTranspiration, cumulAssimilation))
     print("sucrose concentration in sieve tube (mol ml-1):\n\tmean {:.2e}\tmin  {:5.2e}\tmax  {:5.2e}".format(np.mean(C_ST), min(C_ST), max(C_ST)))
     print("aggregated sink repartition at last time step (%) :\n\tRm   {:5.1f}\tGr   {:5.1f}\tExud {:5.1f}".format(Q_Rm_i/Q_out_i*100,  Q_Gr_i/Q_out_i*100,Q_Exud_i/Q_out_i*100))
-    print("total aggregated sink repartition (%) :\n\tRm   {:5.1f}\tGr   {:5.1f}\tExud {:5.1f}".format(Q_Rm/Q_out*100, Q_Gr/Q_out*100, Q_Exud/Q_out*100))
+    print("total aggregated sink repartition (%) :\n\tRm   {:5.1f}\tGr   {:5.1f}\tExud {:5.1f}\n".format(Q_Rm/Q_out*100, Q_Gr/Q_out*100, Q_Exud/Q_out*100))
 
     # Convert plant_age (in days) to time of day for plotting
     time_of_day = plant_age % 1  # Get fractional part (time of day)
     hours = int(time_of_day * 24)
     minutes = int((time_of_day * 24 - hours) * 60)
     seconds = int(((time_of_day * 24 - hours) * 60 - minutes) * 60)
-    time.append(datetime.strptime(f'{hours:02d}:{minutes:02d}:{seconds:02d}', '%H:%M:%S'))
+    time_list.append(datetime.strptime(f'{hours:02d}:{minutes:02d}:{seconds:02d}', '%H:%M:%S'))
+    Q_Rm_is.append(Q_Rm_i/dt)
     Q_Rm_is.append(Q_Rm_i/dt)
     Q_Exud_is.append(Q_Exud_i/dt)
     Q_Gr_is.append(Q_Gr_i/dt)
@@ -191,13 +208,13 @@ for i in range(N):
 
 # """ Plot results """
 # fig, axs = plt.subplots(2,2)
-# axs[0,0].plot(time, Q_Rm_is)
+# axs[0,0].plot(time_list, Q_Rm_is)
 # axs[0,0].set(xlabel="Time [hh:mm]", ylabel='Total respiration rate (mol/day)')
-# axs[1,0].plot(time, Q_Gr_is, 'tab:red')
+# axs[1,0].plot(time_list, Q_Gr_is, 'tab:red')
 # axs[1,0].set(xlabel="Time [hh:mm]", ylabel='Total growth rate (mol/day)')
-# axs[0,1].plot(time, Q_Exud_is , 'tab:brown')
+# axs[0,1].plot(time_list, Q_Exud_is , 'tab:brown')
 # axs[0,1].set(xlabel="Time [hh:mm]", ylabel='Total exudation\nrate (mol/day)')
-# axs[1,1].plot(time, Q_Water_is , 'tab:brown')
+# axs[1,1].plot(time_list, Q_Water_is , 'tab:brown')
 # axs[1,1].set(xlabel="Time [hh:mm]", ylabel='Total transpiration\nrate (cm3/day)')
 
 # for ax in axs.flatten():

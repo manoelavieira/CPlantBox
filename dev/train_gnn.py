@@ -42,6 +42,16 @@ def train_single_fold(config, fold_idx=None, total_folds=None):
         log_path=config.physics_save_path
     )
 
+    # Configure metrics logging with data-prefixed filename for batch-level metrics
+    if config.enable_metrics_logging:
+        # Use pattern: {data_prefix}_batch_metrics.csv for batch-level details
+        # The epoch-level metrics are saved to {data_prefix}_metrics.csv separately
+        batch_metrics_filename = config.metrics_save_path.replace('_metrics.csv', '_batch_metrics.csv')
+        physics.set_metrics_logging(
+            enable=True,
+            log_path=batch_metrics_filename
+        )
+
     # Setup environment
     device = setup.setup_environment(config)
 
